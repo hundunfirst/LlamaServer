@@ -71,15 +71,15 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("思考模式", style = MaterialTheme.typography.bodyLarge)
                 Text(
-                    if (settings.thinkEnabled) "开启：展示🧠思考过程（可折叠）"
-                    else "关闭：抑制思考直接作答，速度优先（少数模型仍会思考）",
+                    if (settings.thinkEnabled) "开启：展示🧠思考过程（可折叠，立即生效）"
+                    else "关闭：抑制思考直接作答，速度优先（立即生效，少数模型仍会思考）",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             Switch(
                 checked = settings.thinkEnabled,
-                onCheckedChange = { v -> vm.updateSettings { it.copy(thinkEnabled = v) } }
+                onCheckedChange = { v -> vm.updateThinkEnabled(v) }
             )
         }
 
@@ -92,35 +92,35 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("云端模型渠道", style = MaterialTheme.typography.bodyLarge)
                 Text(
-                    "开启后聊天走云端 OpenAI 兼容接口，不依赖本机服务",
+                    "开启后聊天走云端 OpenAI 兼容接口，不依赖本机服务（改动立即生效，无需点保存）",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             Switch(
                 checked = settings.chatCloudEnabled,
-                onCheckedChange = { v -> vm.updateSettings { it.copy(chatCloudEnabled = v) } }
+                onCheckedChange = { v -> vm.updateCloudSettings { it.copy(chatCloudEnabled = v) } }
             )
         }
         if (settings.chatCloudEnabled) {
             OutlinedTextField(
                 value = settings.chatCloudUrl,
-                onValueChange = { v -> vm.updateSettings { it.copy(chatCloudUrl = v) } },
-                label = { Text("接口地址（如 https://api.deepseek.com）") },
+                onValueChange = { v -> vm.updateCloudSettings { it.copy(chatCloudUrl = v) } },
+                label = { Text("接口地址（如 https://api.xiaomimimo.com）") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
             OutlinedTextField(
                 value = settings.chatCloudKey,
-                onValueChange = { v -> vm.updateSettings { it.copy(chatCloudKey = v) } },
+                onValueChange = { v -> vm.updateCloudSettings { it.copy(chatCloudKey = v) } },
                 label = { Text("API Key") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
             OutlinedTextField(
                 value = settings.chatCloudModel,
-                onValueChange = { v -> vm.updateSettings { it.copy(chatCloudModel = v) } },
-                label = { Text("模型名（如 deepseek-chat）") },
+                onValueChange = { v -> vm.updateCloudSettings { it.copy(chatCloudModel = v) } },
+                label = { Text("模型名（如 mimo-v2.6-pro）") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -130,6 +130,7 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 listOf(
+                    "MiMo" to "https://api.xiaomimimo.com",
                     "DeepSeek" to "https://api.deepseek.com",
                     "通义" to "https://dashscope.aliyuncs.com/compatible-mode/v1",
                     "智谱" to "https://open.bigmodel.cn/api/paas/v4",
@@ -137,7 +138,7 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 ).forEach { (label, url) ->
                     FilterChip(
                         selected = settings.chatCloudUrl.trim().removeSuffix("/") == url,
-                        onClick = { vm.updateSettings { it.copy(chatCloudUrl = url) } },
+                        onClick = { vm.updateCloudSettings { it.copy(chatCloudUrl = url) } },
                         label = { Text(label, style = MaterialTheme.typography.labelSmall) }
                     )
                 }
@@ -169,7 +170,7 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clickable {
-                                                vm.updateSettings { it.copy(chatCloudModel = m) }
+                                                vm.updateCloudSettings { it.copy(chatCloudModel = m) }
                                                 showModelPicker = false
                                             }
                                             .padding(vertical = 10.dp),

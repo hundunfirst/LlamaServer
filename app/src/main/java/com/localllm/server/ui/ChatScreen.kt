@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -45,6 +46,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -60,6 +62,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.asImageBitmap
@@ -81,7 +84,8 @@ private sealed class Seg {
     data class Heading(val level: Int, val s: String) : Seg()
     data class ListBlock(val lines: List<String>) : Seg()
     data class Quote(val s: String) : Seg()
-    data class Table(val s: String) : Seg()
+    /** rows[0] 为表头，已剔除 |---|---| 分隔行 */
+    data class Table(val rows: List<List<String>>) : Seg()
 }
 
 private fun parseSegments(content: String): List<Seg> {
@@ -132,13 +136,21 @@ private fun parseBlocks(chunk: String, out: MutableList<Seg>) {
                 out.add(Seg.ListBlock(buf))
             }
             trimmed.startsWith("|") && trimmed.count { it == '|' } >= 2 -> {
-                val buf = StringBuilder()
+                val raw = mutableListOf<List<String>>()
                 while (i < lines.size && lines[i].trim().startsWith("|")) {
-                    if (buf.isNotEmpty()) buf.append('\n')
-                    buf.append(lines[i].trim())
+                    raw.add(
+                        lines[i].trim()
+                            .removePrefix("|")
+                            .removeSuffix("|")
+                            .split("|")
+                            .map { it.trim() }
+                    )
                     i++
                 }
-                out.add(Seg.Table(buf.toString()))
+                // 剔除分隔行（单元格全为 --- 或 :---:）
+                val sep = Regex("^:?-{2,}:?$")
+                val rows = raw.filterNot { r -> r.isNotEmpty() && r.all { c -> c.matches(sep) } }
+                if (rows.isNotEmpty()) out.add(Seg.Table(rows))
             }
             else -> {
                 val buf = StringBuilder(trimmed)
@@ -157,13 +169,153 @@ private fun parseBlocks(chunk: String, out: MutableList<Seg>) {
     }
 }
 
-/** 行内 Markdown：**加粗**、*斜体*、`等宽代码` */
+/** 匹配 '{' 的闭合 '}' 下标 */
+private fun matchBrace(s: String, start: Int): Int? {
+    var depth = 0
+    for (i in start until s.length) {
+        when (s[i]) {
+            '{' -> depth++
+            '}' -> { depth--; if (depth == 0) return i }
+        }
+    }
+    return null
+}
+
+private fun isSimpleExpr(s: String) = s.isNotBlank() && s.matches(Regex("^[A-Za-z0-9α-ωΑ-Ω.+-]+$"))
+
+private val LATEX_SYMBOLS = mapOf(
+    "times" to "×", "div" to "÷", "approx" to "≈", "pm" to "±", "mp" to "∓",
+    "cdot" to "·", "le" to "≤", "leq" to "≤", "ge" to "≥", "geq" to "≥",
+    "ne" to "≠", "neq" to "≠", "infty" to "∞", "int" to "∫", "sum" to "∑",
+    "prod" to "∏", "partial" to "∂", "nabla" to "∇", "in" to "∈", "notin" to "∉",
+    "subset" to "⊂", "cup" to "∪", "cap" to "∩", "forall" to "∀", "exists" to "∃",
+    "cdots" to "…", "ldots" to "…", "dots" to "…", "prime" to "′",
+    "alpha" to "α", "beta" to "β", "gamma" to "γ", "delta" to "δ", "epsilon" to "ε",
+    "theta" to "θ", "lambda" to "λ", "mu" to "μ", "pi" to "π", "rho" to "ρ",
+    "sigma" to "σ", "tau" to "τ", "phi" to "φ", "chi" to "χ", "psi" to "ψ",
+    "omega" to "ω", "Gamma" to "Γ", "Delta" to "Δ", "Theta" to "Θ", "Lambda" to "Λ",
+    "Sigma" to "Σ", "Phi" to "Φ", "Psi" to "Ψ", "Omega" to "Ω",
+    "degree" to "°", "perp" to "⊥", "parallel" to "∥", "angle" to "∠",
+    "rightarrow" to "→", "leftarrow" to "←", "Rightarrow" to "⇒", "Leftrightarrow" to "⇔"
+)
+
+private val SUP_CHARS = mapOf(
+    '0' to '⁰', '1' to '¹', '2' to '²', '3' to '³', '4' to '⁴',
+    '5' to '⁵', '6' to '⁶', '7' to '⁷', '8' to '⁸', '9' to '⁹',
+    '+' to '⁺', '-' to '⁻', '(' to '⁽', ')' to '⁾', 'n' to 'ⁿ', 'x' to 'ˣ', 'i' to 'ⁱ'
+)
+private val SUB_CHARS = mapOf(
+    '0' to '₀', '1' to '₁', '2' to '₂', '3' to '₃', '4' to '₄',
+    '5' to '₅', '6' to '₆', '7' to '₇', '8' to '₈', '9' to '₉',
+    '+' to '₊', '-' to '₋', '(' to '₍', ')' to '₎',
+    'a' to 'ₐ', 'e' to 'ₑ', 'h' to 'ₕ', 'k' to 'ₖ', 'l' to 'ₗ',
+    'm' to 'ₘ', 'n' to 'ₙ', 'o' to 'ₒ', 'p' to 'ₚ', 'r' to 'ᵣ',
+    's' to 'ₛ', 't' to 'ₜ', 'u' to 'ᵤ', 'v' to 'ᵥ', 'x' to 'ₓ'
+)
+
+private fun mapScript(content: String, sup: Boolean): String? {
+    val table = if (sup) SUP_CHARS else SUB_CHARS
+    val out = StringBuilder(content.length)
+    for (c in content) {
+        if (c == ' ') continue
+        out.append(table[c] ?: return null)
+    }
+    return out.toString()
+}
+
+/**
+ * LaTeX → Unicode 轻量转换：模型习惯把算式写成 $$...$$/\frac/\sqrt 等，
+ * App 不做完整 LaTeX 渲染，这里在渲染前转成 Unicode，历史消息同样受益。
+ * 仅作用于正文/标题/列表/引用/表格单元格，代码块内容不转换。
+ */
+private fun latexToUnicode(src: String): String {
+    if ('\\' !in src && '$' !in src) return src
+    val sb = StringBuilder(src.length)
+    var i = 0
+    while (i < src.length) {
+        val c = src[i]
+        when {
+            c == '$' -> i++ // $ / $$ 定界符直接去掉
+            c == '\\' -> {
+                var j = i + 1
+                while (j < src.length && src[j].isLetter()) j++
+                val name = if (j > i + 1) src.substring(i + 1, j) else ""
+                if (name.isEmpty()) {
+                    // \{ \} \$ \_ 等转义：保留其后那个字符
+                    if (i + 1 < src.length) { sb.append(src[i + 1]); i += 2 } else i++
+                } else {
+                    // 只有真正读到 {…} 参数才推进 k，否则会把命令后的空格吞掉
+                    var k = j
+                    val args = mutableListOf<String>()
+                    while (true) {
+                        var m = k
+                        while (m < src.length && src[m] == ' ') m++
+                        if (m >= src.length || src[m] != '{') break
+                        val end = matchBrace(src, m) ?: break
+                        args.add(src.substring(m + 1, end))
+                        k = end + 1
+                    }
+                    val proc = args.map { latexToUnicode(it) }
+                    when (name) {
+                        "frac", "dfrac", "tfrac", "cfrac" -> if (proc.size >= 2) {
+                            sb.append(
+                                if (isSimpleExpr(proc[0]) && isSimpleExpr(proc[1])) "${proc[0]}/${proc[1]}"
+                                else "(${proc[0]})/(${proc[1]})"
+                            )
+                        }
+                        "sqrt" -> if (proc.isNotEmpty()) {
+                            sb.append(if (isSimpleExpr(proc[0])) "√${proc[0]}" else "√(${proc[0]})")
+                        }
+                        "text", "mathrm", "mbox", "boxed", "operatorname",
+                        "mathbf", "mathit", "boldsymbol", "textbf", "underline" ->
+                            proc.forEach { sb.append(it) }
+                        "left", "right", "displaystyle", "textstyle", "limits", "bigl", "bigr" -> Unit
+                        else -> {
+                            val sym = LATEX_SYMBOLS[name]
+                            when {
+                                sym != null -> { sb.append(sym); proc.forEach { sb.append(it) } }
+                                proc.isNotEmpty() -> proc.forEach { sb.append(it) }
+                                else -> sb.append(name) // 未知无参命令：去掉反斜杠
+                            }
+                        }
+                    }
+                    // 无参数命令不能跳到 k（k 已越过命令名后的空格，会把空格吃掉）
+                    i = if (args.isEmpty()) j else k
+                }
+            }
+            c == '^' || c == '_' -> {
+                val sup = c == '^'
+                var k = i + 1
+                while (k < src.length && src[k] == ' ') k++
+                var content: String? = null
+                var end = k
+                if (k < src.length && src[k] == '{') {
+                    val e = matchBrace(src, k)
+                    if (e != null) { content = src.substring(k + 1, e); end = e + 1 }
+                } else if (k < src.length && src[k] != ' ' && src[k] != '$') {
+                    content = src.substring(k, k + 1); end = k + 1
+                }
+                if (content == null) { sb.append(c); i++ }
+                else {
+                    val inner = latexToUnicode(content)
+                    sb.append(mapScript(inner, sup) ?: (if (sup) "^($inner)" else "_($inner)"))
+                    i = end
+                }
+            }
+            else -> { sb.append(c); i++ }
+        }
+    }
+    return sb.toString()
+}
+
+/** 行内 Markdown：**加粗**、*斜体*、`等宽代码`（先做 LaTeX→Unicode 转换） */
 private fun inlineMd(s: String): androidx.compose.ui.text.AnnotatedString =
     androidx.compose.ui.text.buildAnnotatedString {
+        val text = latexToUnicode(s)
         val re = Regex("""(\*\*[^*\n]+\*\*|`[^`\n]+`|\*[^*\n]+\*)""")
         var last = 0
-        for (m in re.findAll(s)) {
-            append(s.substring(last, m.range.first))
+        for (m in re.findAll(text)) {
+            append(text.substring(last, m.range.first))
             val t = m.value
             when {
                 t.startsWith("**") -> withStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold)) {
@@ -182,7 +334,7 @@ private fun inlineMd(s: String): androidx.compose.ui.text.AnnotatedString =
             }
             last = m.range.last + 1
         }
-        if (last < s.length) append(s.substring(last))
+        if (last < text.length) append(text.substring(last))
     }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -345,8 +497,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             state = listState,
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
-                .padding(horizontal = 12.dp),
+                .weight(1f),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             if (messages.isEmpty()) {
@@ -463,7 +614,7 @@ private fun MessageBubble(
                 containerColor = if (isUser) MaterialTheme.colorScheme.primaryContainer
                 else MaterialTheme.colorScheme.surfaceVariant
             ),
-            modifier = Modifier.fillMaxWidth(0.88f)
+            modifier = Modifier.fillMaxWidth(if (isUser) 0.88f else 1f)
         ) {
             Column(Modifier.padding(8.dp)) {
                 Row(verticalAlignment = Alignment.Top) {
@@ -494,7 +645,7 @@ private fun MessageBubble(
                                 }
                                 if (thinkOpen) {
                                     Text(
-                                        msg.reasoning!!,
+                                        latexToUnicode(msg.reasoning!!),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.padding(top = 4.dp)
@@ -579,22 +730,10 @@ private fun MessageBubble(
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
-                                    is Seg.Table -> Column(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 4.dp)
-                                            .background(
-                                                MaterialTheme.colorScheme.surface,
-                                                RoundedCornerShape(8.dp)
-                                            )
-                                            .padding(8.dp)
-                                    ) {
-                                        Text(
-                                            seg.s,
-                                            fontFamily = FontFamily.Monospace,
-                                            fontSize = 12.sp
-                                        )
-                                    }
+                                    is Seg.Table -> MarkdownTable(
+                                        seg.rows,
+                                        modifier = Modifier.padding(vertical = 4.dp)
+                                    )
                                     is Seg.Code -> CodeBlock(seg.lang, seg.s)
                                 }
                             }
@@ -634,6 +773,62 @@ private fun MessageBubble(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(start = 4.dp, top = 2.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Markdown 表格：按列解析后用等权重行列渲染。
+ * 列宽按各列最长内容分配权重（下限 4、上限 40 字符），窄屏自动换行但列始终对齐。
+ */
+@Composable
+private fun MarkdownTable(rows: List<List<String>>, modifier: Modifier = Modifier) {
+    if (rows.isEmpty()) return
+    val cols = rows.maxOf { it.size }
+    val weights = remember(rows) {
+        (0 until cols).map { c ->
+            rows.maxOf { r -> r.getOrElse(c) { "" }.length }
+                .coerceIn(4, 40)
+                .toFloat()
+        }
+    }
+    val total = weights.sum().coerceAtLeast(1f)
+    val border = MaterialTheme.colorScheme.outlineVariant
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .border(0.5.dp, border, RoundedCornerShape(8.dp))
+    ) {
+        rows.forEachIndexed { ri, row ->
+            if (ri > 0) {
+                HorizontalDivider(thickness = 0.5.dp, color = border)
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        when {
+                            ri == 0 -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                            ri % 2 == 0 -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                            else -> androidx.compose.ui.graphics.Color.Transparent
+                        }
+                    )
+            ) {
+                repeat(cols) { ci ->
+                    val cell = row.getOrElse(ci) { "" }
+                    Text(
+                        inlineMd(cell),
+                        style = if (ri == 0) MaterialTheme.typography.labelMedium
+                        else MaterialTheme.typography.bodySmall,
+                        fontWeight = if (ri == 0) FontWeight.Bold else FontWeight.Normal,
+                        modifier = Modifier
+                            .weight(weights[ci] / total)
+                            .padding(horizontal = 6.dp, vertical = 5.dp)
                     )
                 }
             }

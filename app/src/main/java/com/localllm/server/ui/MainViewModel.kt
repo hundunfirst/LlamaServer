@@ -12,11 +12,13 @@ import com.localllm.server.core.ModelFile
 import com.localllm.server.core.ServerProcessManager
 import com.localllm.server.core.ServerService
 import com.localllm.server.core.ServerUiState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
 import java.io.File
@@ -344,7 +346,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val fetchingCloud: StateFlow<Boolean> = _fetchingCloud.asStateFlow()
 
     fun fetchCloudModels() {
-        var base = AppSettings.chatCloudUrl.trim().removeSuffix("/")
+        var base = _settings.value.chatCloudUrl.trim().removeSuffix("/")
         // 容错：粘贴了完整 chat/models 地址时自动截到基地址
         for (suffix in listOf("/v1/chat/completions", "/chat/completions", "/v1/models", "/models", "/v1")) {
             if (base.endsWith(suffix)) {
@@ -360,33 +362,70 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _fetchingCloud.value = true
         viewModelScope.launch {
             runCatching {
-                val urlStr = if (base.endsWith("/v1")) "$base/models" else "$base/v1/models"
-                val conn = URL(urlStr).openConnection() as HttpURLConnection
-                conn.connectTimeout = 10_000
-                conn.readTimeout = 15_000
-                val key = AppSettings.chatCloudKey
-                if (key.isNotBlank()) conn.setRequestProperty("Authorization", "Bearer $key")
-                try {
-                    val code = conn.responseCode
-                    val body = if (code in 200..299)
-                        conn.inputStream.bufferedReader().use { it.readText() }
-                    else
-                        throw IllegalStateException("HTTP $code")
-                    val data = org.json.JSONObject(body).optJSONArray("data") ?: org.json.JSONArray()
-                    (0 until data.length()).mapNotNull { i ->
-                        data.optJSONObject(i)?.optString("id")?.takeIf { it.isNotBlank() }
-                    }.distinct()
-                } finally {
-                    conn.disconnect()
+                // 主线程禁止网络 IO（NetworkOnMainThreadException），与 ChatClient 一致放 IO 调度器
+                withContext(Dispatchers.IO) {
+                    val urlStr = if (base.endsWith("/v1")) "$base/models" else "$base/v1/models"
+                    val conn = URL(urlStr).openConnection() as HttpURLConnection
+                    conn.connectTimeout = 10_000
+                    conn.readTimeout = 15_000
+                    val key = _settings.value.chatCloudKey.trim()
+                    if (key.isNotBlank()) {
+                        conn.setRequestProperty("Authorization", "Bearer $key")
+                        // MiMo 等服务商文档给出的另一种鉴权头
+                        conn.setRequestProperty("api-key", key)
+                    }
+                    try {
+                        val code = conn.responseCode
+                        if (code !in 200..299) {
+                            val errText = runCatching {
+                                conn.errorStream?.bufferedReader()?.use { it.readText() }
+                            }.getOrNull().orEmpty().take(300)
+                            throw IllegalStateException(
+                                if (errText.isBlank()) "HTTP $code" else "HTTP $code：$errText"
+                            )
+                        }
+                        val body = conn.inputStream.bufferedReader().use { it.readText() }
+                        val data = org.json.JSONObject(body).optJSONArray("data") ?: org.json.JSONArray()
+                        (0 until data.length()).mapNotNull { i ->
+                            data.optJSONObject(i)?.optString("id")?.takeIf { it.isNotBlank() }
+                        }.distinct()
+                    } finally {
+                        conn.disconnect()
+                    }
                 }
             }.onSuccess { list ->
                 if (list.isEmpty()) _actionError.value = "该接口未返回可用模型列表"
                 else _cloudModels.value = list
             }.onFailure { e ->
-                _actionError.value = "拉取模型失败：${e.message ?: e.javaClass.simpleName}（检查地址是否为服务商给出的 Base URL）"
+                val msg = e.message ?: e.javaClass.simpleName
+                _actionError.value = if (msg.contains("NetworkOnMainThread")) {
+                    "拉取模型失败：主线程网络错误（请反馈，本应已修复）"
+                } else {
+                    "拉取模型失败：$msg（检查地址是否为服务商 Base URL，如 https://api.xiaomimimo.com）"
+                }
             }
             _fetchingCloud.value = false
         }
+    }
+
+    /**
+     * 云端渠道即时生效：改内存态并立刻落盘。
+     * 聊天路由每次发送都直接读 AppSettings（磁盘），若只改 StateFlow 会与实际路由不一致
+     * ——表现为"开关关了聊天还走云端、重启后又变回开"。
+     */
+    fun updateCloudSettings(transform: (SettingsUiState) -> SettingsUiState) {
+        val s = transform(_settings.value)
+        _settings.value = s
+        AppSettings.chatCloudEnabled = s.chatCloudEnabled
+        AppSettings.chatCloudUrl = s.chatCloudUrl.trim()
+        AppSettings.chatCloudKey = s.chatCloudKey.trim()
+        AppSettings.chatCloudModel = s.chatCloudModel.trim()
+    }
+
+    /** 思考模式同理：每次发送现读 AppSettings.thinkEnabled，即改即存 */
+    fun updateThinkEnabled(value: Boolean) {
+        _settings.value = _settings.value.copy(thinkEnabled = value)
+        AppSettings.thinkEnabled = value
     }
 
     fun generateToken(): String {

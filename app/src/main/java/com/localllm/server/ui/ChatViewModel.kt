@@ -113,10 +113,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             var firstDeltaMs = 0L
             var serverStats: String? = null
             try {
+                val mathRule =
+                    "数学公式与计算过程用 Unicode 符号直接书写（√ × ÷ ≈ ± ≤ ≥ ² ³ ½，分数写成 a/b），" +
+                    "严禁使用 LaTeX 语法（不要出现 $$、\\frac、\\sqrt、\\times、\\text 等反斜杠命令和花括号）。"
                 val systemText = if (AppSettings.thinkEnabled) {
-                    "请始终用中文进行思考和回答。"
+                    "请始终用中文进行思考和回答。$mathRule"
                 } else {
-                    "请不要输出任何思考/推理过程，直接用中文给出最终答案。"
+                    "请不要输出任何思考/推理过程，直接用中文给出最终答案。$mathRule"
                 }
                 val history = _messages.value.dropLast(1)
                 val payloadMsgs = listOf(ChatClient.ChatMessage("system", systemText)) +
