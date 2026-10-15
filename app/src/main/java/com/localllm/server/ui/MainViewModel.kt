@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.net.HttpURLConnection
+import java.net.URL
 import java.io.File
 
 data class SettingsUiState(
@@ -332,6 +334,52 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         targetFiles.remove(id)
         _downloads.value = _downloads.value.filterNot { it.id == id }
         persistDownloads()
+    }
+
+    // ---- 云端渠道：拉取模型列表 ----
+    private val _cloudModels = MutableStateFlow<List<String>>(emptyList())
+    val cloudModels: StateFlow<List<String>> = _cloudModels.asStateFlow()
+
+    private val _fetchingCloud = MutableStateFlow(false)
+    val fetchingCloud: StateFlow<Boolean> = _fetchingCloud.asStateFlow()
+
+    fun fetchCloudModels() {
+        val base = AppSettings.chatCloudUrl.trim().removeSuffix("/")
+        if (base.isBlank()) {
+            _actionError.value = "请先填写云端接口地址"
+            return
+        }
+        if (_fetchingCloud.value) return
+        _fetchingCloud.value = true
+        viewModelScope.launch {
+            runCatching {
+                val urlStr = if (base.endsWith("/v1")) "$base/models" else "$base/v1/models"
+                val conn = URL(urlStr).openConnection() as HttpURLConnection
+                conn.connectTimeout = 10_000
+                conn.readTimeout = 15_000
+                val key = AppSettings.chatCloudKey
+                if (key.isNotBlank()) conn.setRequestProperty("Authorization", "Bearer $key")
+                try {
+                    val code = conn.responseCode
+                    val body = if (code in 200..299)
+                        conn.inputStream.bufferedReader().use { it.readText() }
+                    else
+                        throw IllegalStateException("HTTP $code")
+                    val data = org.json.JSONObject(body).optJSONArray("data") ?: org.json.JSONArray()
+                    (0 until data.length()).mapNotNull { i ->
+                        data.optJSONObject(i)?.optString("id")?.takeIf { it.isNotBlank() }
+                    }.distinct()
+                } finally {
+                    conn.disconnect()
+                }
+            }.onSuccess { list ->
+                if (list.isEmpty()) _actionError.value = "该接口未返回可用模型列表"
+                else _cloudModels.value = list
+            }.onFailure { e ->
+                _actionError.value = "拉取模型失败：${e.message}"
+            }
+            _fetchingCloud.value = false
+        }
     }
 
     fun generateToken(): String {

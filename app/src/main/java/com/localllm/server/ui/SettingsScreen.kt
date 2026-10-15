@@ -1,6 +1,9 @@
 package com.localllm.server.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -11,11 +14,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -35,8 +40,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val settings by vm.settings.collectAsStateWithLifecycle()
+    val cloudModels by vm.cloudModels.collectAsStateWithLifecycle()
+    val fetchingCloud by vm.fetchingCloud.collectAsStateWithLifecycle()
+    var showModelPicker by remember { mutableStateOf(false) }
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(
@@ -115,6 +124,68 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
+            // 服务商预设：一键填入地址
+            Text("常用服务商", style = MaterialTheme.typography.labelMedium)
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                listOf(
+                    "DeepSeek" to "https://api.deepseek.com",
+                    "通义" to "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "智谱" to "https://open.bigmodel.cn/api/paas/v4",
+                    "Kimi" to "https://api.moonshot.cn/v1"
+                ).forEach { (label, url) ->
+                    FilterChip(
+                        selected = settings.chatCloudUrl.trim().removeSuffix("/") == url,
+                        onClick = { vm.updateSettings { it.copy(chatCloudUrl = url) } },
+                        label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+                    )
+                }
+            }
+                Button(
+                    onClick = {
+                        vm.fetchCloudModels()
+                        showModelPicker = true
+                    },
+                    enabled = !fetchingCloud,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                if (fetchingCloud) {
+                    CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text("拉取中…")
+                } else Text("拉取该接口的模型列表")
+            }
+            cloudModels.let { list ->
+                if (list.isNotEmpty() && showModelPicker) {
+                    AlertDialog(
+                        onDismissRequest = { showModelPicker = false },
+                        title = { Text("选择模型（${list.size}）") },
+                        text = {
+                            LazyColumn {
+                                items(list) { m ->
+                                    Text(
+                                        m,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                vm.updateSettings { it.copy(chatCloudModel = m) }
+                                                showModelPicker = false
+                                            }
+                                            .padding(vertical = 10.dp),
+                                        color = if (m == settings.chatCloudModel)
+                                            MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            TextButton(onClick = { showModelPicker = false }) { Text("关闭") }
+                        }
+                    )
+                }
+            }
         }
 
         // ---- MCP 服务器（实验，stdio 型，llama-server 内置客户端） ----
