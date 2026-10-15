@@ -45,7 +45,8 @@ jobs:
             -DOPENCL_ICD_LOADER_HEADERS_DIR=$PWD/opencl-deps/OpenCL-Headers \
             -DCMAKE_INSTALL_PREFIX=$PWD/opencl-deps/icd-install
           cmake --build opencl-deps/icd-build
-          cmake --install opencl-deps/icd-install
+          # --install 要的是构建目录（含 cmake_install.cmake），不是 CMAKE_INSTALL_PREFIX
+          cmake --install opencl-deps/icd-build
 
       - name: Checkout pinned llama.cpp
         run: |
