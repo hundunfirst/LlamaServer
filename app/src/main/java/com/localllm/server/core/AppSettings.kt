@@ -8,8 +8,60 @@ object AppSettings {
 
     private lateinit var prefs: SharedPreferences
 
+    /** 云端渠道预设：一组可切换的 API 配置 */
+    data class CloudPreset(
+        val name: String,
+        val url: String,
+        val key: String,
+        val model: String
+    )
+
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        // 迁移：老的单渠道配置 → 预设列表（只跑一次）
+        if (cloudPresetsJson == "[]" && chatCloudUrl.isNotBlank()) {
+            saveCloudPresets(listOf(CloudPreset("当前配置", chatCloudUrl, chatCloudKey, chatCloudModel)))
+        }
+    }
+
+    /** 云端渠道预设列表 JSON：[{"name","url","key","model"}] */
+    var cloudPresetsJson: String
+        get() = prefs.getString("cloud_presets", "[]") ?: "[]"
+        set(value) = prefs.edit().putString("cloud_presets", value).apply()
+
+    fun loadCloudPresets(): List<CloudPreset> = runCatching {
+        val arr = org.json.JSONArray(cloudPresetsJson)
+        (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            CloudPreset(
+                name = o.optString("name"),
+                url = o.optString("url"),
+                key = o.optString("key"),
+                model = o.optString("model")
+            )
+        }
+    }.getOrDefault(emptyList())
+
+    fun saveCloudPresets(list: List<CloudPreset>) {
+        val arr = org.json.JSONArray()
+        list.forEach { p ->
+            arr.put(
+                org.json.JSONObject()
+                    .put("name", p.name)
+                    .put("url", p.url)
+                    .put("key", p.key)
+                    .put("model", p.model)
+            )
+        }
+        cloudPresetsJson = arr.toString()
+    }
+
+    /** 激活某个预设：写入当前渠道字段（即改即存，聊天/体检/拉取都读这里） */
+    fun activateCloudPreset(p: CloudPreset) {
+        chatCloudEnabled = true
+        chatCloudUrl = p.url.trim()
+        chatCloudKey = p.key.trim()
+        chatCloudModel = p.model.trim()
     }
 
     var port: Int

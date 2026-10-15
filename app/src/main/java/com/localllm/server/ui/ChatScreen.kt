@@ -451,6 +451,16 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     }
 
     Column(modifier = modifier.fillMaxSize().imePadding()) {
+        // ---- 顶栏：标题 + 渠道快捷切换 + 会话管理 ----
+        var channelMenuOpen by remember { mutableStateOf(false) }
+        val cloudPresets = remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.loadCloudPresets())
+        }
+        val cloudOn = com.localllm.server.core.AppSettings.chatCloudEnabled
+        val activePresetName = if (cloudOn) {
+            val curUrl = com.localllm.server.core.AppSettings.chatCloudUrl.trim().removeSuffix("/")
+            cloudPresets.value.find { it.url.trim().removeSuffix("/") == curUrl }?.name ?: "自定义"
+        } else "本地"
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -458,12 +468,49 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("聊天", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-            IconButton(onClick = { showSessions = true }) {
-                Icon(Icons.Default.List, contentDescription = "会话列表")
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                Text("聊天", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                // 渠道快捷切换
+                TextButton(onClick = {
+                    cloudPresets.value = com.localllm.server.core.AppSettings.loadCloudPresets()
+                    channelMenuOpen = true
+                }) {
+                    Text(
+                        activePresetName,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (cloudOn) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                DropdownMenu(
+                    expanded = channelMenuOpen,
+                    onDismissRequest = { channelMenuOpen = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("本地引擎") },
+                        onClick = {
+                            com.localllm.server.core.AppSettings.chatCloudEnabled = false
+                            channelMenuOpen = false
+                        }
+                    )
+                    cloudPresets.value.forEach { p ->
+                        DropdownMenuItem(
+                            text = { Text("${p.name} · ${p.model.ifBlank { "未选模型" }}") },
+                            onClick = {
+                                com.localllm.server.core.AppSettings.activateCloudPreset(p)
+                                channelMenuOpen = false
+                            }
+                        )
+                    }
+                }
             }
-            IconButton(onClick = vm::newChat, enabled = !streaming) {
-                Icon(Icons.Default.DeleteSweep, contentDescription = "新会话")
+            Row {
+                IconButton(onClick = { showSessions = true }) {
+                    Icon(Icons.Default.List, contentDescription = "会话列表")
+                }
+                IconButton(onClick = vm::newChat, enabled = !streaming) {
+                    Icon(Icons.Default.DeleteSweep, contentDescription = "新会话")
+                }
             }
         }
 

@@ -23,6 +23,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -83,7 +84,7 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             )
         }
 
-        // ---- 聊天渠道（本地引擎 / 云端 OpenAI 兼容 API） ----
+        // ---- 聊天渠道（本地引擎 / 云端 OpenAI 兼容 API，多预设） ----
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -92,7 +93,7 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("云端模型渠道", style = MaterialTheme.typography.bodyLarge)
                 Text(
-                    "开启后聊天走云端 OpenAI 兼容接口，不依赖本机服务（改动立即生效，无需点保存）",
+                    "开启后聊天走云端接口，可存多组预设随时切换（改动立即生效）",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -103,6 +104,31 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             )
         }
         if (settings.chatCloudEnabled) {
+            // 预设列表：点击即切换
+            val presets = com.localllm.server.core.AppSettings.loadCloudPresets()
+            if (presets.isNotEmpty()) {
+                Text("渠道预设（点击切换）", style = MaterialTheme.typography.labelMedium)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    presets.forEach { p ->
+                        val active = settings.chatCloudUrl.trim().removeSuffix("/") == p.url.trim().removeSuffix("/")
+                        FilterChip(
+                            selected = active,
+                            onClick = {
+                                if (!active) {
+                                    com.localllm.server.core.AppSettings.activateCloudPreset(p)
+                                    vm.reloadSettings()
+                                }
+                            },
+                            label = { Text(p.name, style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                }
+                Text(
+                    "当前：${settings.chatCloudModel.ifBlank { "未选模型" }}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             OutlinedTextField(
                 value = settings.chatCloudUrl,
                 onValueChange = { v -> vm.updateCloudSettings { it.copy(chatCloudUrl = v) } },
@@ -124,7 +150,62 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
-            // 服务商预设：一键填入地址
+            // 保存为预设：把当前三件套存进列表
+            var presetNameT by remember { mutableStateOf("") }
+            var savePresetOpen by remember { mutableStateOf(false) }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { savePresetOpen = true },
+                    enabled = settings.chatCloudUrl.isNotBlank(),
+                    modifier = Modifier.weight(1f)
+                ) { Text("存为预设…") }
+                OutlinedButton(
+                    onClick = { vm.fetchCloudModels(); showModelPicker = true },
+                    enabled = !fetchingCloud,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    if (fetchingCloud) {
+                        CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("拉取中…")
+                    } else Text("拉取模型列表")
+                }
+            }
+            if (savePresetOpen) {
+                AlertDialog(
+                    onDismissRequest = { savePresetOpen = false },
+                    title = { Text("保存预设") },
+                    text = {
+                        OutlinedTextField(
+                            value = presetNameT,
+                            onValueChange = { presetNameT = it },
+                            label = { Text("预设名称（如 MiMo/DeepSeek）") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            if (presetNameT.isNotBlank()) {
+                                val list = com.localllm.server.core.AppSettings.loadCloudPresets().toMutableList()
+                                val p = com.localllm.server.core.AppSettings.CloudPreset(
+                                    name = presetNameT.trim(),
+                                    url = settings.chatCloudUrl.trim(),
+                                    key = settings.chatCloudKey.trim(),
+                                    model = settings.chatCloudModel.trim()
+                                )
+                                val idx = list.indexOfFirst { it.name == p.name }
+                                if (idx >= 0) list[idx] = p else list.add(p)
+                                com.localllm.server.core.AppSettings.saveCloudPresets(list)
+                                presetNameT = ""
+                                savePresetOpen = false
+                            }
+                        }) { Text("保存") }
+                    },
+                    dismissButton = { TextButton(onClick = { savePresetOpen = false }) { Text("取消") } }
+                )
+            }
+            // 服务商快捷填址
             Text("常用服务商", style = MaterialTheme.typography.labelMedium)
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -143,21 +224,7 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     )
                 }
             }
-                Button(
-                    onClick = {
-                        vm.fetchCloudModels()
-                        showModelPicker = true
-                    },
-                    enabled = !fetchingCloud,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                if (fetchingCloud) {
-                    CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(8.dp))
-                    Text("拉取中…")
-                } else Text("拉取该接口的模型列表")
-            }
-            cloudModels.let { list ->
+                cloudModels.let { list ->
                 if (list.isNotEmpty() && showModelPicker) {
                     AlertDialog(
                         onDismissRequest = { showModelPicker = false },

@@ -422,6 +422,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         AppSettings.chatCloudModel = s.chatCloudModel.trim()
     }
 
+    /** 从磁盘重新加载全部设置到 UI 状态（切换云端预设后调用） */
+    fun reloadSettings() {
+        _settings.value = _settings.value.copy(
+            chatCloudEnabled = AppSettings.chatCloudEnabled,
+            chatCloudUrl = AppSettings.chatCloudUrl,
+            chatCloudKey = AppSettings.chatCloudKey,
+            chatCloudModel = AppSettings.chatCloudModel
+        )
+    }
+
     /** 思考模式同理：每次发送现读 AppSettings.thinkEnabled，即改即存 */
     fun updateThinkEnabled(value: Boolean) {
         _settings.value = _settings.value.copy(thinkEnabled = value)
