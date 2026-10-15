@@ -26,7 +26,13 @@ jobs:
       - name: Setup Android SDK/NDK
         uses: android-actions/setup-android@v3
         with:
-          packages: 'ndk;27.3.13750724 cmake;3.22.1 ninja;1.12.1'
+          # 注意：ninja 不是 Android SDK 仓库里的包（repository2-3.xml 无任何 ninja 条目），
+          # 写进 packages 会让 sdkmanager "Failed to find package" 秒挂，故只装 ndk/cmake
+          packages: 'ndk;27.3.13750724 cmake;3.22.1'
+
+      - name: Ensure ninja
+        # ubuntu runner 自带 ninja 则跳过，否则 apt 补装（后续 -G Ninja 需要）
+        run: command -v ninja >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build)
 
       - name: Build OpenCL ICD loader (link-time stub)
         run: |
