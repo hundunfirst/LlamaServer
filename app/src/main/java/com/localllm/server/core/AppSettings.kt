@@ -63,6 +63,21 @@ object AppSettings {
         get() = prefs.getString("mcp_servers", "[]") ?: "[]"
         set(value) = prefs.edit().putString("mcp_servers", value).apply()
 
+    /** HTTP 型 MCP 是否启用（app 侧客户端，聊天时注入 tools） */
+    var mcpHttpEnabled: Boolean
+        get() = prefs.getBoolean("mcp_http_enabled", false)
+        set(value) = prefs.edit().putBoolean("mcp_http_enabled", value).apply()
+
+    /** HTTP 型 MCP 端点 URL（Streamable HTTP，如 http://192.168.1.5:8787/mcp） */
+    var mcpHttpUrl: String
+        get() = prefs.getString("mcp_http_url", "") ?: ""
+        set(value) = prefs.edit().putString("mcp_http_url", value).apply()
+
+    /** HTTP 型 MCP 可选鉴权 token */
+    var mcpHttpKey: String
+        get() = prefs.getString("mcp_http_key", "") ?: ""
+        set(value) = prefs.edit().putString("mcp_http_key", value).apply()
+
     /** 聊天云端渠道 */
     var chatCloudEnabled: Boolean
         get() = prefs.getBoolean("chat_cloud", false)

@@ -18,7 +18,22 @@ import java.net.URL
 object ChatClient {
 
     /** content 可为纯文本字符串，或 OpenAI 多模态 parts 数组（文本+图片） */
-    data class ChatMessage(val role: String, val content: Any)
+    data class ChatMessage(
+        val role: String,
+        val content: Any?,
+        /** assistant 消息携带的 tool_calls（多轮工具调用回传用） */
+        val toolCalls: JSONArray? = null,
+        /** tool 结果消息对应的 tool_call_id */
+        val toolCallId: String? = null
+    )
+
+    /** 流式聚合出的一个工具调用 */
+    data class ToolCall(
+        val id: String,
+        val name: String,
+        /** 未解析的 JSON 参数串（模型可能分片输出，已拼接完整） */
+        val arguments: String
+    )
 
     suspend fun chatStream(
         port: Int,
@@ -31,7 +46,13 @@ object ChatClient {
         onFinal: (completionTokens: Int, serverTps: Double) -> Unit = { _, _ -> },
         /** 非空时使用云端 OpenAI 兼容端点（如 https://api.xxx.com）；为空走本机回环 */
         baseUrl: String? = null,
-        model: String = "local"
+        model: String = "local",
+        /** OpenAI tools 数组；null/空则不注入 */
+        tools: JSONArray? = null,
+        /** 流结束后回调聚合的 tool_calls（无则空列表） */
+        onToolCalls: (List<ToolCall>) -> Unit = {},
+        /** 耗时诊断：ttfbMs=首字节，firstTokenMs=首个内容增量（云端慢排查用） */
+        onTiming: (ttfbMs: Long, firstTokenMs: Long?) -> Unit = { _, _ -> }
     ) = withContext(Dispatchers.IO) {
         val url = if (baseUrl.isNullOrBlank()) {
             URL("http://127.0.0.1:$port/v1/chat/completions")
@@ -49,10 +70,18 @@ object ChatClient {
                 setRequestProperty("Authorization", "Bearer $apiToken")
             }
         }
+        val t0 = System.currentTimeMillis()
+        var ttfbMs = -1L
+        var firstTokenMs: Long? = null
         try {
             val arr = JSONArray()
             messages.forEach { m ->
-                arr.put(JSONObject().put("role", m.role).put("content", m.content))
+                val o = JSONObject().put("role", m.role)
+                // Android org.json：null 会写成 "null" 字符串，显式处理
+                o.put("content", m.content ?: JSONObject.NULL)
+                m.toolCalls?.let { o.put("tool_calls", it) }
+                m.toolCallId?.let { o.put("tool_call_id", it) }
+                arr.put(o)
             }
             val body = JSONObject()
                 .put("model", model)
@@ -63,14 +92,21 @@ object ChatClient {
                 .put("top_p", 0.95)
                 .put("repeat_penalty", 1.15)
                 .put("messages", arr)
-                .toString()
-            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            if (tools != null && tools.length() > 0) {
+                body.put("tools", tools)
+            }
+            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
 
             val code = conn.responseCode
+            if (ttfbMs < 0) ttfbMs = System.currentTimeMillis() - t0
             if (code !in 200..299) {
                 val err = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
                 throw IllegalStateException("HTTP $code $err")
             }
+            // tool_calls 按 index 聚合（流式分片：id/name/arguments 各自来）
+            val tcId = mutableMapOf<Int, String>()
+            val tcName = mutableMapOf<Int, String>()
+            val tcArgs = mutableMapOf<Int, StringBuilder>()
             BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use { reader ->
                 var line: String?
                 while (reader.readLine().also { line = it } != null) {
@@ -96,14 +132,47 @@ object ChatClient {
                         val reason = delta.optString("reasoning_content")
                         if (reason.isNotEmpty()) onReasoning(reason)
                     }
+                    // 工具调用分片
+                    val toolCallsArr = delta.optJSONArray("tool_calls")
+                    if (toolCallsArr != null) {
+                        for (i in 0 until toolCallsArr.length()) {
+                            val tc = toolCallsArr.optJSONObject(i) ?: continue
+                            val idx = tc.optInt("index", i)
+                            if (!tc.isNull("id") && tc.optString("id").isNotEmpty()) {
+                                tcId[idx] = tc.optString("id")
+                            }
+                            val fn = tc.optJSONObject("function")
+                            if (fn != null) {
+                                if (!fn.isNull("name") && fn.optString("name").isNotEmpty()) {
+                                    tcName[idx] = fn.optString("name")
+                                }
+                                val args = if (fn.isNull("arguments")) "" else fn.optString("arguments")
+                                if (args.isNotEmpty()) {
+                                    tcArgs.getOrPut(idx) { StringBuilder() }.append(args)
+                                }
+                            }
+                        }
+                        continue
+                    }
                     // Android org.json 的坑：显式 null 会被 optString 转成字符串 "null"
                     val text = if (delta.isNull("content")) "" else delta.optString("content")
                     if (text.isNotEmpty()) {
                         currentCoroutineContext().ensureActive()
+                        if (firstTokenMs == null) firstTokenMs = System.currentTimeMillis() - t0
                         onDelta(text)
                     }
                 }
             }
+            onTiming(ttfbMs, firstTokenMs)
+            val calls = tcId.keys.sorted().mapNotNull { idx ->
+                val name = tcName[idx] ?: return@mapNotNull null
+                ToolCall(
+                    id = tcId[idx] ?: "call_$idx",
+                    name = name,
+                    arguments = tcArgs[idx]?.toString() ?: "{}"
+                )
+            }
+            onToolCalls(calls)
         } finally {
             conn.disconnect()
         }

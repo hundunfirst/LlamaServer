@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.localllm.server.core.AppSettings
 import com.localllm.server.core.ChatClient
 import com.localllm.server.core.ChatStore
+import com.localllm.server.core.McpHttpClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -109,9 +110,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             _streaming.value = true
             _error.value = null
             _lastStats.value = null
-            var deltaCount = 0
-            var firstDeltaMs = 0L
-            var serverStats: String? = null
             try {
                 val mathRule =
                     "数学公式与计算过程用 Unicode 符号直接书写（√ × ÷ ≈ ± ≤ ≥ ² ³ ½，分数写成 a/b），" +
@@ -139,47 +137,118 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             }
                         }
                 val cloud = AppSettings.chatCloudEnabled && AppSettings.chatCloudUrl.isNotBlank()
-                ChatClient.chatStream(
-                    port = AppSettings.port,
-                    messages = payloadMsgs,
-                    apiToken = if (cloud) AppSettings.chatCloudKey.ifBlank { null }
-                               else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
-                    baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
-                    model = if (cloud) AppSettings.chatCloudModel.ifBlank { "default" } else "local",
-                    onDelta = { delta ->
-                        deltaCount++
-                        if (firstDeltaMs == 0L) firstDeltaMs = System.currentTimeMillis()
-                        val elapsed = (System.currentTimeMillis() - firstDeltaMs) / 1000.0
-                        if (elapsed > 0.3) {
-                            val tps = deltaCount / elapsed
-                            _lastStats.value =
-                                "生成中 · $deltaCount token · ${String.format("%.1f", tps)} tok/s"
-                        }
-                        val list = _messages.value.toMutableList()
-                        val last = list.removeLast()
-                        list.add(last.copy(content = last.content + delta))
-                        _messages.value = list
-                    },
-                    onReasoning = { r ->
-                        if (AppSettings.thinkEnabled) {
+
+                // HTTP 型 MCP：拉工具并注入（失败降级为无工具，不阻断聊天）
+                val mcpUrl = AppSettings.mcpHttpUrl.trim()
+                val mcpTools = if (AppSettings.mcpHttpEnabled && mcpUrl.isNotBlank()) {
+                    runCatching {
+                        McpHttpClient.toOpenAiTools(McpHttpClient.listTools(mcpUrl))
+                    }.getOrElse { e ->
+                        _error.value = "MCP 工具拉取失败（本次不注入）：${e.message}"
+                        null
+                    }
+                } else null
+
+                var apiMsgs = payloadMsgs
+                val usedTools = mutableListOf<String>()
+                var timingNote: String? = null
+
+                // 最多 5 轮工具调用，防止模型死循环
+                repeat(5) { round ->
+                    var deltaCount = 0
+                    var firstDeltaMs = 0L
+                    var serverStats: String? = null
+                    var toolCalls: List<ChatClient.ToolCall> = emptyList()
+
+                    ChatClient.chatStream(
+                        port = AppSettings.port,
+                        messages = apiMsgs,
+                        apiToken = if (cloud) AppSettings.chatCloudKey.ifBlank { null }
+                                   else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
+                        baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
+                        model = if (cloud) AppSettings.chatCloudModel.ifBlank { "default" } else "local",
+                        tools = if (round == 0) mcpTools else mcpTools, // 每轮都带工具，模型可连续调用
+                        onToolCalls = { toolCalls = it },
+                        onTiming = { ttfb, firstToken ->
+                            // 云端慢排查：ttfb vs 首token 分离，判断慢在网络还是在推理
+                            if (cloud) {
+                                val tok = firstToken?.let { " · 首token ${it / 1000.0}s" } ?: ""
+                                timingNote = "连接${ttfb / 1000.0}s$tok"
+                            }
+                        },
+                        onDelta = { delta ->
+                            deltaCount++
+                            if (firstDeltaMs == 0L) firstDeltaMs = System.currentTimeMillis()
+                            val elapsed = (System.currentTimeMillis() - firstDeltaMs) / 1000.0
+                            if (elapsed > 0.3) {
+                                val tps = deltaCount / elapsed
+                                _lastStats.value =
+                                    "生成中 · $deltaCount token · ${String.format("%.1f", tps)} tok/s"
+                            }
                             val list = _messages.value.toMutableList()
                             val last = list.removeLast()
-                            list.add(last.copy(reasoning = (last.reasoning ?: "") + r))
+                            list.add(last.copy(content = last.content + delta))
                             _messages.value = list
+                        },
+                        onReasoning = { r ->
+                            if (AppSettings.thinkEnabled) {
+                                val list = _messages.value.toMutableList()
+                                val last = list.removeLast()
+                                list.add(last.copy(reasoning = (last.reasoning ?: "") + r))
+                                _messages.value = list
+                            }
+                        },
+                        onFinal = { tokens, tps ->
+                            serverStats = "共 $tokens token · ${String.format("%.1f", tps)} tok/s"
                         }
-                    },
-                    onFinal = { tokens, tps ->
-                        serverStats = "共 $tokens token · ${String.format("%.1f", tps)} tok/s"
+                    )
+
+                    if (toolCalls.isEmpty()) {
+                        // 最终回复：合并统计
+                        val timing = timingNote?.let { "$it · " } ?: ""
+                        if (serverStats != null) {
+                            _lastStats.value = timing + serverStats
+                        } else if (deltaCount > 0 && firstDeltaMs > 0) {
+                            val genSecs = (System.currentTimeMillis() - firstDeltaMs) / 1000.0
+                            if (genSecs > 0.05) {
+                                val tps = deltaCount / genSecs
+                                _lastStats.value = timing + "共 $deltaCount token · ${String.format("%.1f", tps)} tok/s"
+                            }
+                        }
+                        return@repeat
                     }
-                )
-                if (serverStats != null) {
-                    _lastStats.value = serverStats
-                } else if (deltaCount > 0 && firstDeltaMs > 0) {
-                    val genSecs = (System.currentTimeMillis() - firstDeltaMs) / 1000.0
-                    if (genSecs > 0.05) {
-                        val tps = deltaCount / genSecs
-                        _lastStats.value = "共 $deltaCount token · ${String.format("%.1f", tps)} tok/s"
+
+                    // 执行工具调用并回传结果
+                    val asstCalls = org.json.JSONArray()
+                    val newMsgs = apiMsgs.toMutableList()
+                    toolCalls.forEach { tc ->
+                        usedTools.add(tc.name)
+                        _lastStats.value = "🔧 调用 ${tc.name}…"
+                        asstCalls.put(
+                            org.json.JSONObject()
+                                .put("id", tc.id)
+                                .put("type", "function")
+                                .put(
+                                    "function", org.json.JSONObject()
+                                        .put("name", tc.name)
+                                        .put("arguments", tc.arguments)
+                                )
+                        )
                     }
+                    newMsgs.add(ChatClient.ChatMessage("assistant", null, toolCalls = asstCalls))
+                    toolCalls.forEach { tc ->
+                        val result = runCatching {
+                            val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                            McpHttpClient.callTool(mcpUrl, null, tc.name, args)
+                        }.getOrElse { e -> "工具执行失败：${e.message}" }
+                        newMsgs.add(ChatClient.ChatMessage("tool", result, toolCallId = tc.id))
+                    }
+                    apiMsgs = newMsgs
+                }
+
+                if (usedTools.isNotEmpty()) {
+                    val base = _lastStats.value ?: ""
+                    _lastStats.value = "🔧 ${usedTools.joinToString("、")}${if (base.isNotEmpty()) " · $base" else ""}"
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e

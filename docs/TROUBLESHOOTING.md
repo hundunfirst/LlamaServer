@@ -117,3 +117,31 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
 - 同时实测该 ROM 的 sh 中 `ulimit -v` 设置后读回仍为 unlimited（空操作）。
 - 结论：**保持直接 ProcessBuilder(cmd)**；内存防护靠「分配失败自动降级 +（聊天端）图片缩图 +（后续）JNI setrlimit」。
 - 若未来重试此类方案，先在目标 ROM 用 `run-as ... sh -c 'ulimit -v 6000000; ulimit -v'` 验证有效性。
+
+### #22 GitHub Actions CI 首跑三连坑 [CI]
+1. **ninja 不是 Android SDK 包**：写进 setup-android action 的 `packages:` 会让 sdkmanager 报 `Failed to find package` 秒挂（repository2-3.xml 里没有任何 ninja 条目）。ninja 用 `apt install ninja-build`，或确认 runner 自带。
+2. **`cmake --install` 参数必须是构建目录**（其中才有 `cmake_install.cmake`）；传 `CMAKE_INSTALL_PREFIX` 目录会报 `Not a file: .../cmake_install.cmake`。
+3. **Windows 上提交的 `gradlew` 默认 100644 无执行位**，Linux runner 直接 `Permission denied`；用 `git update-index --chmod=+x gradlew` 修复后重提交。
+- 修复 commit 见 `01246a4` 与 `db5ed3c`。
+
+### #23 GitHub 国内访问时好时坏（DNS 正常但 TCP 层丢包）[网络]
+- **现象**：`Resolve-DnsName` 解析 github.com 正常（如 20.205.243.166），但对 `github.com:443` 做 5 次 `TcpClient` 连接往往 3–4 次 5s 超时。
+- **结论**：「DNS 无解」是错觉，根因在连接层间歇 RST/丢包，与解析无关。
+- **缓解**：
+  - `git push` 带重试循环（实践 6 次内必成功）
+  - webfetch/API 调用用 `curl --retry-all-errors`
+  - 或走镜像（见 #21）
+- **不要为此改 DNS 或 hosts**——解析本来就对，改了没用还可能引入新问题。
+
+### #22 GitHub Actions CI 三连坑（build.yml 首跑踩过）[CI]
+- **坑 1 · packages 不能写 `ninja;1.12.1`**：Android SDK 仓库没有 ninja 包，`sdkmanager` 直接失败。ninja 用 `apt install ninja-build` 装，或确认 runner 自带。
+- **坑 2 · `cmake --install` 参数**：必须传**构建目录**，不是 `CMAKE_INSTALL_PREFIX`；传错报 `Not a file: .../cmake_install.cmake`。
+- **坑 3 · gradlew 可执行位**：Windows 上提交的 gradlew 默认 mode 100644，Linux runner 执行报 `permission denied`；`git update-index --chmod=+x gradlew` 后重新提交。
+- 修复 commit 参考：`db5ed3c` / `01246a4`。
+
+### #23 GitHub 国内连接间歇失败（连接层丢包，非 DNS）[网络]
+- **现象**：DNS 解析正常（`Resolve-DnsName github.com` → 20.205.243.166），但 TCP 443 五次连接仅 1 次成功；`Invoke-WebRequest` 超时。
+- **诊断**：`Resolve-DnsName github.com` 看解析；再用 TcpClient 循环测连通（`New-Object Net.Sockets.TcpClient` → `Connect('20.205.243.166', 443)`，多次统计成败）。DNS 正常但 TCP 大量失败 = 连接层丢包。
+- **定性**：这是国内访问 GitHub **尽力而为的网络环境问题，不是仓库配置问题**（区别于 #21 的限速/慢）。
+- **缓解**：挂代理后 git/push 正常；ghfast.top 等镜像**只用于 clone 拉取**（见 #21），push 和 Actions 页面必须走真实连接。
+- **重试策略**：`git push` 失败后退避重试即可成功。

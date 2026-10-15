@@ -196,7 +196,13 @@ private val LATEX_SYMBOLS = mapOf(
     "omega" to "ω", "Gamma" to "Γ", "Delta" to "Δ", "Theta" to "Θ", "Lambda" to "Λ",
     "Sigma" to "Σ", "Phi" to "Φ", "Psi" to "Ψ", "Omega" to "Ω",
     "degree" to "°", "perp" to "⊥", "parallel" to "∥", "angle" to "∠",
-    "rightarrow" to "→", "leftarrow" to "←", "Rightarrow" to "⇒", "Leftrightarrow" to "⇔"
+    "rightarrow" to "→", "leftarrow" to "←", "Rightarrow" to "⇒", "Leftrightarrow" to "⇔",
+    "lt" to "<", "gt" to ">", "leqslant" to "≤", "geqslant" to "≥", "varnothing" to "∅",
+    "to" to "→", "gets" to "←", "leftrightarrow" to "↔", "mapsto" to "↦",
+    "propto" to "∝", "sim" to "∼", "equiv" to "≡", "ll" to "≪", "gg" to "≫",
+    "ast" to "∗", "circ" to "∘", "bullet" to "∙", "oplus" to "⊕", "otimes" to "⊗",
+    "neg" to "¬", "land" to "∧", "lor" to "∨", "emptyset" to "∅",
+    "therefore" to "∴", "because" to "∵", "cong" to "≅", "doteq" to "≐"
 )
 
 private val SUP_CHARS = mapOf(
@@ -267,9 +273,42 @@ private fun latexToUnicode(src: String): String {
                             sb.append(if (isSimpleExpr(proc[0])) "√${proc[0]}" else "√(${proc[0]})")
                         }
                         "text", "mathrm", "mbox", "boxed", "operatorname",
-                        "mathbf", "mathit", "boldsymbol", "textbf", "underline" ->
+                        "mathbf", "mathit", "boldsymbol", "textbf", "underline",
+                        "mathbb", "mathcal", "mathfrak" ->
                             proc.forEach { sb.append(it) }
-                        "left", "right", "displaystyle", "textstyle", "limits", "bigl", "bigr" -> Unit
+                        "left", "right", "displaystyle", "textstyle", "limits",
+                        "bigl", "bigr", "big", "Big", "Bigl", "Bigr",
+                        "bigg", "Bigg", "biggl", "biggr", "Biggl", "Biggr" -> Unit
+                        "hat", "bar", "vec" -> if (proc.isNotEmpty()) {
+                            // 单字符基底加组合附加符（x̂/x̄/x⃗）；做不了就跳过，不硬凑
+                            val mark = when (name) {
+                                "hat" -> '\u0302' // combining circumflex
+                                "bar" -> '\u0304' // combining macron
+                                else -> '\u20D7' // combining right arrow above
+                            }
+                            val base = proc[0]
+                            if (base.length == 1) sb.append(base).append(mark)
+                            else proc.forEach { sb.append(it) }
+                        }
+                        "begin" -> if (args.isNotEmpty()) {
+                            // \begin{env}...\end{env} → 去标记；\\ 行分隔→\n；& 列分隔→分隔符
+                            val env = args[0]
+                            val endTag = "\\end{$env}"
+                            val endIdx = src.indexOf(endTag, k)
+                            val bodyEnd = if (endIdx >= 0) endIdx else src.length
+                            val sep = if (env in setOf("matrix", "pmatrix", "bmatrix", "vmatrix", "array")) "|"
+                                      else "　" // cases/aligned 等用全角空格
+                            val handled = src.substring(k, bodyEnd)
+                                .split("\\\\") // 字面两个反斜杠 = LaTeX 行分隔
+                                .joinToString("\n") { row ->
+                                    row.split("&").joinToString(sep) { cell ->
+                                        latexToUnicode(cell.trim())
+                                    }
+                                }
+                            sb.append(handled)
+                            k = if (endIdx >= 0) endIdx + endTag.length else src.length
+                        }
+                        "end" -> Unit // 未被 begin 消费的 \end{...}：去掉标记
                         else -> {
                             val sym = LATEX_SYMBOLS[name]
                             when {

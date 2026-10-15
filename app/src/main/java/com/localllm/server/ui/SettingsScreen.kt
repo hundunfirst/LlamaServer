@@ -455,4 +455,60 @@ private fun McpSection() {
             dismissButton = { TextButton(onClick = { dialogOpen = false }) { Text("取消") } }
         )
     }
+
+    // ---- HTTP 型 MCP（app 侧客户端，聊天时自动注入 tools） ----
+    Spacer(modifier = Modifier.height(16.dp))
+    Text("HTTP MCP（实验）", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+    Text(
+        "远程 HTTP 端点（如 MT 管理器 http://IP:8787/mcp）。" +
+                "开启后聊天时自动拉取工具列表，模型可直接调用，无需重启服务。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    var httpEnabled by remember {
+        mutableStateOf(com.localllm.server.core.AppSettings.mcpHttpEnabled)
+    }
+    var httpUrl by remember {
+        mutableStateOf(com.localllm.server.core.AppSettings.mcpHttpUrl)
+    }
+    var httpToken by remember {
+        mutableStateOf(com.localllm.server.core.AppSettings.mcpHttpKey)
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("启用 HTTP MCP", style = MaterialTheme.typography.bodyLarge)
+        Switch(
+            checked = httpEnabled,
+            onCheckedChange = {
+                httpEnabled = it
+                com.localllm.server.core.AppSettings.mcpHttpEnabled = it
+            }
+        )
+    }
+    if (httpEnabled) {
+        OutlinedTextField(
+            value = httpUrl,
+            onValueChange = {
+                httpUrl = it
+                com.localllm.server.core.AppSettings.mcpHttpUrl = it
+            },
+            label = { Text("MCP 端点 URL") },
+            placeholder = { Text("http://192.168.1.5:8787/mcp") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = httpToken,
+            onValueChange = {
+                httpToken = it
+                com.localllm.server.core.AppSettings.mcpHttpKey = it
+            },
+            label = { Text("Token（可选）") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
 }
