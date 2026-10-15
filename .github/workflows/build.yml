@@ -1,0 +1,112 @@
+# CI：构建双引擎 + APK，产出引擎清单（格式预留：未来"引擎包在线更新"直接消费）
+# 引擎入包布局（与 BinaryInstaller 一致）：app/src/main/assets/engines/{cpu,opencl}/
+# engine-manifest.json 字段约定：
+#   { "version": "<llama.cpp commit>", "abi": "arm64-v8a",
+#     "artifact": "engine-arm64-<commit>.zip", "sha256": "...",
+#     "min_app_version": "0.3.0", "built_at": "<iso8601>" }
+
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  engine-and-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Android SDK/NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'ndk;27.3.13750724 cmake;3.22.1 ninja;1.12.1'
+
+      - name: Build OpenCL ICD loader (link-time stub)
+        run: |
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-Headers.git opencl-deps/OpenCL-Headers
+          git clone --depth 1 https://github.com/KhronosGroup/OpenCL-ICD-Loader.git opencl-deps/OpenCL-ICD-Loader
+          cmake -S opencl-deps/OpenCL-ICD-Loader -B opencl-deps/icd-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 \
+            -DOPENCL_ICD_LOADER_HEADERS_DIR=$PWD/opencl-deps/OpenCL-Headers \
+            -DCMAKE_INSTALL_PREFIX=$PWD/opencl-deps/icd-install
+          cmake --build opencl-deps/icd-build
+          cmake --install opencl-deps/icd-install
+
+      - name: Checkout pinned llama.cpp
+        run: |
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp
+          # 锁定版本时取消注释并填写（与 docs/ENVIRONMENT.md 保持一致）
+          # git -C llama.cpp fetch --depth 1 origin <commit> && git -C llama.cpp checkout <commit>
+
+      - name: Build engines (cpu + opencl, 16KB aligned)
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          ALIGN="-Wl,-z,max-page-size=16384"
+          COMMON="-DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 \
+            -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=OFF -DLLAMA_OPENSSL=OFF \
+            -DGGML_CPU_KLEIDIAI=OFF \
+            -DCMAKE_EXE_LINKER_FLAGS=$ALIGN -DCMAKE_SHARED_LINKER_FLAGS=$ALIGN"
+
+          cmake -S llama.cpp -B llama.cpp/build-cpu -G Ninja $COMMON \
+            -DGGML_OPENCL=OFF -DGGML_BACKEND_DL=OFF -DGGML_CPU_ALL_VARIANTS=OFF
+          cmake --build llama.cpp/build-cpu --target llama-server
+
+          cmake -S llama.cpp -B llama.cpp/build-ocl -G Ninja $COMMON \
+            -DGGML_OPENCL=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=OFF \
+            -DOpenCL_INCLUDE_DIR=$PWD/opencl-deps/OpenCL-Headers \
+            -DOpenCL_LIBRARY=$PWD/opencl-deps/icd-install/lib/libOpenCL.so
+          cmake --build llama.cpp/build-ocl --target llama-server
+
+      - name: Stage engines into assets + package artifact
+        run: |
+          STRIP=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
+          stage() { # $1=build dir $2=dest
+            mkdir -p "$2"
+            for so in "$1"/bin/*.so; do $STRIP --strip-unneeded "$so"; done
+            cp "$1"/bin/* "$2"/
+            rm -f "$2"/libggml-cpu-android_armv8.6* "$2"/libggml-cpu-android_armv9*
+          }
+          stage llama.cpp/build-cpu app/src/main/assets/engines/cpu
+          stage llama.cpp/build-ocl app/src/main/assets/engines/opencl
+
+          COMMIT=$(git -C llama.cpp rev-parse --short HEAD)
+          mkdir -p engine-out
+          (cd app/src/main/assets/engines && zip -r "$GITHUB_WORKSPACE/engine-out/engine-arm64-$COMMIT.zip" cpu opencl)
+          SHA=$(sha256sum "engine-out/engine-arm64-$COMMIT.zip" | cut -d' ' -f1)
+          cat > engine-out/engine-manifest.json <<EOF
+          {
+            "version": "$COMMIT",
+            "abi": "arm64-v8a",
+            "artifact": "engine-arm64-$COMMIT.zip",
+            "sha256": "$SHA",
+            "min_app_version": "0.3.0",
+            "built_at": "$(date -Iseconds)"
+          }
+          EOF
+
+      - name: Build APK (engines already staged in assets)
+        run: ./gradlew assembleDebug assembleRelease
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-package
+          path: engine-out/

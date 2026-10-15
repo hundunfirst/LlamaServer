@@ -1,0 +1,39 @@
+# ---- 构建产物 ----
+.gradle/
+build/
+app/build/
+*.apk
+*.aab
+local.properties
+.cxx/
+
+# ---- 密钥（绝不入库） ----
+keystore.properties
+*.jks
+*.keystore
+
+# ---- 引擎源码与依赖（独立克隆，版本见 docs/ENVIRONMENT.md） ----
+llama.cpp/
+opencl-deps/
+
+# ---- 引擎产物（由 scripts/build-engine.ps1 / CI 重新生成） ----
+app/src/main/jniLibs/arm64-v8a/
+app/src/main/assets/engines/
+app-native/
+
+# ---- 模型与运行数据（GB 级、用户数据） ----
+models/
+prefs.xml
+seed-pref.xml
+ui.xml
+
+# ---- 临时/日志 ----
+build.log
+cmake-*.log
+tools/
+dist/
+
+# ---- IDE ----
+.idea/
+*.iml
+.DS_Store

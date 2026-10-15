@@ -1,0 +1,99 @@
+package com.localllm.server.core
+
+import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+
+/** 多会话持久化：单文件 JSON，含活动会话指针 */
+object ChatStore {
+    private const val FILE = "chat_sessions.json"
+    private const val MAX_MESSAGES = 100
+    private const val MAX_SESSIONS = 50
+
+    data class Msg(
+        val role: String,
+        val content: String,
+        val imageB64: String? = null,
+        val reasoning: String? = null
+    )
+
+    data class Session(
+        val id: String,
+        val title: String,
+        val updatedAt: Long,
+        val messages: List<Msg>
+    )
+
+    data class Store(val activeId: String, val sessions: List<Session>)
+
+    fun load(context: Context): Store {
+        val f = File(context.filesDir, FILE)
+        if (!f.exists()) {
+            // 一次性迁移：旧版单会话文件
+            val legacy = File(context.filesDir, "chat_current.json")
+            val msgs = if (legacy.exists()) runCatching {
+                val arr = JSONArray(legacy.readText())
+                (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    Msg(
+                        o.optString("role"),
+                        o.optString("content"),
+                        o.optString("image").takeIf { it.isNotEmpty() },
+                        o.optString("reasoning").takeIf { it.isNotEmpty() }
+                    )
+                }
+            }.getOrDefault(emptyList()) else emptyList()
+            val title = msgs.firstOrNull { it.role == "user" }?.content?.take(24) ?: "历史会话"
+            val s = Session("1", title, System.currentTimeMillis(), msgs)
+            val store = Store(s.id, listOf(s))
+            save(context, store)
+            return store
+        }
+        return runCatching {
+            val root = JSONObject(f.readText())
+            val active = root.optString("activeId").ifBlank { "1" }
+            val arr = root.optJSONArray("sessions") ?: JSONArray()
+            val sessions = (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val mArr = o.optJSONArray("messages") ?: JSONArray()
+                val msgs = (0 until mArr.length()).map { j ->
+                    val m = mArr.getJSONObject(j)
+                    Msg(
+                        m.optString("role"),
+                        m.optString("content"),
+                        m.optString("image").takeIf { it.isNotEmpty() },
+                        m.optString("reasoning").takeIf { it.isNotEmpty() }
+                    )
+                }
+                Session(o.optString("id"), o.optString("title"), o.optLong("updatedAt"), msgs)
+            }.ifEmpty {
+                listOf(Session("1", "新会话", System.currentTimeMillis(), emptyList()))
+            }
+            Store(if (sessions.any { it.id == active }) active else sessions.first().id, sessions)
+        }.getOrDefault(Store("1", listOf(Session("1", "新会话", System.currentTimeMillis(), emptyList()))))
+    }
+
+    fun save(context: Context, store: Store) {
+        val root = JSONObject().put("activeId", store.activeId)
+        val arr = JSONArray()
+        store.sessions.sortedByDescending { it.updatedAt }.take(MAX_SESSIONS).forEach { s ->
+            val mArr = JSONArray()
+            s.messages.takeLast(MAX_MESSAGES).forEach { m ->
+                val o = JSONObject().put("role", m.role).put("content", m.content)
+                if (m.imageB64 != null) o.put("image", m.imageB64)
+                if (m.reasoning != null) o.put("reasoning", m.reasoning)
+                mArr.put(o)
+            }
+            arr.put(
+                JSONObject()
+                    .put("id", s.id)
+                    .put("title", s.title)
+                    .put("updatedAt", s.updatedAt)
+                    .put("messages", mArr)
+            )
+        }
+        root.put("sessions", arr)
+        File(context.filesDir, FILE).writeText(root.toString())
+    }
+}
