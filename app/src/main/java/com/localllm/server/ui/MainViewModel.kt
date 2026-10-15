@@ -344,7 +344,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val fetchingCloud: StateFlow<Boolean> = _fetchingCloud.asStateFlow()
 
     fun fetchCloudModels() {
-        val base = AppSettings.chatCloudUrl.trim().removeSuffix("/")
+        var base = AppSettings.chatCloudUrl.trim().removeSuffix("/")
+        // 容错：粘贴了完整 chat/models 地址时自动截到基地址
+        for (suffix in listOf("/v1/chat/completions", "/chat/completions", "/v1/models", "/models", "/v1")) {
+            if (base.endsWith(suffix)) {
+                base = base.removeSuffix(suffix)
+                break
+            }
+        }
         if (base.isBlank()) {
             _actionError.value = "请先填写云端接口地址"
             return
@@ -376,7 +383,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (list.isEmpty()) _actionError.value = "该接口未返回可用模型列表"
                 else _cloudModels.value = list
             }.onFailure { e ->
-                _actionError.value = "拉取模型失败：${e.message}"
+                _actionError.value = "拉取模型失败：${e.message ?: e.javaClass.simpleName}（检查地址是否为服务商给出的 Base URL）"
             }
             _fetchingCloud.value = false
         }
