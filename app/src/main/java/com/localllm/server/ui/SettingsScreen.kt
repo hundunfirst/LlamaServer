@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -22,6 +23,9 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -171,23 +175,29 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         // ---- MCP 服务器（实验，stdio 型，llama-server 内置客户端） ----
         McpSection()
 
-        // 上下文长度：输入框 + 预置值下拉（省掉一整行 chips）
+        // 上下文长度：只读下拉（点箭头/字段只出选项，不弹输入法）+ 自定义值
         var ctxExpanded by remember { mutableStateOf(false) }
+        var customCtxOpen by remember { mutableStateOf(false) }
+        var customCtxText by remember { mutableStateOf("") }
         androidx.compose.material3.ExposedDropdownMenuBox(
             expanded = ctxExpanded,
             onExpandedChange = { ctxExpanded = it }
         ) {
-            OutlinedTextField(
+            CompactField(
                 value = settings.ctxSize,
-                onValueChange = { v -> vm.updateSettings { it.copy(ctxSize = v.filter(Char::isDigit)) } },
-                label = { Text("上下文长度 (-c)") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                trailingIcon = {
-                    androidx.compose.material3.ExposedDropdownMenuDefaults.TrailingIcon(expanded = ctxExpanded)
+                onValueChange = {},
+                label = "上下文长度 (-c)",
+                readOnly = true,
+                trailing = {
+                    Icon(
+                        androidx.compose.material.icons.Icons.Default.ArrowDropDown,
+                        contentDescription = "展开预设",
+                        modifier = Modifier.size(26.dp),
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
                 },
                 modifier = Modifier
-                    .menuAnchor(androidx.compose.material3.MenuAnchorType.PrimaryEditable)
+                    .menuAnchor(androidx.compose.material3.MenuAnchorType.PrimaryNotEditable)
                     .fillMaxWidth()
             )
             ExposedDropdownMenu(
@@ -206,70 +216,95 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                         }
                     )
                 }
+                androidx.compose.material3.DropdownMenuItem(
+                    text = { Text("自定义…") },
+                    onClick = {
+                        customCtxText = settings.ctxSize
+                        ctxExpanded = false
+                        customCtxOpen = true
+                    }
+                )
             }
         }
-        OutlinedTextField(
+        if (customCtxOpen) {
+            AlertDialog(
+                onDismissRequest = { customCtxOpen = false },
+                title = { Text("自定义上下文长度") },
+                text = {
+                    CompactField(
+                        value = customCtxText,
+                        onValueChange = { customCtxText = it.filter(Char::isDigit) },
+                        label = "token 数（512 ~ 262144）",
+                        number = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val v = customCtxText.toIntOrNull()
+                        if (v != null) vm.updateSettings { it.copy(ctxSize = v.toString()) }
+                        customCtxOpen = false
+                    }) { Text("确定") }
+                },
+                dismissButton = { TextButton(onClick = { customCtxOpen = false }) { Text("取消") } }
+            )
+        }
+        CompactField(
             value = settings.threads,
             onValueChange = { v -> vm.updateSettings { it.copy(threads = v.filter(Char::isDigit)) } },
-            label = { Text("CPU 线程数（0 = 自动）") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            label = "CPU 线程数（0 = 自动）",
+            number = true,
             modifier = Modifier.fillMaxWidth()
         )
         QuickChips(
             options = listOf("0" to "自动", "4" to "4线程", "6" to "6线程", "8" to "8线程"),
             current = settings.threads
         ) { v -> vm.updateSettings { it.copy(threads = v) } }
-        OutlinedTextField(
+        CompactField(
             value = settings.ngl,
             onValueChange = { v -> vm.updateSettings { it.copy(ngl = v.filter(Char::isDigit)) } },
-            label = { Text("GPU 层数 -ngl（0 = 纯 CPU，本机实测更快，推荐）") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            label = "GPU 层数 -ngl（0 = 纯 CPU，本机实测更快，推荐）",
+            number = true,
             modifier = Modifier.fillMaxWidth()
         )
         QuickChips(
             options = listOf("0" to "纯CPU", "20" to "20层", "33" to "33层", "99" to "全量GPU"),
             current = settings.ngl
         ) { v -> vm.updateSettings { it.copy(ngl = v) } }
-        OutlinedTextField(
+        CompactField(
             value = settings.cacheTypeK,
             onValueChange = { v -> vm.updateSettings { it.copy(cacheTypeK = v) } },
-            label = { Text("KV 缓存 K 类型（留空 = f16）") },
-            singleLine = true,
+            label = "KV 缓存 K 类型（留空 = f16）",
             modifier = Modifier.fillMaxWidth()
         )
         QuickChips(
             options = listOf("" to "f16(默认)", "q8_0" to "q8_0", "q4_0" to "q4_0", "q4_1" to "q4_1"),
             current = settings.cacheTypeK
         ) { v -> vm.updateSettings { it.copy(cacheTypeK = v) } }
-        OutlinedTextField(
+        CompactField(
             value = settings.cacheTypeV,
             onValueChange = { v -> vm.updateSettings { it.copy(cacheTypeV = v) } },
-            label = { Text("KV 缓存 V 类型（留空 = f16；量化时自动开 FA）") },
-            singleLine = true,
+            label = "KV 缓存 V 类型（留空 = f16；量化时自动开 FA）",
             modifier = Modifier.fillMaxWidth()
         )
         QuickChips(
             options = listOf("" to "f16(默认)", "q8_0" to "q8_0", "q4_0" to "q4_0", "q4_1" to "q4_1"),
             current = settings.cacheTypeV
         ) { v -> vm.updateSettings { it.copy(cacheTypeV = v) } }
-        OutlinedTextField(
+        CompactField(
             value = settings.specType,
             onValueChange = { v -> vm.updateSettings { it.copy(specType = v) } },
-            label = { Text("投机解码（none / ngram-simple / draft-mtp）") },
-            singleLine = true,
+            label = "投机解码（none / ngram-simple / draft-mtp）",
             modifier = Modifier.fillMaxWidth()
         )
         QuickChips(
             options = listOf("none" to "关闭", "ngram-simple" to "ngram", "draft-mtp" to "MTP(需模型支持)"),
             current = settings.specType
         ) { v -> vm.updateSettings { it.copy(specType = v) } }
-        OutlinedTextField(
+        CompactField(
             value = settings.faMode,
             onValueChange = { v -> vm.updateSettings { it.copy(faMode = v) } },
-            label = { Text("Flash Attention（空=自动；CPU解码慢时试「关闭」）") },
-            singleLine = true,
+            label = "Flash Attention（空=自动；CPU解码慢时试「关闭」）",
             modifier = Modifier.fillMaxWidth()
         )
         QuickChips(

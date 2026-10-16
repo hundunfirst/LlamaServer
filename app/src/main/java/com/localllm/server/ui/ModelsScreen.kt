@@ -279,12 +279,11 @@ private fun LocalModelParamsDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                OutlinedTextField(
+                CompactField(
                     value = ctx,
                     onValueChange = { ctx = it.filter(Char::isDigit) },
-                    label = { Text("上下文长度（留空=全局）") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    label = "上下文长度（留空=全局）",
+                    number = true,
                     modifier = Modifier.fillMaxWidth()
                 )
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -297,12 +296,11 @@ private fun LocalModelParamsDialog(
                             )
                         }
                 }
-                OutlinedTextField(
+                CompactField(
                     value = out,
                     onValueChange = { out = it.filter(Char::isDigit) },
-                    label = { Text("输出上限（留空=默认 4096）") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    label = "输出上限（留空=默认 4096）",
+                    number = true,
                     modifier = Modifier.fillMaxWidth()
                 )
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

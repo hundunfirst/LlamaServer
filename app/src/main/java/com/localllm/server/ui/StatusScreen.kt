@@ -38,7 +38,6 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val state by vm.serverState.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
     val selectedModel by vm.selectedModel.collectAsStateWithLifecycle()
-    val selectedMmproj by vm.selectedMmproj.collectAsStateWithLifecycle()
     val models by vm.models.collectAsStateWithLifecycle()
     val projectors by vm.projectors.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
@@ -82,17 +81,13 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 // 服务端口（从设置页迁来）：改完保存，重启服务生效
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    androidx.compose.material3.OutlinedTextField(
+                    CompactField(
                         value = settings.port,
                         onValueChange = { v ->
                             vm.updateSettings { it.copy(port = v.filter(Char::isDigit)) }
                         },
-                        label = { Text("端口", style = MaterialTheme.typography.labelSmall) },
-                        textStyle = MaterialTheme.typography.bodySmall,
-                        singleLine = true,
-                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
-                        ),
+                        label = "端口",
+                        number = true,
                         modifier = Modifier.width(104.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
@@ -142,9 +137,9 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error
                         )
-                    } else if (selectedMmproj != state.runningMmproj) {
+                    } else if (effMmproj != state.runningMmproj) {
                         Text(
-                            if (selectedMmproj == null) "⚠ 多模态已关闭，重启服务后生效"
+                            if (effMmproj == null) "⚠ 多模态已关闭，重启服务后生效"
                             else "⚠ 多模态已变更，重启服务后生效",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error
