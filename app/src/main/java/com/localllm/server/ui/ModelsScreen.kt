@@ -10,6 +10,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.FilterChip
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -38,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.localllm.server.core.ModelFile
 import com.localllm.server.core.AppSettings
+import com.localllm.server.core.LocalModelParam
 
 @Composable
 fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
@@ -50,6 +59,7 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     // 待确认类型的导入 URI（先选文件，再选「对话模型 / 多模态投影」）
     var pendingUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var renamingModel by remember { mutableStateOf<ModelFile?>(null) }
+    var paramModel by remember { mutableStateOf<ModelFile?>(null) }
     var renameText by remember { mutableStateOf("") }
 
     val picker = rememberLauncherForActivityResult(
@@ -135,6 +145,9 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             modifier = Modifier.padding(top = 8.dp, bottom = 12.dp)
         )
 
+        paramModel?.let { m ->
+            LocalModelParamsDialog(model = m, projectors = projectors, onDismiss = { paramModel = null })
+        }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (models.isEmpty()) {
                 item { Text("还没有对话模型，点右上角「导入 GGUF」。", style = MaterialTheme.typography.bodyMedium) }
@@ -145,7 +158,8 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     selected = model.file.absolutePath == selected,
                     onSelect = { vm.selectModel(model) },
                     onDelete = { vm.deleteModel(model) },
-                    onRename = { mm -> renameText = AppSettings.aliasFor(mm.file.absolutePath) ?: mm.name; renamingModel = mm }
+                    onRename = { mm -> renameText = AppSettings.aliasFor(mm.file.absolutePath) ?: mm.name; renamingModel = mm },
+                    onParams = { paramModel = it }
                 )
             }
 
@@ -176,7 +190,8 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     selected = proj.file.absolutePath == selectedMmproj,
                     onSelect = { vm.selectMmproj(proj) },
                     onDelete = { vm.deleteModel(proj) },
-                    onRename = { mm -> renameText = AppSettings.aliasFor(mm.file.absolutePath) ?: mm.name; renamingModel = mm }
+                    onRename = { mm -> renameText = AppSettings.aliasFor(mm.file.absolutePath) ?: mm.name; renamingModel = mm },
+                    onParams = { paramModel = it }
                 )
             }
             if (projectors.isEmpty()) {
@@ -194,8 +209,9 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
 
 @Composable
 private fun ModelCard(model: ModelFile, selected: Boolean, onSelect: () -> Unit, onDelete: () -> Unit,
-                      onRename: (ModelFile) -> Unit = {}) {
+                      onRename: (ModelFile) -> Unit = {}, onParams: (ModelFile) -> Unit = {}) {
     val alias = AppSettings.aliasFor(model.file.absolutePath)
+    val custom = AppSettings.localModelParam(model.file.absolutePath) != null
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -205,9 +221,18 @@ private fun ModelCard(model: ModelFile, selected: Boolean, onSelect: () -> Unit,
             Column(modifier = Modifier.weight(1f)) {
                 Text(alias ?: model.name, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodyMedium)
                 Text(
-                    (if (alias != null) model.name + " · " else "") + formatSize(model.sizeBytes),
+                    (if (alias != null) model.name + " · " else "") + formatSize(model.sizeBytes) +
+                            (if (custom) " · 参数已定制" else ""),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (custom) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            IconButton(onClick = { onParams(model) }) {
+                Icon(
+                    Icons.Default.Tune, contentDescription = "参数",
+                    tint = if (custom) MaterialTheme.colorScheme.primary
+                           else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             IconButton(onClick = { onRename(model) }) {
@@ -218,6 +243,115 @@ private fun ModelCard(model: ModelFile, selected: Boolean, onSelect: () -> Unit,
             }
         }
     }
+}
+
+/** 本地模型参数弹窗（精简版：上下文 / 输出上限 / mmproj 绑定；留空=跟随全局） */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun LocalModelParamsDialog(
+    model: ModelFile,
+    projectors: List<ModelFile>,
+    onDismiss: () -> Unit
+) {
+    val path = model.file.absolutePath
+    val existing = remember { AppSettings.localModelParam(path) }
+    var ctx by remember { mutableStateOf(existing?.ctx?.toString() ?: "") }
+    var out by remember { mutableStateOf(existing?.out?.toString() ?: "") }
+    // ""=跟全局, "none"=明确不用, 其它=投影文件绝对路径
+    var mm by remember { mutableStateOf(existing?.mmproj ?: "") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                "模型参数 · " + (AppSettings.aliasFor(path) ?: model.name),
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "留空 = 跟随全局（当前上下文 ${AppSettings.ctxSize}，输出上限默认 4096）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = ctx,
+                    onValueChange = { ctx = it.filter(Char::isDigit) },
+                    label = { Text("上下文长度（留空=全局）") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(32768 to "32K", 65536 to "64K", 131072 to "128K", 262144 to "256K", -1 to "跟全局")
+                        .forEach { (v, label) ->
+                            FilterChip(
+                                selected = if (v == -1) ctx.isBlank() else ctx == v.toString(),
+                                onClick = { ctx = if (v == -1) "" else v.toString() },
+                                label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                }
+                OutlinedTextField(
+                    value = out,
+                    onValueChange = { out = it.filter(Char::isDigit) },
+                    label = { Text("输出上限（留空=默认 4096）") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(2048 to "2K", 4096 to "4K", 8192 to "8K", -1 to "跟全局")
+                        .forEach { (v, label) ->
+                            FilterChip(
+                                selected = if (v == -1) out.isBlank() else out == v.toString(),
+                                onClick = { out = if (v == -1) "" else v.toString() },
+                                label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                }
+                Text("多模态投影（mmproj）", style = MaterialTheme.typography.labelLarge)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(
+                        selected = mm.isEmpty(),
+                        onClick = { mm = "" },
+                        label = { Text("跟全局", style = MaterialTheme.typography.labelSmall) }
+                    )
+                    FilterChip(
+                        selected = mm == "none",
+                        onClick = { mm = "none" },
+                        label = { Text("不使用", style = MaterialTheme.typography.labelSmall) }
+                    )
+                    projectors.forEach { p ->
+                        FilterChip(
+                            selected = mm == p.file.absolutePath,
+                            onClick = { mm = p.file.absolutePath },
+                            label = { Text(p.name, style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                AppSettings.setLocalModelParam(
+                    path,
+                    LocalModelParam(
+                        ctx = ctx.toIntOrNull(),
+                        out = out.toIntOrNull(),
+                        mmproj = mm.ifBlank { null }
+                    )
+                )
+                onDismiss()
+            }) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }
 
 private fun formatSize(bytes: Long): String {

@@ -66,7 +66,8 @@ class ServerService : android.app.Service() {
                 ServerProcessManager.start(
                     modelPath = modelPath,
                     port = AppSettings.port,
-                    ctxSize = AppSettings.ctxSize,
+                    // 按模型覆盖优先（精简版：上下文 / mmproj 跟随模型走）
+                    ctxSize = AppSettings.effectiveCtx(modelPath),
                     threads = AppSettings.threads,
                     ngl = AppSettings.ngl,
                     lanEnabled = AppSettings.lanEnabled,
@@ -74,7 +75,7 @@ class ServerService : android.app.Service() {
                     cacheTypeK = AppSettings.cacheTypeK,
                     cacheTypeV = AppSettings.cacheTypeV,
                     specType = AppSettings.specType,
-                    mmprojPath = AppSettings.selectedMmprojPath,
+                    mmprojPath = AppSettings.effectiveMmproj(modelPath),
                     faMode = AppSettings.faMode,
                     apiTokenEnabled = AppSettings.apiTokenEnabled
                 )

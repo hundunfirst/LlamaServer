@@ -292,6 +292,59 @@ object AppSettings {
         get() = prefs.getString("image_search_policy", "block") ?: "block"
         set(value) = prefs.edit().putString("image_search_policy", value).apply()
 
+    // ---- 本地模型的按模型参数覆盖（精简版：上下文 / 输出上限 / mmproj 绑定）----
+    /** {模型绝对路径: {"ctx":Int?, "out":Int?, "mmproj":String?}}；字段缺省=跟随全局 */
+    var localModelParamsJson: String
+        get() = prefs.getString("local_model_params", "{}") ?: "{}"
+        set(value) = prefs.edit().putString("local_model_params", value).apply()
+
+    fun localModelParam(path: String?): LocalModelParam? {
+        if (path.isNullOrBlank()) return null
+        return runCatching {
+            val o = org.json.JSONObject(localModelParamsJson).optJSONObject(path)
+                ?: return null
+            LocalModelParam(
+                ctx = if (o.has("ctx")) o.optInt("ctx") else null,
+                out = if (o.has("out")) o.optInt("out") else null,
+                mmproj = if (o.has("mmproj")) o.optString("mmproj") else null
+            )
+        }.getOrNull()
+    }
+
+    /** p 全空则删除该模型条目 */
+    fun setLocalModelParam(path: String, p: LocalModelParam?) {
+        val root = runCatching { org.json.JSONObject(localModelParamsJson) }
+            .getOrDefault(org.json.JSONObject())
+        if (p == null || (p.ctx == null && p.out == null && p.mmproj == null)) {
+            root.remove(path)
+        } else {
+            val o = org.json.JSONObject()
+            p.ctx?.let { o.put("ctx", it) }
+            p.out?.let { o.put("out", it) }
+            p.mmproj?.let { o.put("mmproj", it) }
+            root.put(path, o)
+        }
+        localModelParamsJson = root.toString()
+    }
+
+    /** 生效上下文长度：模型级 → 全局 */
+    fun effectiveCtx(modelPath: String?): Int = localModelParam(modelPath)?.ctx ?: ctxSize
+
+    /** 生效输出上限（本地 max_tokens）：模型级 → 默认 4096 */
+    fun effectiveOut(modelPath: String?): Int = localModelParam(modelPath)?.out ?: 4096
+
+    /** 生效 mmproj：模型级（空串=跟全局，"none"=明确不用）→ 全局 */
+    fun effectiveMmproj(modelPath: String?): String? =
+        when (val v = localModelParam(modelPath)?.mmproj) {
+            null -> selectedMmprojPath
+            "none" -> null
+            else -> v.ifBlank { selectedMmprojPath }
+        }
+
+    /** 模型级是否覆盖了 mmproj（用于 UI 标注来源） */
+    fun isMmprojOverridden(modelPath: String?): Boolean =
+        localModelParam(modelPath)?.mmproj != null
+
     /** 聊天云端渠道 */
     var chatCloudEnabled: Boolean
         get() = prefs.getBoolean("chat_cloud", false)
@@ -362,4 +415,12 @@ data class McpHttpTool(
     val description: String,
     val inputSchema: org.json.JSONObject,
     val enabled: Boolean
+)
+
+/** 本地模型的按模型参数覆盖（null = 跟随全局） */
+data class LocalModelParam(
+    val ctx: Int? = null,
+    val out: Int? = null,
+    /** 投影文件绝对路径；空串=跟全局；"none"=明确不用 */
+    val mmproj: String? = null
 )

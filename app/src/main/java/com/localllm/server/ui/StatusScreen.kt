@@ -113,9 +113,23 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     "当前模型：${modelName ?: "未选择"}",
                     style = MaterialTheme.typography.bodyMedium
                 )
-                val mmprojName = projectors.find { it.file.absolutePath == selectedMmproj }?.name
+                // 生效参数（模型级覆盖 → 全局），并标注来源
+                val effCtx = com.localllm.server.core.AppSettings.effectiveCtx(selectedModel)
+                val effOut = com.localllm.server.core.AppSettings.effectiveOut(selectedModel)
+                val ctxOver = com.localllm.server.core.AppSettings.localModelParam(selectedModel)?.ctx != null
+                val outOver = com.localllm.server.core.AppSettings.localModelParam(selectedModel)?.out != null
+                fun k(n: Int) = if (n >= 1000) String.format("%.0fK", n / 1000.0) else "$n"
                 Text(
-                    "多模态 mmproj：${mmprojName ?: "未启用"}",
+                    "生效参数：上下文 ${k(effCtx)}${if (ctxOver) "（模型级）" else ""}" +
+                            " · 输出上限 ${k(effOut)}${if (outOver) "（模型级）" else ""}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                val effMmproj = com.localllm.server.core.AppSettings.effectiveMmproj(selectedModel)
+                val mmprojName = projectors.find { it.file.absolutePath == effMmproj }?.name
+                Text(
+                    "多模态 mmproj：${mmprojName ?: "未启用"}" +
+                            if (com.localllm.server.core.AppSettings.isMmprojOverridden(selectedModel)) "（模型级）" else "",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

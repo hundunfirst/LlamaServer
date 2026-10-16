@@ -331,7 +331,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         // 本地走 jinja 模板真开关；云端模板自管不干预
                         thinking = if (cloud) null else AppSettings.thinkEnabled,
                         // 本地生成上限：退化复读时不至于跑到撑满上下文
-                        maxTokens = if (cloud) null else 4096,
+                        maxTokens = if (cloud) null else AppSettings.effectiveOut(AppSettings.selectedModelPath),
                         // 搜索配额用尽 / 多轮无正文 → 不再提供搜索工具（防止弱模型空转到轮数上限、永远不回答）
                         tools = if (forceNoTools || (searchAvailable && searchCount >= 3)) toolsNoSearch else toolsJson,
                         onToolCalls = { toolCalls = it },
@@ -547,7 +547,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
                             model = if (cloud) AppSettings.chatCloudModel.ifBlank { "default" } else "local",
                             thinking = if (cloud) null else AppSettings.thinkEnabled,
-                            maxTokens = if (cloud) null else 4096,
+                            maxTokens = if (cloud) null else AppSettings.effectiveOut(AppSettings.selectedModelPath),
                             tools = null,
                             onDelta = { d ->
                                 if (_streaming.value) {
@@ -703,7 +703,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** 上下文占用（本次输入+本轮回复 = 下一轮的实际起点，服务端权威计数，含模板开销）；≥90% 加 ⚠️ */
     private fun ctxNote(usedTokens: Int): String {
         if (usedTokens <= 0) return ""
-        val ctx = AppSettings.ctxSize
+        val ctx = AppSettings.effectiveCtx(AppSettings.selectedModelPath)
         if (ctx <= 0) return ""
         val cur = if (usedTokens >= 1000) String.format("%.1fk", usedTokens / 1000.0) else "$usedTokens"
         val max = if (ctx >= 1000) String.format("%.1fk", ctx / 1000.0) else "$ctx"
