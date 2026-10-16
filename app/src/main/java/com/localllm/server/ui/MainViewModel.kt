@@ -523,8 +523,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         ServerProcessManager.clearLogs()
     }
 
+    /** 有未保存改动（驱动设置页「保存」按钮的显隐） */
+    private val _settingsDirty = MutableStateFlow(false)
+    val settingsDirty: StateFlow<Boolean> = _settingsDirty.asStateFlow()
+
     fun updateSettings(transform: (SettingsUiState) -> SettingsUiState) {
         _settings.value = transform(_settings.value)
+        _settingsDirty.value = true
     }
 
     fun saveSettings(silent: Boolean = false) {
@@ -586,5 +591,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 "设置成功"
             }
         }
+        _settingsDirty.value = false
     }
 }

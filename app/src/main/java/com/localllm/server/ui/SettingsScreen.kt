@@ -33,10 +33,13 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.collectLatest
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -50,11 +53,12 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     var showModelDialog by remember { mutableStateOf(false) }
 
+    val settingsScroll = rememberScrollState()
     Box(modifier = modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(settingsScroll)
                 .padding(16.dp)
                 .padding(bottom = 80.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -360,14 +364,28 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         Spacer(modifier = Modifier.height(80.dp))
         }
 
-        // 悬浮保存按钮：任何滚动位置都可点击
-        Button(
-            onClick = { vm.saveSettings() },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(horizontal = 24.dp, vertical = 20.dp)
-        ) {
-            Text("保存设置")
+        // 悬浮保存按钮：仅在「有未保存改动」时出现；滚动查看内容时自动隐藏，停手 0.7s 再浮现
+        val dirty by vm.settingsDirty.collectAsStateWithLifecycle()
+        var fabVisible by remember { mutableStateOf(true) }
+        LaunchedEffect(settingsScroll) {
+            var last = settingsScroll.value
+            snapshotFlow { settingsScroll.value }.collectLatest { v ->
+                val down = v > last
+                last = v
+                if (down) fabVisible = false
+                kotlinx.coroutines.delay(700) // 滚动停止后重新出现
+                fabVisible = true
+            }
+        }
+        if (dirty && fabVisible) {
+            Button(
+                onClick = { vm.saveSettings() },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(horizontal = 24.dp, vertical = 20.dp)
+            ) {
+                Text("保存设置")
+            }
         }
     }
 }
