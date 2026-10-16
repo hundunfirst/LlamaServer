@@ -7,13 +7,19 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
@@ -121,6 +127,48 @@ fun CompactFieldMultiline(
                     shape = RoundedCornerShape(6.dp)
                 )
                 .padding(horizontal = 8.dp, vertical = 6.dp)
+        )
+    }
+}
+
+
+/**
+ * 区块标题 + 「?」说明图标：说明文字收进弹窗，界面更清爽（用户要求）。
+ * 思考模式/局域网等保留原样式，不套用。
+ */
+@Composable
+fun SectionHeader(
+    title: String,
+    help: String,
+    titleStyle: androidx.compose.ui.text.TextStyle = MaterialTheme.typography.titleMedium,
+    modifier: Modifier = Modifier
+) {
+    var open by remember { mutableStateOf(false) }
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(title, style = titleStyle, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+        androidx.compose.material3.IconButton(
+            onClick = { open = true },
+            modifier = Modifier.size(26.dp)
+        ) {
+            androidx.compose.material3.Icon(
+                androidx.compose.material.icons.Icons.Default.HelpOutline,
+                contentDescription = "$title 说明",
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+    if (open) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { open = false },
+            title = { Text(title, style = MaterialTheme.typography.titleMedium) },
+            text = { Text(help, style = MaterialTheme.typography.bodySmall) },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = { open = false }) { Text("知道了") }
+            }
         )
     }
 }

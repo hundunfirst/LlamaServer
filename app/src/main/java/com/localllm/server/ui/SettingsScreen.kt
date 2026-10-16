@@ -59,11 +59,10 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 .padding(bottom = 80.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-        Text("服务设置", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-        Text(
-            "修改后需重启服务生效。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+        SectionHeader(
+            title = "服务设置",
+            help = "修改后需重启服务生效。",
+            titleStyle = MaterialTheme.typography.headlineSmall
         )
 
         Row(
@@ -90,16 +89,12 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         var imgMode by remember {
             mutableStateOf(com.localllm.server.core.AppSettings.imageInputMode)
         }
-        Text(
-            "图片处理方式",
-            style = MaterialTheme.typography.bodyLarge,
-            modifier = Modifier.padding(top = 8.dp)
-        )
-        Text(
-            "自动：有多模态（mmproj）就直读图片，否则用内置 OCR 抽文字（OCR 不上传图片，更省更快）；" +
+        SectionHeader(
+            title = "图片处理方式",
+            help = "自动：有多模态（mmproj）就直读图片，否则用内置 OCR 抽文字（OCR 不上传图片，更省更快）；" +
                     "多模态：始终把图片交给视觉模型；OCR：始终本地识别文字后再提问。立即生效。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            titleStyle = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
         )
         QuickChips(
             options = listOf("auto" to "自动", "vision" to "多模态直读", "ocr" to "OCR 提取文字"),
@@ -113,16 +108,12 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         var imgPolicy by remember {
             mutableStateOf(com.localllm.server.core.AppSettings.imageSearchPolicy)
         }
-        Text(
-            "含图片时的联网搜索",
-            style = MaterialTheme.typography.bodyLarge,
-            modifier = Modifier.padding(top = 8.dp)
-        )
-        Text(
-            "禁止：含图片的消息不提供搜索工具（证件照最安全）；" +
+        SectionHeader(
+            title = "含图片时的联网搜索",
+            help = "禁止：含图片的消息不提供搜索工具（证件照最安全）；" +
                     "先问我：模型想搜时弹窗展示将要发送的内容，你允许才发；允许：直接搜。立即生效。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            titleStyle = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
         )
         QuickChips(
             options = listOf("block" to "禁止", "ask" to "先问我", "allow" to "允许"),
@@ -138,14 +129,12 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("云端模型渠道", style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    "开启后聊天走云端 OpenAI 兼容接口；多供应商与模型在「配置模型」弹窗里管理",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            SectionHeader(
+                title = "云端模型渠道",
+                help = "开启后聊天走云端 OpenAI 兼容接口；多供应商与模型在「配置模型」弹窗里管理",
+                titleStyle = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.weight(1f)
+            )
             Switch(
                 checked = settings.chatCloudEnabled,
                 onCheckedChange = { v -> vm.updateCloudSettings { it.copy(chatCloudEnabled = v) } }
@@ -416,12 +405,10 @@ private fun McpSection() {
         com.localllm.server.core.AppSettings.saveMcpServers(servers)
     }
 
-    Text("MCP 工具（HTTP）", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-    Text(
-        "远程流式 HTTP 端点（如 MT 管理器）。可添加多个服务器，每个可单独启停；" +
-                "聊天时自动注入已启用服务器的工具（以 mcp__服务器__工具 前缀防冲突）。",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant
+    SectionHeader(
+        title = "MCP 工具（HTTP）",
+        help = "远程流式 HTTP 端点（如 MT 管理器）。可添加多个服务器，每个可单独启停；" +
+                "聊天时自动注入已启用服务器的工具（以 mcp__服务器__工具 前缀防冲突）。"
     )
     if (servers.isEmpty()) {
         Text(

@@ -13,6 +13,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SuggestionChip
@@ -43,6 +49,7 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val projectors by vm.projectors.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
     var showCheckup by remember { mutableStateOf(false) }
+    var showAccessHelp by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -66,21 +73,7 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    StatusChip(state.status)
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(state.message, style = MaterialTheme.typography.bodyMedium)
-                }
-                Spacer(modifier = Modifier.height(4.dp))
-                Text("API 地址", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(state.endpoint, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(onClick = {
-                        clipboard.setText(AnnotatedString(state.endpoint))
-                    }) { Text("复制地址") }
-                }
-                // 服务端口（从设置页迁来）：一行内联，改完保存、重启生效
-                Spacer(modifier = Modifier.height(4.dp))
+                // ① 端口（置顶）：字段 + 与「启动服务」同款的保存按钮
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         "端口",
@@ -96,26 +89,44 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                         number = true,
                         modifier = Modifier.width(78.dp)
                     )
-                    androidx.compose.material3.FilledTonalButton(
-                        onClick = { vm.saveSettings() },
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                            horizontal = 14.dp, vertical = 0.dp
-                        ),
-                        modifier = Modifier.height(32.dp)
-                    ) { Text("保存", style = MaterialTheme.typography.labelMedium) }
-                    Text(
-                        "改端口后需重启服务",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(onClick = { vm.saveSettings() }) { Text("保存") }
                 }
+                // ② API 地址（右侧 ❓ 查看接入示例）
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "API 地址",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            state.endpoint,
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    IconButton(onClick = { showAccessHelp = true }) {
+                        Icon(
+                            Icons.Default.HelpOutline,
+                            contentDescription = "接入说明",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(onClick = {
+                        clipboard.setText(AnnotatedString(state.endpoint))
+                    }) { Text("复制地址") }
+                }
+                // ③ 模型与生效参数
                 val rawName = models.find { it.file.absolutePath == selectedModel }?.name
                 val modelName = com.localllm.server.core.AppSettings.aliasFor(state.modelPath) ?: rawName
                 Text(
                     "当前模型：${modelName ?: "未选择"}",
                     style = MaterialTheme.typography.bodyMedium
                 )
-                // 生效参数（模型级覆盖 → 全局），并标注来源
                 val effCtx = com.localllm.server.core.AppSettings.effectiveCtx(selectedModel)
                 val effOut = com.localllm.server.core.AppSettings.effectiveOut(selectedModel)
                 val ctxOver = com.localllm.server.core.AppSettings.localModelParam(selectedModel)?.ctx != null
@@ -135,7 +146,14 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                // 提示：选配变更不会热加载，需重启服务才生效
+                // ④ 运行信息 / 报错（下排）
+                if (state.message.isNotBlank()) {
+                    Text(
+                        state.message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 val running = state.status == ServerUiState.Status.RUNNING
                 if (running) {
                     if (selectedModel != null && selectedModel != state.modelPath) {
@@ -156,7 +174,12 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             }
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        // 状态芯片与启停按钮同排
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            StatusChip(state.status)
             Button(
                 onClick = vm::startServer,
                 enabled = state.status == ServerUiState.Status.STOPPED ||
@@ -168,20 +191,30 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                         state.status == ServerUiState.Status.STARTING
             ) { Text("停止服务") }
         }
+    }
 
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("客户端接入示例（Rikkahub 等）", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                Text("· 接口类型：OpenAI 兼容", style = MaterialTheme.typography.bodySmall)
-                Text("· Base URL：${state.endpoint}", style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                Text("· API Key：留空（仅本机）或你设置的令牌", style = MaterialTheme.typography.bodySmall)
-                Text(
-                    "保持本应用前台服务运行，即可在同机其他应用中调用模型。",
-                    style = MaterialTheme.typography.bodySmall,
-                    textAlign = TextAlign.Start
-                )
-            }
-        }
+    // 接入示例弹窗（API 地址右侧 ❓ 打开）
+    if (showAccessHelp) {
+        AlertDialog(
+            onDismissRequest = { showAccessHelp = false },
+            title = { Text("客户端接入示例（Rikkahub 等）") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("· 接口类型：OpenAI 兼容", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "· Base URL：${state.endpoint}",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text("· API Key：留空（仅本机）或你设置的令牌", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "保持本应用前台服务运行，即可在同机其他应用中调用模型。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            },
+            confirmButton = { TextButton(onClick = { showAccessHelp = false }) { Text("知道了") } }
+        )
     }
 
     if (showCheckup) {
