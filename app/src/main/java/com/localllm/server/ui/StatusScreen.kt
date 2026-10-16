@@ -17,6 +17,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -78,24 +79,29 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                         clipboard.setText(AnnotatedString(state.endpoint))
                     }) { Text("复制地址") }
                 }
-                // 服务端口（从设置页迁来）：改完保存，重启服务生效
+                // 服务端口（从设置页迁来）：一行内联，改完保存、重启生效
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "端口",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
                     CompactField(
                         value = settings.port,
                         onValueChange = { v ->
                             vm.updateSettings { it.copy(port = v.filter(Char::isDigit)) }
                         },
-                        label = "端口",
                         number = true,
-                        modifier = Modifier.width(104.dp)
+                        modifier = Modifier.width(78.dp)
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    OutlinedButton(
+                    TextButton(
                         onClick = { vm.saveSettings() },
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp)
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                            horizontal = 8.dp, vertical = 0.dp
+                        )
                     ) { Text("保存", style = MaterialTheme.typography.labelMedium) }
-                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         "改端口后需重启服务",
                         style = MaterialTheme.typography.labelSmall,
