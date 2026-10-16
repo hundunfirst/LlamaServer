@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
@@ -400,6 +401,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     var menuIndex by remember { mutableStateOf<Int?>(null) }
     var editingIndex by remember { mutableStateOf<Int?>(null) }
     var deleteIndex by remember { mutableStateOf<Int?>(null) }
+    var showCompressConfirm by remember { mutableStateOf(false) }
     var editText by remember { mutableStateOf("") }
 
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -460,6 +462,30 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             },
             dismissButton = {
                 TextButton(onClick = { editingIndex = null }) { Text("取消") }
+            }
+        )
+    }
+
+    // 压缩上下文确认（摘要会替代原文进入后续对话）
+    if (showCompressConfirm) {
+        AlertDialog(
+            onDismissRequest = { showCompressConfirm = false },
+            title = { Text("压缩上下文？") },
+            text = {
+                Text(
+                    "将把较早的消息交给模型总结成一条摘要，仅保留最近 4 条原文。" +
+                            "摘要在后续对话中替代原文，原消息不再发送给模型（界面里也会被摘要卡取代）。",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showCompressConfirm = false
+                    vm.compressContext()
+                }) { Text("压缩") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCompressConfirm = false }) { Text("取消") }
             }
         )
     }
@@ -582,6 +608,13 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                         else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                IconButton(onClick = { showCompressConfirm = true }) {
+                    Icon(
+                        Icons.Default.Compress,
+                        contentDescription = "压缩上下文",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 IconButton(onClick = { showSessions = true }) {
                     Icon(Icons.Default.List, contentDescription = "会话列表")
                 }
@@ -674,6 +707,10 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 }
             }
             itemsIndexed(messages) { i, msg ->
+                if (msg.role == "system") {
+                    SummaryCard(msg.content)
+                    return@itemsIndexed
+                }
                 val isUser = msg.role == "user"
                 val waiting = !isUser && streaming && msg.content.isEmpty() && msg.reasoning.isNullOrEmpty()
                 // 思考进行中（有思考文本、正文还没开始）：思考卡显示动态"思考中"
@@ -791,6 +828,69 @@ private fun MessageBubble(
             Column(Modifier.padding(8.dp)) {
                 Row(verticalAlignment = Alignment.Top) {
                     Column(Modifier.weight(1f)) {
+                        // 执行步骤时间线（思考/搜索/工具），Rikkahub 风格
+                        if (!isUser && msg.steps.isNotEmpty()) {
+                            var stepsOpen by remember { mutableStateOf(true) }
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 6.dp)
+                                    .background(
+                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .padding(8.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        "🧩 执行步骤（${msg.steps.size}）",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(onClick = { stepsOpen = !stepsOpen }) {
+                                        Text(
+                                            if (stepsOpen) "收起" else "展开",
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    }
+                                }
+                                if (stepsOpen) {
+                                    msg.steps.forEachIndexed { si, st ->
+                                        var detailOpen by remember(si) { mutableStateOf(false) }
+                                        Row(
+                                            verticalAlignment = Alignment.Top,
+                                            modifier = Modifier.padding(vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                when (st.type) {
+                                                    "think" -> "💡"
+                                                    "search" -> "🔍"
+                                                    else -> "🔧"
+                                                },
+                                                modifier = Modifier.width(22.dp)
+                                            )
+                                            Column(Modifier.weight(1f)) {
+                                                Text(st.label, style = MaterialTheme.typography.bodySmall)
+                                                st.detail?.let { d ->
+                                                    Text(
+                                                        if (detailOpen) d
+                                                        else d.take(36) + if (d.length > 36) "…" else "",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = if (detailOpen)
+                                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                                        else MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.clickable {
+                                                            detailOpen = !detailOpen
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         // 思考过程（DeepSeek 风格折叠卡，默认收起）
                         if (!isUser && !msg.reasoning.isNullOrBlank()) {
                             var thinkOpen by remember { mutableStateOf(false) }
@@ -1143,5 +1243,30 @@ private fun saveHtml(context: android.content.Context, code: String) {
         Toast.makeText(context, "已保存到下载：$name", Toast.LENGTH_LONG).show()
     } catch (e: Exception) {
         Toast.makeText(context, "保存失败：${e.message}", Toast.LENGTH_SHORT).show()
+    }
+}
+
+/** 历史摘要卡片（上下文压缩产生的 system 消息） */
+@Composable
+private fun SummaryCard(content: String) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(10.dp)) {
+            Text(
+                "📝 上下文摘要",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                content,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
     }
 }

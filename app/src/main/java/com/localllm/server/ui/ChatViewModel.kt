@@ -289,6 +289,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 var searchCount = 0
                 val searchCap = AppSettings.searchMaxCalls.let { if (it <= 0) Int.MAX_VALUE else it }
                 var loggedNoSearch = false
+                // 执行步骤时间线（思考/搜索/工具），落到消息上供 UI 展示
+                val steps = mutableListOf<ChatStore.Step>()
+                var thinkStartedAt = 0L
+                fun syncSteps() {
+                    val list = _messages.value.toMutableList()
+                    if (list.isEmpty()) return
+                    list[list.lastIndex] = list.last().copy(steps = steps.toList())
+                    _messages.value = list
+                }
+                fun settleThink() {
+                    if (thinkStartedAt > 0) {
+                        val ms = System.currentTimeMillis() - thinkStartedAt
+                        steps.add(
+                            ChatStore.Step("think", "思考了 ${String.format("%.1f", ms / 1000.0)} 秒", millis = ms)
+                        )
+                        thinkStartedAt = 0L
+                        syncSteps()
+                    }
+                }
                 val searchedQueries = mutableMapOf<String, String>() // 规范化查询 → 结果文本（相同查询复用）
 
                 var apiMsgs = payloadMsgs
@@ -347,6 +366,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         onDelta = { delta ->
                             // 停止后一律不再上屏（abort 断连前的在途分片也丢弃）
                             if (_streaming.value) {
+                                if (!contentStarted && thinkStartedAt > 0) {
+                                    val secs = (System.currentTimeMillis() - thinkStartedAt) / 1000.0
+                                    steps.add(
+                                        ChatStore.Step(
+                                            "think",
+                                            "思考了 ${String.format("%.1f", secs)} 秒",
+                                            millis = System.currentTimeMillis() - thinkStartedAt
+                                        )
+                                    )
+                                    thinkStartedAt = 0L
+                                    syncSteps()
+                                }
                                 contentStarted = true
                                 deltaCount++
                                 abortDeltas++
@@ -380,6 +411,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     }
                                 }
                                 else -> {
+                                    if (thinkStartedAt == 0L) thinkStartedAt = System.currentTimeMillis()
                                     val list = _messages.value.toMutableList()
                                     val last = list.removeLast()
                                     list.add(last.copy(reasoning = (last.reasoning ?: "") + r))
@@ -464,6 +496,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
 
                     // 执行工具调用并回传结果（仅 validCalls）
+                    settleThink()
                     val asstCalls = org.json.JSONArray()
                     val newMsgs = apiMsgs.toMutableList()
                     validCalls.forEach { tc ->
@@ -501,10 +534,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     }
                                     norm.isNotBlank() && searchedQueries.containsKey(norm) -> {
                                         ServerProcessManager.appLog("内置搜索：相同查询「${query.take(30)}」复用已有结果（不占用配额）")
+                                        steps.add(ChatStore.Step("search", "搜索网页：${query.take(60)}", "相同查询，复用已有结果"))
+                                        syncSteps()
                                         searchedQueries[norm]!!
                                     }
                                     searchCount >= searchCap -> {
                                         ServerProcessManager.appLog("搜索已达本消息上限（$searchCap 次），返回提示")
+                                        steps.add(ChatStore.Step("search", "搜索网页：${query.take(60)}", "已达上限，未执行"))
+                                        syncSteps()
                                         "本轮搜索次数已达上限，请基于已有搜索结果直接回答。"
                                     }
                                     else -> {
@@ -518,6 +555,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                         ServerProcessManager.appLog("内置搜索：返回 ${rs.size} 条结果")
                                         val text = WebSearch.formatResults(rs)
                                         searchedQueries[norm] = text
+                                        steps.add(ChatStore.Step("search", "搜索网页：${query.take(60)}", "共 ${rs.size} 条结果"))
+                                        syncSteps()
                                         text
                                     }
                                 }
@@ -526,7 +565,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 val route = mcpRoute[tc.name]
                                     ?: throw IllegalStateException("未路由的工具：${tc.name}")
                                 ServerProcessManager.appLog("MCP 调用：${tc.name}")
-                                McpHttpClient.callTool(route.first, null, route.second, args)
+                                val r = McpHttpClient.callTool(route.first, null, route.second, args)
+                                steps.add(ChatStore.Step("tool", "调用工具：${tc.name}", r.take(120)))
+                                syncSteps()
+                                r
                             }
                         }.getOrElse { e ->
                             ServerProcessManager.appLog("工具失败：${tc.name} — ${e.message}")
@@ -702,6 +744,87 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         activeId: String = _activeId.value
     ) {
         ChatStore.save(getApplication(), ChatStore.Store(activeId, sessions))
+    }
+
+
+    /**
+     * 上下文压缩：把较早的消息交给当前渠道模型总结成一条 system 摘要，仅保留最近若干条。
+     * 触发后上下文占用大幅下降，早期的关键信息以摘要形式保留。
+     */
+    fun compressContext(keepRecent: Int = 4) {
+        if (_streaming.value) {
+            _lastStats.value = "正在生成中，稍后再压缩"
+            return
+        }
+        val list = _messages.value
+        val old = list.dropLast(keepRecent)
+        val recent = list.takeLast(keepRecent)
+        if (old.size < 2) {
+            _lastStats.value = "消息太少，无需压缩"
+            return
+        }
+        streamJob = viewModelScope.launch {
+            _streaming.value = true
+            _error.value = null
+            _lastStats.value = "正在压缩上下文…"
+            ServerProcessManager.appLog("上下文压缩：将前 ${old.size} 条消息总结为摘要…")
+            try {
+                val cloud = AppSettings.chatCloudEnabled && AppSettings.chatCloudUrl.isNotBlank()
+                val sb = StringBuilder()
+                old.forEach { m ->
+                    val who = when (m.role) {
+                        "user" -> "用户"
+                        "assistant" -> "助手"
+                        else -> "系统"
+                    }
+                    sb.append(who).append('：').append(m.content.take(1200)).append('\n')
+                }
+                val summary = StringBuilder()
+                ChatClient.chatStream(
+                    port = AppSettings.port,
+                    messages = listOf(
+                        ChatClient.ChatMessage(
+                            "system",
+                            "把下面的对话压缩成要点摘要：保留关键事实、结论、待办事项与用户偏好；" +
+                                    "用中文；不超过 400 字；直接输出摘要正文，不要客套。"
+                        ),
+                        ChatClient.ChatMessage("user", sb.toString())
+                    ),
+                    apiToken = if (cloud) AppSettings.chatCloudKey.ifBlank { null }
+                               else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
+                    baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
+                    model = if (cloud) AppSettings.chatCloudModel.ifBlank { "default" } else "local",
+                    thinking = if (cloud) null else false,
+                    maxTokens = if (cloud) null else 1024,
+                    tools = null,
+                    onDelta = { d -> if (_streaming.value) summary.append(d) },
+                    onReasoning = {},
+                    onFinal = { _, _, _ -> }
+                )
+                val text = summary.toString().trim()
+                if (text.isBlank()) {
+                    _error.value = "压缩失败：模型未返回摘要"
+                    ServerProcessManager.appLog("上下文压缩失败：空摘要")
+                } else {
+                    val stamp = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.CHINA)
+                        .format(java.util.Date())
+                    val sysMsg = ChatStore.Msg(
+                        "system",
+                        "📝 历史摘要（${old.size} 条消息，压缩于 $stamp）：\n$text"
+                    )
+                    _messages.value = listOf(sysMsg) + recent
+                    persist()
+                    _lastStats.value = "已压缩：${old.size} 条 + 最近 ${recent.size} 条 → 摘要 + 最近 ${recent.size} 条"
+                    ServerProcessManager.appLog("上下文压缩完成：${old.size} 条 → 摘要（${text.length} 字）")
+                }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                _error.value = "压缩失败：${e.message}"
+                ServerProcessManager.appLog("上下文压缩失败：${e.message}")
+            } finally {
+                _streaming.value = false
+            }
+        }
     }
 
     private fun friendlyError(e: Exception): String = when {

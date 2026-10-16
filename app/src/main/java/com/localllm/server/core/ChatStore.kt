@@ -11,11 +11,20 @@ object ChatStore {
     private const val MAX_MESSAGES = 100
     private const val MAX_SESSIONS = 50
 
+    /** 执行步骤（思考/搜索/工具），用于消息内的时间线可视化 */
+    data class Step(
+        val type: String,   // think / search / tool
+        val label: String,
+        val detail: String? = null,
+        val millis: Long = 0
+    )
+
     data class Msg(
         val role: String,
         val content: String,
         val imageB64: String? = null,
-        val reasoning: String? = null
+        val reasoning: String? = null,
+        val steps: List<Step> = emptyList()
     )
 
     data class Session(
@@ -63,7 +72,8 @@ object ChatStore {
                         m.optString("role"),
                         m.optString("content"),
                         m.optString("image").takeIf { it.isNotEmpty() },
-                        m.optString("reasoning").takeIf { it.isNotEmpty() }
+                        m.optString("reasoning").takeIf { it.isNotEmpty() },
+                        steps = parseSteps(m.optJSONArray("steps"))
                     )
                 }
                 Session(o.optString("id"), o.optString("title"), o.optLong("updatedAt"), msgs)
@@ -72,6 +82,19 @@ object ChatStore {
             }
             Store(if (sessions.any { it.id == active }) active else sessions.first().id, sessions)
         }.getOrDefault(Store("1", listOf(Session("1", "新会话", System.currentTimeMillis(), emptyList()))))
+    }
+
+    private fun parseSteps(arr: JSONArray?): List<Step> {
+        if (arr == null) return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            Step(
+                type = o.optString("type"),
+                label = o.optString("label"),
+                detail = o.optString("detail").takeIf { it.isNotEmpty() && it != "null" },
+                millis = o.optLong("millis")
+            )
+        }
     }
 
     fun save(context: Context, store: Store) {
@@ -83,6 +106,17 @@ object ChatStore {
                 val o = JSONObject().put("role", m.role).put("content", m.content)
                 if (m.imageB64 != null) o.put("image", m.imageB64)
                 if (m.reasoning != null) o.put("reasoning", m.reasoning)
+                if (m.steps.isNotEmpty()) {
+                    val sArr = JSONArray()
+                    m.steps.forEach { st ->
+                        sArr.put(
+                            JSONObject().put("type", st.type).put("label", st.label)
+                                .put("detail", st.detail ?: JSONObject.NULL)
+                                .put("millis", st.millis)
+                        )
+                    }
+                    o.put("steps", sArr)
+                }
                 mArr.put(o)
             }
             arr.put(
