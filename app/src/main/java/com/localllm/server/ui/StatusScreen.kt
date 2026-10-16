@@ -96,11 +96,12 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                         number = true,
                         modifier = Modifier.width(78.dp)
                     )
-                    TextButton(
+                    androidx.compose.material3.FilledTonalButton(
                         onClick = { vm.saveSettings() },
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                            horizontal = 8.dp, vertical = 0.dp
-                        )
+                            horizontal = 14.dp, vertical = 0.dp
+                        ),
+                        modifier = Modifier.height(32.dp)
                     ) { Text("保存", style = MaterialTheme.typography.labelMedium) }
                     Text(
                         "改端口后需重启服务",
