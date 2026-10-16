@@ -171,13 +171,10 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         // ---- MCP 服务器（实验，stdio 型，llama-server 内置客户端） ----
         McpSection()
 
-        OutlinedTextField(
-            value = settings.port,
-            onValueChange = { v -> vm.updateSettings { it.copy(port = v.filter(Char::isDigit)) } },
-            label = { Text("端口") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth()
+        Text(
+            "服务端口已移至「状态」页（服务状态卡片内），改动后需重启服务生效。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         OutlinedTextField(
             value = settings.ctxSize,

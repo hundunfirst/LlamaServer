@@ -36,6 +36,7 @@ import com.localllm.server.core.ServerUiState
 @Composable
 fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val state by vm.serverState.collectAsStateWithLifecycle()
+    val settings by vm.settings.collectAsStateWithLifecycle()
     val selectedModel by vm.selectedModel.collectAsStateWithLifecycle()
     val selectedMmproj by vm.selectedMmproj.collectAsStateWithLifecycle()
     val models by vm.models.collectAsStateWithLifecycle()
@@ -78,6 +79,29 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                         clipboard.setText(AnnotatedString(state.endpoint))
                     }) { Text("复制地址") }
                 }
+                // 服务端口（从设置页迁来）：改完保存，重启服务生效
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.OutlinedTextField(
+                        value = settings.port,
+                        onValueChange = { v ->
+                            vm.updateSettings { it.copy(port = v.filter(Char::isDigit)) }
+                        },
+                        label = { Text("服务端口") },
+                        singleLine = true,
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                        ),
+                        modifier = Modifier.width(150.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    OutlinedButton(onClick = { vm.saveSettings() }) { Text("保存") }
+                }
+                Text(
+                    "修改端口后需重启服务生效（本机 API 地址随之变化）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 val rawName = models.find { it.file.absolutePath == selectedModel }?.name
                 val modelName = com.localllm.server.core.AppSettings.aliasFor(state.modelPath) ?: rawName
                 Text(
