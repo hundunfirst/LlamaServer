@@ -3,20 +3,18 @@ package com.localllm.server.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -31,45 +29,37 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.localllm.server.core.AppSettings
 import com.localllm.server.core.McpHttpClient
+import com.localllm.server.core.McpHttpServer
+import com.localllm.server.core.McpHttpTool
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
+import java.util.UUID
 
 /**
- * HTTP MCP 服务器配置弹窗（对齐 Rikkahub 交互）：
- * 填 名称 + 流式HTTP地址 → 「连接并拉取工具」→ 工具列表逐项开关 → 保存。
- * 保存后聊天直接用缓存的工具列表注入，不再每次请求现拉。
+ * 单个 HTTP MCP 服务器的配置弹窗（新建 initial=null / 编辑传入已有条目）。
+ * 流程对齐 Rikkahub：填 名称+流式HTTP地址 → 「连接并拉取工具」→ 工具逐项开关 → 保存回列表。
  */
 @Composable
-fun McpConfigDialog(onDismiss: () -> Unit) {
-    var enabled by remember { mutableStateOf(AppSettings.mcpHttpEnabled) }
-    var name by remember { mutableStateOf(AppSettings.mcpHttpName) }
-    var url by remember { mutableStateOf(AppSettings.mcpHttpUrl) }
-
-    var tools by remember {
-        mutableStateOf(
-            runCatching {
-                McpHttpClient.parseTools(JSONArray(AppSettings.mcpToolsJson))
-            }.getOrDefault(emptyList())
-        )
-    }
-    var toolEnabled by remember {
-        mutableStateOf(
-            runCatching { JSONObject(AppSettings.mcpToolsEnabledJson) }.getOrDefault(JSONObject())
-        )
-    }
-
+fun McpConfigDialog(
+    initial: McpHttpServer?,
+    onDismiss: () -> Unit,
+    onSave: (McpHttpServer) -> Unit
+) {
+    var enabled by remember { mutableStateOf(initial?.enabled ?: true) }
+    var name by remember { mutableStateOf(initial?.name ?: "") }
+    var url by remember { mutableStateOf(initial?.url ?: "") }
+    var tools by remember { mutableStateOf(initial?.tools ?: emptyList()) }
     var loading by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("MCP 服务器配置", fontWeight = FontWeight.SemiBold) },
+        title = {
+            Text(if (initial == null) "添加 MCP 服务器" else "编辑 MCP 服务器", fontWeight = FontWeight.SemiBold)
+        },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -80,13 +70,13 @@ fun McpConfigDialog(onDismiss: () -> Unit) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("启用 MCP", style = MaterialTheme.typography.bodyLarge)
+                    Text("启用", style = MaterialTheme.typography.bodyLarge)
                     Switch(checked = enabled, onCheckedChange = { enabled = it })
                 }
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("名称（别名，如 Mt）") },
+                    label = { Text("名称（如 Mt）") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -115,12 +105,18 @@ fun McpConfigDialog(onDismiss: () -> Unit) {
                                         McpHttpClient.invalidate(u)
                                         McpHttpClient.listTools(u, null)
                                     }
-                                    tools = list
-                                    if (list.isEmpty()) {
-                                        status = "连接成功，但服务器没有返回工具"
-                                    } else {
-                                        status = "拉取成功：${list.size} 个工具，保存后生效"
+                                    // 保留同名工具原有的开关状态
+                                    val old = tools.associateBy { it.name }
+                                    tools = list.map { t ->
+                                        McpHttpTool(
+                                            name = t.name,
+                                            description = t.description,
+                                            inputSchema = t.inputSchema,
+                                            enabled = old[t.name]?.enabled ?: true
+                                        )
                                     }
+                                    status = if (list.isEmpty()) "连接成功，但服务器没有返回工具"
+                                             else "拉取成功：${list.size} 个工具，保存后生效"
                                 } catch (e: Exception) {
                                     status = "拉取失败：${e.message}"
                                 } finally {
@@ -131,11 +127,9 @@ fun McpConfigDialog(onDismiss: () -> Unit) {
                         enabled = !loading
                     ) { Text("连接并拉取工具") }
                     if (loading) {
-                        Spacer(modifier = Modifier.height(0.dp))
                         CircularProgressIndicator(
-                            modifier = Modifier
-                                .padding(start = 12.dp)
-                                .height(20.dp)
+                            modifier = Modifier.padding(start = 12.dp).size(20.dp),
+                            strokeWidth = 2.dp
                         )
                     }
                 }
@@ -144,23 +138,21 @@ fun McpConfigDialog(onDismiss: () -> Unit) {
                         it,
                         style = MaterialTheme.typography.bodySmall,
                         color = if (it.startsWith("拉取失败")) MaterialTheme.colorScheme.error
-                                else MaterialTheme.colorScheme.onSurfaceVariant
+                               else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
 
                 if (tools.isNotEmpty()) {
                     Text(
-                        "工具（${tools.count { toolEnabled.optBoolean(it.name, true) }}/${tools.size} 已启用）",
+                        "工具（${tools.count { it.enabled }}/${tools.size} 已启用）",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold
                     )
                     Column(
-                        modifier = Modifier.heightIn(max = 280.dp)
-                            .verticalScroll(rememberScrollState()),
+                        modifier = Modifier.heightIn(max = 280.dp).verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        tools.forEach { t ->
-                            val on = toolEnabled.optBoolean(t.name, true)
+                        tools.forEachIndexed { idx, t ->
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically
@@ -181,11 +173,9 @@ fun McpConfigDialog(onDismiss: () -> Unit) {
                                     }
                                 }
                                 Switch(
-                                    checked = on,
-                                    onCheckedChange = { checked ->
-                                        val o = JSONObject(toolEnabled.toString())
-                                        o.put(t.name, checked)
-                                        toolEnabled = o
+                                    checked = t.enabled,
+                                    onCheckedChange = { on ->
+                                        tools = tools.toMutableList().also { it[idx] = t.copy(enabled = on) }
                                     }
                                 )
                             }
@@ -202,25 +192,21 @@ fun McpConfigDialog(onDismiss: () -> Unit) {
         },
         confirmButton = {
             TextButton(onClick = {
-                AppSettings.mcpHttpEnabled = enabled
-                AppSettings.mcpHttpName = name.trim()
-                AppSettings.mcpHttpUrl = url.trim()
-                val arr = JSONArray()
-                tools.forEach { t ->
-                    arr.put(
-                        JSONObject()
-                            .put("name", t.name)
-                            .put("description", t.description)
-                            .put("inputSchema", t.inputSchema)
+                val u = url.trim()
+                if (u.isNotBlank()) {
+                    onSave(
+                        McpHttpServer(
+                            id = initial?.id ?: UUID.randomUUID().toString(),
+                            name = name.trim().ifBlank { "MCP" },
+                            url = u,
+                            enabled = enabled,
+                            tools = tools
+                        )
                     )
                 }
-                AppSettings.mcpToolsJson = arr.toString()
-                AppSettings.mcpToolsEnabledJson = toolEnabled.toString()
                 onDismiss()
             }) { Text("保存") }
         },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
-        }
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
 }

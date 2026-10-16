@@ -295,8 +295,11 @@ object ServerProcessManager {
     }
 
     fun clearLogs() {
-        logBuffer.clear()
-        _logLines.value = emptyList()
+        synchronized(logBuffer) {
+            logBuffer.clear()
+            _logLines.value = emptyList()
+            runCatching { logFile?.writeText("") }
+        }
     }
 
     /** 取第一个活跃 IPv4（优先 wlan），用于状态页展示真实局域网地址 */
@@ -379,31 +382,6 @@ object ServerProcessManager {
         if (fa == "on" || fa == "off") {
             cmd += listOf("-fa", fa)
         }
-        // MCP（stdio 型，llama-server 内置客户端；Cursor 兼容格式）
-        runCatching {
-            val arr = org.json.JSONArray(AppSettings.mcpServersJson)
-            if (arr.length() > 0) {
-                val servers = org.json.JSONObject()
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    val name = o.optString("name")
-                    val command = o.optString("command")
-                    if (name.isBlank() || command.isBlank()) continue
-                    val entry = org.json.JSONObject().put("command", command)
-                    val argsArr = org.json.JSONArray()
-                    o.optString("args").trim().split(Regex("\\s+"))
-                        .filter { it.isNotBlank() }.forEach { argsArr.put(it) }
-                    entry.put("args", argsArr)
-                    servers.put(name, entry)
-                }
-                if (servers.length() > 0) {
-                    cmd += listOf(
-                        "--mcp-servers-json",
-                        org.json.JSONObject().put("mcpServers", servers).toString()
-                    )
-                }
-            }
-        }
         return cmd
     }
 
@@ -423,15 +401,45 @@ object ServerProcessManager {
         }
     }
 
-    /** 高频噪音行（slot 调度细节）——开发者可通过 logcat 查看原文，日志页直接过滤。
-     *  注意：slot release / print_timings 是每请求一次的进度与耗时，不许过滤（否则运行期日志全空）。 */
+    /** 高频噪音行：slot print_timing 是每 3 秒一次的心跳进度（会把有用条目挤出缓冲），必须过滤；
+     *  slot 调度/graph 细节同理。每请求级信息由 app 侧「聊天：完成」等条目提供。 */
     private fun isNoiseLine(line: String): Boolean =
-        line.contains("slot get_availabl") ||
+        line.contains("slot print_timing") || line.contains("slot get_availabl") ||
                 line.contains("slot launch_slot_") ||
                 line.contains("graphs reused") || line.contains("graph reallocs")
 
     /** 供聊天等 app 侧组件写入同一日志缓冲（日志页可见） */
     fun appLog(line: String) = appendLog(line)
+
+    // ---- 日志持久化：files/logs.txt，启动加载、每行追加、超 1MB 轮转 ----
+    @Volatile
+    private var logFile: java.io.File? = null
+
+    fun init(context: android.content.Context) {
+        val f = java.io.File(context.filesDir, "logs.txt")
+        logFile = f
+        runCatching {
+            if (f.exists() && f.length() > 0) {
+                val tail = f.readLines().takeLast(MAX_LOG_LINES)
+                synchronized(logBuffer) {
+                    logBuffer.clear()
+                    logBuffer.addAll(tail)
+                    _logLines.value = logBuffer.toList()
+                }
+            }
+        }
+    }
+
+    private fun persistLineLocked(line: String) {
+        val f = logFile ?: return
+        runCatching {
+            f.appendText(line + "\n")
+            if (f.length() > 1024 * 1024) {
+                val tail = f.readLines().takeLast(MAX_LOG_LINES)
+                f.writeText(tail.joinToString("\n") + "\n")
+            }
+        }
+    }
 
     private fun appendLog(line: String) {
         Log.d(TAG, line)
@@ -441,6 +449,7 @@ object ServerProcessManager {
             logBuffer.addLast(zh)
             while (logBuffer.size > MAX_LOG_LINES) logBuffer.removeFirst()
             _logLines.value = logBuffer.toList()
+            persistLineLocked(zh)
         }
     }
 

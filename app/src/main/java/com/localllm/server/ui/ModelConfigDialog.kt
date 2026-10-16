@@ -57,6 +57,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
@@ -125,6 +126,8 @@ fun ModelConfigDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     var eLabel by remember { mutableStateOf("") }
     var eCtx by remember { mutableStateOf("") }
     var eOut by remember { mutableStateOf("") }
+    var ctxFocused by remember { mutableStateOf(false) }
+    var outFocused by remember { mutableStateOf(false) }
     var eMods by remember { mutableStateOf(listOf("文本")) }
     var eError by remember { mutableStateOf<String?>(null) }
     var confirmDel by remember { mutableStateOf(false) }
@@ -649,17 +652,27 @@ fun ModelConfigDialog(vm: MainViewModel, onDismiss: () -> Unit) {
                             onValueChange = { eCtx = it },
                             label = "上下文",
                             keyboardNumber = true,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier
+                                .weight(1f)
+                                .onFocusChanged { ctxFocused = it.isFocused }
                         )
                         CompactOutlinedField(
                             value = eOut,
                             onValueChange = { eOut = it },
                             label = "输出上限",
                             keyboardNumber = true,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier
+                                .weight(1f)
+                                .onFocusChanged { outFocused = it.isFocused }
                         )
                     }
-                    // 上下文快捷候选（单行放不下时去掉 256K）
+                    // 快捷候选：填充「当前焦点所在」的输入框（输出上限聚焦则填输出，否则上下文）
+                    val targetOut = outFocused && !ctxFocused
+                    Text(
+                        if (targetOut) "快捷值 → 输出上限" else "快捷值 → 上下文",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -672,8 +685,10 @@ fun ModelConfigDialog(vm: MainViewModel, onDismiss: () -> Unit) {
                             "131072" to "128K"
                         ).forEach { (v, label) ->
                             FilterChip(
-                                selected = eCtx.trim() == v,
-                                onClick = { eCtx = v },
+                                selected = if (targetOut) eOut.trim() == v else eCtx.trim() == v,
+                                onClick = {
+                                    if (targetOut) eOut = v else eCtx = v
+                                },
                                 label = { Text(label, style = MaterialTheme.typography.labelSmall) }
                             )
                         }

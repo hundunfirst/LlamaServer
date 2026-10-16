@@ -82,6 +82,52 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             )
         }
 
+        // ---- 图片处理方式（多模态直读 vs 本地 OCR）----
+        var imgMode by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.imageInputMode)
+        }
+        Text(
+            "图片处理方式",
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        Text(
+            "自动：有多模态（mmproj）就直读图片，否则用内置 OCR 抽文字（OCR 不上传图片，更省更快）；" +
+                    "多模态：始终把图片交给视觉模型；OCR：始终本地识别文字后再提问。立即生效。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        QuickChips(
+            options = listOf("auto" to "自动", "vision" to "多模态直读", "ocr" to "OCR 提取文字"),
+            current = imgMode
+        ) { v ->
+            imgMode = v
+            com.localllm.server.core.AppSettings.imageInputMode = v
+        }
+
+        // ---- 图片轮的联网搜索策略（隐私）----
+        var imgPolicy by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.imageSearchPolicy)
+        }
+        Text(
+            "含图片时的联网搜索",
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        Text(
+            "禁止：含图片的消息不提供搜索工具（证件照最安全）；" +
+                    "先问我：模型想搜时弹窗展示将要发送的内容，你允许才发；允许：直接搜。立即生效。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        QuickChips(
+            options = listOf("block" to "禁止", "ask" to "先问我", "allow" to "允许"),
+            current = imgPolicy
+        ) { v ->
+            imgPolicy = v
+            com.localllm.server.core.AppSettings.imageSearchPolicy = v
+        }
+
         // ---- 聊天渠道（OpenAI 兼容供应商，弹窗配置） ----
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -307,130 +353,94 @@ private fun QuickChips(
     Spacer(modifier = Modifier.height(4.dp))
 }
 
-// ---- MCP 服务器管理（llama-server 内置 MCP 客户端，stdio 型） ----
+
+// ---- MCP 工具（HTTP 多服务器）：列表卡片 + 添加/编辑弹窗 + 每服务器开关与删除 ----
 @Composable
 private fun McpSection() {
-    var list by remember {
-        mutableStateOf(
-            runCatching {
-                val arr = org.json.JSONArray(com.localllm.server.core.AppSettings.mcpServersJson)
-                (0 until arr.length()).mapNotNull { i ->
-                    val o = arr.optJSONObject(i) ?: return@mapNotNull null
-                    Triple(o.optString("name"), o.optString("command"), o.optString("args"))
-                }
-            }.getOrDefault(emptyList())
-        )
+    var servers by remember {
+        mutableStateOf(com.localllm.server.core.AppSettings.loadMcpServers())
     }
+    var dialogInitial by remember { mutableStateOf<com.localllm.server.core.McpHttpServer?>(null) }
     var dialogOpen by remember { mutableStateOf(false) }
-    var nameT by remember { mutableStateOf("") }
-    var cmdT by remember { mutableStateOf("") }
-    var argsT by remember { mutableStateOf("") }
 
     fun persist() {
-        val arr = org.json.JSONArray()
-        list.forEach { (n, c, a) ->
-            arr.put(org.json.JSONObject().put("name", n).put("command", c).put("args", a))
-        }
-        com.localllm.server.core.AppSettings.mcpServersJson = arr.toString()
+        com.localllm.server.core.AppSettings.saveMcpServers(servers)
     }
 
-    Text("MCP 服务器（实验）", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+    Text("MCP 工具（HTTP）", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
     Text(
-        "stdio 型：由 llama-server 拉起本地命令、收集工具并注入对话。" +
-                "⚠ 命令等同于允许其在手机上执行，只添加可信 MCP。重启服务生效。",
+        "远程流式 HTTP 端点（如 MT 管理器）。可添加多个服务器，每个可单独启停；" +
+                "聊天时自动注入已启用服务器的工具（以 mcp__服务器__工具 前缀防冲突）。",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
-    list.forEachIndexed { i, (n, c, a) ->
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
-                Text(n, style = MaterialTheme.typography.bodyMedium)
-                Text(c + (if (a.isNotBlank()) " " + a else ""),
+    if (servers.isEmpty()) {
+        Text(
+            "尚未添加服务器。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(vertical = 4.dp)
+        )
+    }
+    servers.forEachIndexed { i, s ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                Modifier
+                    .weight(1f)
+                    .padding(vertical = 4.dp)
+            ) {
+                Text(s.name, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "${s.url} · ${s.tools.size} 个工具（启用 ${s.tools.count { it.enabled }}）",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
             }
+            Switch(
+                checked = s.enabled,
+                onCheckedChange = { on ->
+                    servers = servers.toMutableList().also { it[i] = s.copy(enabled = on) }
+                    persist()
+                }
+            )
             TextButton(onClick = {
-                nameT = n; cmdT = c; argsT = a
-                list = list.filterIndexed { idx, _ -> idx != i }
+                dialogInitial = s
                 dialogOpen = true
             }) { Text("编辑") }
             TextButton(onClick = {
-                list = list.filterIndexed { idx, _ -> idx != i }
+                servers = servers.filterIndexed { idx, _ -> idx != i }
                 persist()
             }) { Text("删除", color = MaterialTheme.colorScheme.error) }
         }
     }
-    Button(onClick = {
-        nameT = ""; cmdT = ""; argsT = ""
-        dialogOpen = true
-    }, modifier = Modifier.fillMaxWidth()) { Text("添加 MCP 服务器") }
+    Button(
+        onClick = {
+            dialogInitial = null
+            dialogOpen = true
+        },
+        modifier = Modifier.fillMaxWidth()
+    ) { Text("添加 MCP 服务器") }
 
     if (dialogOpen) {
-        AlertDialog(
-            onDismissRequest = { dialogOpen = false },
-            title = { Text("MCP 服务器") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(nameT, { nameT = it }, label = { Text("名称（如 filesystem）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(cmdT, { cmdT = it }, label = { Text("命令（如 npx）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(argsT, { argsT = it }, label = { Text("参数（空格分隔）") }, modifier = Modifier.fillMaxWidth())
+        com.localllm.server.ui.McpConfigDialog(
+            initial = dialogInitial,
+            onDismiss = { dialogOpen = false },
+            onSave = { updated ->
+                val existing = servers.indexOfFirst { it.id == updated.id }
+                servers = if (existing >= 0) {
+                    servers.toMutableList().also { it[existing] = updated }
+                } else {
+                    servers + updated
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    if (nameT.isNotBlank() && cmdT.isNotBlank()) {
-                        list = list + Triple(nameT.trim(), cmdT.trim(), argsT.trim())
-                        persist()
-                    }
-                    dialogOpen = false
-                }) { Text("保存") }
-            },
-            dismissButton = { TextButton(onClick = { dialogOpen = false }) { Text("取消") } }
+                persist()
+                dialogOpen = false
+            }
         )
-    }
-
-    // ---- HTTP 型 MCP（app 侧客户端，聊天时自动注入 tools；配置在独立弹窗） ----
-    Spacer(modifier = Modifier.height(16.dp))
-    var mcpDialogOpen by remember { mutableStateOf(false) }
-    var mcpSummaryTick by remember { mutableStateOf(0) }
-    @Suppress("UNUSED_EXPRESSION") mcpSummaryTick
-    Text("MCP 工具（HTTP）", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-    Text(
-        "远程流式 HTTP 端点（如 MT 管理器）。连接拉取工具后聊天直接可用，无需重启服务。",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant
-    )
-    val mcpOn = com.localllm.server.core.AppSettings.mcpHttpEnabled
-    val mcpName = com.localllm.server.core.AppSettings.mcpHttpName
-    val mcpUrl = com.localllm.server.core.AppSettings.mcpHttpUrl
-    val mcpToolCount = runCatching {
-        org.json.JSONArray(com.localllm.server.core.AppSettings.mcpToolsJson).length()
-    }.getOrDefault(0)
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(
-                if (mcpOn && mcpUrl.isNotBlank())
-                    (if (mcpName.isNotBlank()) mcpName else "MCP") + " · $mcpUrl"
-                else "未配置",
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1
-            )
-            Text(
-                if (mcpToolCount > 0) "$mcpToolCount 个工具" else "点「配置」连接服务器拉取工具",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        OutlinedButton(onClick = { mcpDialogOpen = true }) { Text("配置") }
-    }
-    if (mcpDialogOpen) {
-        com.localllm.server.ui.McpConfigDialog(onDismiss = {
-            mcpDialogOpen = false
-            mcpSummaryTick++
-        })
     }
 }

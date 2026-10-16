@@ -1,35 +1,23 @@
-# MCP 集成方案（M6）— 调研结论
+# MCP 集成方案（HTTP 多服务器）
 
-> 调研日期：2026-10-15 · 基于 llama.cpp 3fb4767 本地源码
+> stdio 型 MCP（llama-server `--mcp-servers-json`）已移除：Android 手机上没有 npx/node，
+> 本地命令型 MCP 无法运行。当前与未来的 MCP 支持均为 **HTTP（Streamable HTTP）**。
 
-## 结论：不需要自研 MCP 协议栈
+## 架构
 
-llama-server **已内置实验性 MCP 客户端**（`tools/server/server-mcp.cpp`）：
+- **App 侧 MCP 客户端**（`core/McpHttpClient.kt`）：完整 Streamable HTTP JSON-RPC——
+  `initialize` 握手（协议版本协商 + `Mcp-Session-Id`）→ `notifications/initialized` →
+  `tools/list` / `tools/call`，404 自动重连重试。
+- **多服务器配置**：设置页「MCP 工具（HTTP）」卡片列表，每个服务器独立：
+  启用开关、编辑、删除；弹窗内「连接并拉取工具」+ 工具逐项开关（对齐 Rikkahub 交互）。
+  持久化于 `mcp_http_servers`（SharedPreferences JSON），旧单服务器配置启动时自动迁移。
+- **聊天注入**：发送前聚合所有已启用服务器的工具，函数名加前缀 `mcp__<服务器>__<工具>`
+  防止跨服务器重名；模型 `tool_call` 后按前缀路由回对应服务器执行，结果以 tool 消息回传，
+  最多 5 轮。**只执行真实注入过的工具名**（弱模型幻觉的工具调用直接忽略并结束本轮）。
+- **内置搜索**（`core/WebSearch.kt`）：免密钥 Bing 搜索，以 `web_search` 工具注入（聊天顶栏 🔍），
+  与 MCP 工具同一条 tool_call 循环；每条消息最多搜索 3 次；来源附在回答末尾。
 
-- `--mcp-servers-json '<JSON>'`：直接传入 **Cursor 兼容格式** 的服务器定义
-- `--mcp-servers-config <PATH>`：同上，从文件读取
-- 行为：llama-server 拉起配置的 MCP 服务器（**stdio 子进程**，按 `command` 启动）、收集其 tools、通过原生 tool-calling 注入对话——与我们的 OpenAI 接口天然打通
+## 已知限制
 
-JSON 格式（节选）：
-```json
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/sdcard/Download"]
-    }
-  }
-}
-```
-
-## M6 实现范围（缩至约 1 天）
-
-1. 设置页新增「MCP 服务器」管理：条目 = 名称 + 命令 + 参数（空格分隔）
-2. 持久化（SharedPreferences JSON）→ 启动服务时拼 `--mcp-servers-json`
-3. 聊天/工具调用依赖 llama-server 原生 `tools` 协议（`--jinja` 已开）
-4. 注意：当前实验特性**仅支持 stdio（本地命令）型 MCP**；远程 HTTP/SSE 的 MCP 需后续版本或经 mcp-proxy 转 stdio
-5. 日志已有英文原文；MCP 报错行加入中文化映射
-
-## 安全提示
-
-配置里的 `command` 由 llama-server 直接执行——**只添加可信 MCP 服务器**（与 Cursor 同一风险模型）。设置页需固定提示。
+- 手机上无 OAuth 浏览器回环流程（远端如要求 OAuth 授权暂不支持）。
+- 工具执行无逐次「需要审批」弹窗（每个工具的启用开关是粗粒度控制）。

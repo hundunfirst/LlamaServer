@@ -13,16 +13,20 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -39,6 +43,7 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -394,18 +399,22 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
 
     var menuIndex by remember { mutableStateOf<Int?>(null) }
     var editingIndex by remember { mutableStateOf<Int?>(null) }
+    var deleteIndex by remember { mutableStateOf<Int?>(null) }
     var editText by remember { mutableStateOf("") }
 
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) vm.attachImage(uri)
     }
 
-    // 智能贴底滚动：新消息必到底；流式增长仅当"最后一条消息可见且离其底部<400px"（用户未上翻）时跟随
+    // 智能贴底滚动：新消息必到底；流式增长仅当"最后一条消息可见且离其底部<400px"（用户未上翻）时跟随。
+    // 跟随用增量 scrollBy(尺寸增量)，不用 scrollToItem 重锚定——重锚定在流式期间会闪动。
     var prevCount by remember { mutableStateOf(-1) }
+    var prevLastSize by remember { mutableStateOf(0) }
     val lastLen = messages.lastOrNull()?.let { it.content.length + (it.reasoning?.length ?: 0) } ?: 0
     LaunchedEffect(messages.size, lastLen, streaming) {
         if (messages.isEmpty()) {
             prevCount = -1
+            prevLastSize = 0
             return@LaunchedEffect
         }
         val info = listState.layoutInfo
@@ -414,8 +423,10 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 lastVisible.index == messages.size - 1 &&
                 (lastVisible.offset + lastVisible.size) - info.viewportEndOffset <= 400
         val newMessage = messages.size != prevCount
+        val sizeDelta = (lastVisible?.size ?: 0) - prevLastSize
         prevCount = messages.size
-        if (newMessage || atLastMsgBottom) {
+        prevLastSize = lastVisible?.size ?: 0
+        if (newMessage) {
             // 锚定最后一条的底部：先滚到该条，再把超出视口的部分补滚掉
             listState.scrollToItem(messages.size - 1)
             val v = listState.layoutInfo.visibleItemsInfo.lastOrNull()
@@ -423,6 +434,9 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 val over = (v.offset + v.size) - listState.layoutInfo.viewportEndOffset
                 if (over > 0) listState.scroll { scrollBy(over.toFloat()) }
             }
+        } else if (atLastMsgBottom && sizeDelta > 0) {
+            // 增量跟随：只滚消息长出来的部分，视口不跳
+            listState.scroll { scrollBy(sizeDelta.toFloat()) }
         }
     }
 
@@ -446,6 +460,55 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             },
             dismissButton = {
                 TextButton(onClick = { editingIndex = null }) { Text("取消") }
+            }
+        )
+    }
+
+    // 删除消息确认
+    deleteIndex?.let { idx ->
+        val target = messages.getOrNull(idx)
+        AlertDialog(
+            onDismissRequest = { deleteIndex = null },
+            title = { Text("删除这条消息？") },
+            text = {
+                Text(
+                    (if (target?.role == "user") "用户消息" else "助手回复") +
+                            "，共 ${target?.content?.length ?: 0} 字。删除后不可恢复。",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.deleteAt(idx)
+                    deleteIndex = null
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deleteIndex = null }) { Text("取消") } }
+        )
+    }
+
+    // 图片轮联网搜索确认（策略=先问我）：把即将发给搜索引擎的内容展示给用户
+    val searchAsk by vm.searchApproval.collectAsStateWithLifecycle()
+    searchAsk?.let { pending ->
+        AlertDialog(
+            onDismissRequest = { vm.approveSearch(false) },
+            title = { Text("允许联网搜索？") },
+            text = {
+                Column {
+                    Text(
+                        "本轮消息包含图片。以下内容将被发送到搜索引擎（Bing）：",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(pending, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.approveSearch(true) }) { Text("允许") }
+            },
+            dismissButton = {
+                TextButton(onClick = { vm.approveSearch(false) }) { Text("拒绝") }
             }
         )
     }
@@ -505,6 +568,20 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 }
             }
             Row {
+                var searchOn by remember {
+                    mutableStateOf(com.localllm.server.core.AppSettings.webSearchEnabled)
+                }
+                IconButton(onClick = {
+                    searchOn = !searchOn
+                    com.localllm.server.core.AppSettings.webSearchEnabled = searchOn
+                }) {
+                    Icon(
+                        Icons.Default.Search,
+                        contentDescription = "联网搜索",
+                        tint = if (searchOn) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 IconButton(onClick = { showSessions = true }) {
                     Icon(Icons.Default.List, contentDescription = "会话列表")
                 }
@@ -589,7 +666,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             if (messages.isEmpty()) {
                 item {
                     Text(
-                        "服务运行中即可直接对话，无需额外配置。\n长按/⋮ 菜单支持复制、重发、编辑；代码块可一键复制或保存。",
+                        "服务运行中即可直接对话，无需额外配置。\n长按/⋮ 菜单支持复制、重发、编辑、删除；代码块可一键复制或保存。",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 48.dp, start = 8.dp, end = 8.dp)
@@ -599,10 +676,13 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             itemsIndexed(messages) { i, msg ->
                 val isUser = msg.role == "user"
                 val waiting = !isUser && streaming && msg.content.isEmpty() && msg.reasoning.isNullOrEmpty()
+                // 思考进行中（有思考文本、正文还没开始）：思考卡显示动态"思考中"
+                val thinking = !isUser && streaming && msg.content.isEmpty() && !msg.reasoning.isNullOrEmpty()
                 MessageBubble(
                     msg = msg,
                     isUser = isUser,
                     waiting = waiting,
+                    thinking = thinking,
                     showStats = (!isUser && i == messages.lastIndex && lastStats != null),
                     stats = lastStats ?: "",
                     menuOpen = menuIndex == i,
@@ -623,6 +703,10 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                             editText = msg.content
                             editingIndex = i
                         }
+                    },
+                    onDelete = {
+                        menuIndex = null
+                        deleteIndex = i
                     }
                 )
             }
@@ -680,6 +764,7 @@ private fun MessageBubble(
     msg: ChatStore.Msg,
     isUser: Boolean,
     waiting: Boolean,
+    thinking: Boolean = false,
     showStats: Boolean,
     stats: String,
     menuOpen: Boolean,
@@ -687,7 +772,8 @@ private fun MessageBubble(
     onMenuClose: () -> Unit,
     onCopy: () -> Unit,
     onResend: () -> Unit,
-    onEdit: () -> Unit
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
@@ -720,22 +806,54 @@ private fun MessageBubble(
                             ) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
-                                        if (thinkOpen) "🧠 思考过程" else "🧠 已深度思考，点击查看",
+                                        when {
+                                            thinkOpen -> "🧠 思考过程"
+                                            thinking -> "🧠 思考中…"
+                                            else -> "🧠 已深度思考，点击查看"
+                                        },
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.weight(1f)
                                     )
+                                    if (thinking) {
+                                        androidx.compose.material3.CircularProgressIndicator(
+                                            modifier = Modifier.size(12.dp).padding(end = 4.dp),
+                                            strokeWidth = 1.5.dp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                     TextButton(onClick = { thinkOpen = !thinkOpen }) {
                                         Text(if (thinkOpen) "收起" else "展开", style = MaterialTheme.typography.labelSmall)
                                     }
                                 }
                                 if (thinkOpen) {
-                                    Text(
-                                        latexToUnicode(msg.reasoning!!),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(top = 4.dp)
-                                    )
+                                    // 固定盒子：思考只能在盒内滚动（限高260dp），正文是全局页面。
+                                    // 展开时滚到最新；流式期间贴近底部时自动跟随；上翻阅读则不打扰。
+                                    val thinkScroll = rememberScrollState()
+                                    var thinkJumped by remember { mutableStateOf(false) }
+                                    LaunchedEffect(msg.reasoning?.length) {
+                                        val max = thinkScroll.maxValue
+                                        if (max <= 0) return@LaunchedEffect
+                                        if (!thinkJumped) {
+                                            thinkScroll.scrollTo(max)
+                                            thinkJumped = true
+                                        } else if (thinkScroll.value >= max - 80) {
+                                            thinkScroll.scrollTo(max)
+                                        }
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(max = 260.dp)
+                                            .verticalScroll(thinkScroll)
+                                            .padding(top = 4.dp)
+                                    ) {
+                                        Text(
+                                            latexToUnicode(msg.reasoning!!),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -842,6 +960,13 @@ private fun MessageBubble(
                                 leadingIcon = { Icon(Icons.Default.Edit, null) },
                                 onClick = onEdit
                             )
+                            DropdownMenuItem(
+                                text = { Text("删除", color = MaterialTheme.colorScheme.error) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error)
+                                },
+                                onClick = onDelete
+                            )
                         }
                         IconButton(onClick = onMenuOpen, modifier = Modifier.width(36.dp)) {
                             Icon(
@@ -854,19 +979,35 @@ private fun MessageBubble(
                     }
                 }
                 if (!isUser && msg.content.isNotBlank()) {
-                    TextButton(
-                        onClick = onCopy,
-                        modifier = Modifier.padding(top = 0.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.ContentCopy,
-                            contentDescription = "复制回复",
-                            modifier = Modifier.size(14.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("复制", style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(
+                            onClick = onCopy,
+                            modifier = Modifier.padding(top = 0.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.ContentCopy,
+                                contentDescription = "复制回复",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("复制", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        TextButton(
+                            onClick = onDelete,
+                            modifier = Modifier.padding(top = 0.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = "删除回复",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("删除", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error)
+                        }
                     }
                 }
                 if (showStats) {

@@ -7,7 +7,9 @@ import com.localllm.server.core.AppSettings
 import com.localllm.server.core.ChatClient
 import com.localllm.server.core.ChatStore
 import com.localllm.server.core.McpHttpClient
+import com.localllm.server.core.OcrEngine
 import com.localllm.server.core.ServerProcessManager
+import com.localllm.server.core.WebSearch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
@@ -38,6 +40,34 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
+
+    /** 待用户确认的联网搜索（图片轮 + "先问我"策略）：值为将要发送给搜索引擎的内容 */
+    private val _searchApproval = MutableStateFlow<String?>(null)
+    val searchApproval: StateFlow<String?> = _searchApproval.asStateFlow()
+    private var approvalDeferred: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+
+    /** 用户对「图片轮联网搜索」的确认结果 */
+    fun approveSearch(allow: Boolean) {
+        approvalDeferred?.complete(allow)
+        approvalDeferred = null
+        _searchApproval.value = null
+    }
+
+    /** 图片轮搜索确认：弹窗等待用户决定，超时（120s）视为拒绝 */
+    private suspend fun askSearchApproval(query: String): Boolean {
+        val d = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        approvalDeferred = d
+        _searchApproval.value = WebSearch.sanitizeQuery(query).first
+        ServerProcessManager.appLog("图片轮联网搜索待用户确认：「${query.take(30)}」")
+        val result = kotlinx.coroutines.withTimeoutOrNull(120_000L) { d.await() }
+        if (result == null) {
+            approvalDeferred = null
+            _searchApproval.value = null
+            ServerProcessManager.appLog("确认超时（120s），按拒绝处理")
+            return false
+        }
+        return result
+    }
 
     private val _lastStats = MutableStateFlow<String?>(null)
     val lastStats: StateFlow<String?> = _lastStats.asStateFlow()
@@ -112,64 +142,178 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             _streaming.value = true
             _error.value = null
             _lastStats.value = null
+            // 模型“答完又想再答”（单次生成内二次思考）时自动截断本轮
+            var autoStopped = false
+            var abortDeltas = 0
             try {
                 // 提示词保持最小化：过多硬性约束会让小模型在思考里反复“检查规则”而失控。
                 // LaTeX 已有客户端转换器兜底，不再要求模型禁用。
-                val systemText = if (AppSettings.thinkEnabled) {
+                val searchOn = AppSettings.webSearchEnabled
+                // 隐私护栏：本轮用户消息含图片（可能是身份证/证件等敏感件）→ 不注入任何联网搜索工具，
+                // 并把模型幻觉出的 web_search 调用靠白名单挡掉（OCR 文字不会流向搜索引擎）。
+                val turnHasImage = _messages.value.dropLast(1).lastOrNull()?.imageB64 != null
+                // 含图片轮：仅「禁止」策略时不注入搜索工具；「先问我」由执行前弹窗把关；「允许」照常
+                val searchBlockedByImage =
+                    turnHasImage && AppSettings.imageSearchPolicy == "block"
+                val searchAvailable = searchOn && !searchBlockedByImage
+                if (searchOn && searchBlockedByImage) {
+                    ServerProcessManager.appLog("本轮含图片：出于隐私保护未注入联网搜索工具")
+                }
+                val today = java.text.SimpleDateFormat("yyyy年M月d日", java.util.Locale.CHINA)
+                    .format(java.util.Date())
+                val systemText = (if (AppSettings.thinkEnabled) {
                     "用中文简洁回答。"
                 } else {
                     "不要输出思考过程，直接用中文简洁回答。"
-                }
+                }) + if (searchAvailable) {
+                    "今天是${today}。涉及最新信息时，先用 web_search 工具联网查询再回答，不要臆造日期。"
+                } else ""
                 val history = _messages.value.dropLast(1)
+                // 图片路径二选一（不叠加、不改提示词）：
+                //  视觉模型直读 或 本地 OCR 抽文字（省掉整张图的 token 与视觉前向）
+                val visionReady = AppSettings.selectedMmprojPath
+                    ?.let { java.io.File(it).exists() } == true
+                val useOcr = when (AppSettings.imageInputMode) {
+                    "ocr" -> true
+                    "vision" -> false
+                    else -> !visionReady
+                }
+                var ocrLogged = false
                 val payloadMsgs = listOf(ChatClient.ChatMessage("system", systemText)) +
                         history.map { m ->
                             if (m.imageB64 != null) {
-                                val parts = org.json.JSONArray()
-                                parts.put(org.json.JSONObject().put("type", "text").put("text", m.content))
-                                parts.put(
-                                    org.json.JSONObject().put("type", "image_url").put(
-                                        "image_url",
-                                        org.json.JSONObject().put("url", "data:image/jpeg;base64,${m.imageB64}")
+                                if (useOcr) {
+                                    val ocrText = runCatching {
+                                        OcrEngine.recognize(
+                                            android.util.Base64.decode(
+                                                m.imageB64, android.util.Base64.NO_WRAP
+                                            )
+                                        )
+                                    }.getOrElse { e ->
+                                        ServerProcessManager.appLog("图片OCR失败：${e.message}，本次改为多模态直传")
+                                        null
+                                    }
+                                    if (!ocrLogged) {
+                                        ocrLogged = true
+                                        ServerProcessManager.appLog(
+                                            "图片：本地 OCR 提取 ${ocrText?.length ?: 0} 字" +
+                                                    "（模式=${if (AppSettings.imageInputMode == "auto") "自动" else "OCR"}）"
+                                        )
+                                    }
+                                    if (ocrText != null) {
+                                        ChatClient.ChatMessage(
+                                            m.role,
+                                            (if (m.content.isNotBlank()) m.content + "\n\n" else "") +
+                                                    "【图片文字识别（本地OCR）】\n$ocrText"
+                                        )
+                                    } else {
+                                        val parts = org.json.JSONArray()
+                                        parts.put(org.json.JSONObject().put("type", "text").put("text", m.content))
+                                        parts.put(
+                                            org.json.JSONObject().put("type", "image_url").put(
+                                                "image_url",
+                                                org.json.JSONObject().put("url", "data:image/jpeg;base64,${m.imageB64}")
+                                            )
+                                        )
+                                        ChatClient.ChatMessage(m.role, parts)
+                                    }
+                                } else {
+                                    if (!ocrLogged) {
+                                        ocrLogged = true
+                                        ServerProcessManager.appLog("图片：多模态直读（传图）")
+                                    }
+                                    val parts = org.json.JSONArray()
+                                    parts.put(org.json.JSONObject().put("type", "text").put("text", m.content))
+                                    parts.put(
+                                        org.json.JSONObject().put("type", "image_url").put(
+                                            "image_url",
+                                            org.json.JSONObject().put("url", "data:image/jpeg;base64,${m.imageB64}")
+                                        )
                                     )
-                                )
-                                ChatClient.ChatMessage(m.role, parts)
+                                    ChatClient.ChatMessage(m.role, parts)
+                                }
                             } else {
                                 ChatClient.ChatMessage(m.role, m.content)
                             }
                         }
                 val cloud = AppSettings.chatCloudEnabled && AppSettings.chatCloudUrl.isNotBlank()
 
-                // HTTP 型 MCP：用弹窗里拉取并保存的工具缓存（按开关过滤），聊天不再现拉
-                val mcpUrl = AppSettings.mcpHttpUrl.trim()
-                val mcpTools = if (AppSettings.mcpHttpEnabled && mcpUrl.isNotBlank()) {
-                    runCatching {
-                        val cached = McpHttpClient.parseTools(
-                            org.json.JSONArray(AppSettings.mcpToolsJson)
+                // HTTP MCP 多服务器：聚合已启用服务器的工具（mcp__服务器__工具 前缀防冲突），并记录路由
+                val mcpRoute = mutableMapOf<String, Pair<String, String>>() // 完整名 → (url, 原始工具名)
+                val mcpAgg = org.json.JSONArray()
+                AppSettings.loadMcpServers().filter { it.enabled }.forEach { s ->
+                    val prefix = "mcp__" + s.name.map { c -> if (c.isLetterOrDigit()) c else '_' }
+                        .joinToString("") + "__"
+                    s.tools.filter { it.enabled }.forEach { t ->
+                        val full = prefix + t.name
+                        mcpRoute[full] = s.url to t.name
+                        mcpAgg.put(
+                            org.json.JSONObject()
+                                .put("type", "function")
+                                .put(
+                                    "function", org.json.JSONObject()
+                                        .put("name", full)
+                                        .put("description", t.description)
+                                        .put("parameters", t.inputSchema)
+                                )
                         )
-                        val enabledMap = org.json.JSONObject(AppSettings.mcpToolsEnabledJson)
-                        val on = cached.filter { enabledMap.optBoolean(it.name, true) }
-                        if (on.isEmpty()) null else McpHttpClient.toOpenAiTools(on)
-                    }.getOrElse { e ->
-                        _error.value = "MCP 工具注入失败：${e.message}"
-                        null
                     }
-                } else null
+                }
+
+                // 工具合并：内置 web_search + 全部 MCP 服务器工具
+                val toolsJson = org.json.JSONArray().also { arr ->
+                    if (searchAvailable) arr.put(WebSearch.toolJson())
+                    for (i in 0 until mcpAgg.length()) arr.put(mcpAgg.getJSONObject(i))
+                }.takeIf { it.length() > 0 }
+                // 搜索配额用尽后本轮请求不带 web_search：模型无工具可调，只能产出文本回答
+                val toolsNoSearch = org.json.JSONArray().also { arr ->
+                    for (i in 0 until mcpAgg.length()) arr.put(mcpAgg.getJSONObject(i))
+                }.takeIf { it.length() > 0 }
 
                 ServerProcessManager.appLog(
                     "聊天：发送（" +
                             (if (cloud) "云端 ${AppSettings.chatCloudModel.ifBlank { "default" }}" else "本地") +
                             " · 历史 ${payloadMsgs.size - 1} 条" +
-                            (mcpTools?.let { " · 工具 ${it.length()} 个" } ?: "") + "）"
+                            (toolsJson?.let { " · 工具 ${it.length()} 个" } ?: "") +
+                            (if (searchAvailable) " · 搜索开" else "") + "）"
                 )
+
+                // 真实注入过的工具名白名单：模型幻觉出来的工具调用一律不执行（直接结束本轮）
+                val injectedNames = toolsJson?.let { arr ->
+                    (0 until arr.length()).mapNotNull { i ->
+                        arr.optJSONObject(i)?.optJSONObject("function")?.optString("name")
+                            ?.takeIf { it.isNotBlank() }
+                    }?.toSet()
+                } ?: emptySet()
+                var searchCount = 0
+                var loggedNoSearch = false
+                val searchedQueries = mutableMapOf<String, String>() // 规范化查询 → 结果文本（相同查询复用）
 
                 var apiMsgs = payloadMsgs
                 val usedTools = mutableListOf<String>()
+                val searchSources = mutableListOf<WebSearch.Result>()
                 var timingNote: String? = null
 
                 // 最多 5 轮工具调用，防止模型死循环
-                repeat(5) { round ->
+                // 注意：必须用 for + break——repeat 里的 return@repeat 是 continue 语义，
+                // 会导致「回答完成」后仍继续下一轮（历史 bug：同一问题最多被连答 5 遍）。
+                for (round in 0 until 5) {
                     ensureActive() // 停止/切换后不再进入下一轮
+                    // 提前强制：已搜过但走到第4轮仍无正文 → 立即移除搜索工具，逼模型作答
+                    val forceNoTools = searchAvailable && round >= 3 &&
+                            _messages.value.lastOrNull()?.content.isNullOrEmpty() == true
+                    if ((forceNoTools || (searchAvailable && searchCount >= 3)) && !loggedNoSearch) {
+                        loggedNoSearch = true
+                        ServerProcessManager.appLog(
+                            if (forceNoTools) "连续多轮未产出正文，本轮移除搜索工具（强制模型作答）"
+                            else "搜索配额已用尽，本轮起移除搜索工具（强制模型产出回答）"
+                        )
+                    }
+                    if (round > 0) {
+                        ServerProcessManager.appLog("工具回传完成，第 ${round + 1} 轮继续生成…")
+                    }
                     var deltaCount = 0
+                    var roundChars = 0
                     var firstDeltaMs = 0L
                     var serverStats: String? = null
                     var toolCalls: List<ChatClient.ToolCall> = emptyList()
@@ -188,7 +332,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         thinking = if (cloud) null else AppSettings.thinkEnabled,
                         // 本地生成上限：退化复读时不至于跑到撑满上下文
                         maxTokens = if (cloud) null else 4096,
-                        tools = if (round == 0) mcpTools else mcpTools, // 每轮都带工具，模型可连续调用
+                        // 搜索配额用尽 / 多轮无正文 → 不再提供搜索工具（防止弱模型空转到轮数上限、永远不回答）
+                        tools = if (forceNoTools || (searchAvailable && searchCount >= 3)) toolsNoSearch else toolsJson,
                         onToolCalls = { toolCalls = it },
                         onTiming = { ttfb, firstToken ->
                             // 云端慢排查：ttfb vs 首token 分离，判断慢在网络还是在推理
@@ -202,6 +347,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             if (_streaming.value) {
                                 contentStarted = true
                                 deltaCount++
+                                abortDeltas++
+                                roundChars += delta.length
                                 if (firstDeltaMs == 0L) firstDeltaMs = System.currentTimeMillis()
                                 val elapsed = (System.currentTimeMillis() - firstDeltaMs) / 1000.0
                                 if (elapsed > 0.3) {
@@ -216,11 +363,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             }
                         },
                         onReasoning = { r ->
-                            if (AppSettings.thinkEnabled && !contentStarted && _streaming.value) {
-                                val list = _messages.value.toMutableList()
-                                val last = list.removeLast()
-                                list.add(last.copy(reasoning = (last.reasoning ?: "") + r))
-                                _messages.value = list
+                            when {
+                                !AppSettings.thinkEnabled || !_streaming.value -> Unit
+                                // 正文已开始却再次思考 = 模型要“换条路再答一遍”（实测同一次生成内
+                                // 想→答→再想→再答）。罗马只走一次：截断本轮，保住已生成的回答。
+                                contentStarted -> {
+                                    if (!autoStopped) {
+                                        autoStopped = true
+                                        ServerProcessManager.appLog(
+                                            "检测到正文后模型再次思考，已自动截断本轮（防止重复作答）"
+                                        )
+                                        ChatClient.abort()
+                                    }
+                                }
+                                else -> {
+                                    val list = _messages.value.toMutableList()
+                                    val last = list.removeLast()
+                                    list.add(last.copy(reasoning = (last.reasoning ?: "") + r))
+                                    _messages.value = list
+                                }
                             }
                         },
                         onFinal = { tokens, tps, prompt ->
@@ -231,7 +392,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     )
 
-                    if (toolCalls.isEmpty()) {
+                    // 工具调用过滤（实测：弱模型答完会幻觉/再发 tool_call 引发假的第二轮）：
+                    // ① 本轮正文已成形（≥60字）→ 答后调用一律忽略，直接收尾；
+                    // ② 只执行真实注入过的工具名，幻觉工具直接忽略。
+                    val validCalls = when {
+                        roundChars >= 60 && toolCalls.isNotEmpty() -> {
+                            ServerProcessManager.appLog(
+                                "正文已完整（$roundChars 字），忽略答后工具调用：" +
+                                        toolCalls.joinToString { it.name } + "，本轮结束"
+                            )
+                            emptyList()
+                        }
+                        else -> {
+                            val ok = toolCalls.filter { it.name in injectedNames }
+                            val ignored = toolCalls.map { it.name }.toSet() - ok.map { it.name }.toSet()
+                            if (ignored.isNotEmpty()) {
+                                ServerProcessManager.appLog("忽略未注入的工具调用：${ignored.joinToString("、")}")
+                            }
+                            ok
+                        }
+                    }
+
+                    if (validCalls.isEmpty()) {
                         // 最终回复：合并统计
                         val timing = timingNote?.let { "$it · " } ?: ""
                         if (serverStats != null) {
@@ -243,14 +425,38 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 _lastStats.value = timing + "共 $deltaCount token · ${String.format("%.1f", tps)} tok/s"
                             }
                         }
+                        // 搜索来源页脚：只列正文实际引用到的来源（域名或标题命中），
+                        // 命中不到时回退前 5 条，避免「正文2条、来源15条」的错配
+                        if (searchSources.isNotEmpty()) {
+                            val answerText = _messages.value.lastOrNull()?.content ?: ""
+                            val cited = searchSources.filter { s ->
+                                val host = runCatching {
+                                    java.net.URI(s.url).host?.removePrefix("www.")
+                                }.getOrNull() ?: ""
+                                (host.isNotBlank() && answerText.contains(host)) ||
+                                        (s.title.length >= 6 && answerText.contains(s.title.take(6)))
+                            }
+                            val picked = (if (cited.isNotEmpty()) cited else searchSources)
+                                .distinctBy { it.url }.take(5)
+                            val footer = buildString {
+                                append("\n\n🔗 来源：\n")
+                                picked.forEachIndexed { i, s ->
+                                    append("${i + 1}. ${s.title}\n   ${s.url}\n")
+                                }
+                            }.trimEnd()
+                            val list = _messages.value.toMutableList()
+                            val last = list.removeLast()
+                            list.add(last.copy(content = last.content + footer))
+                            _messages.value = list
+                        }
                         ServerProcessManager.appLog("聊天：完成 · ${_lastStats.value ?: "（无统计）"}")
-                        return@repeat
+                        break
                     }
 
-                    // 执行工具调用并回传结果
+                    // 执行工具调用并回传结果（仅 validCalls）
                     val asstCalls = org.json.JSONArray()
                     val newMsgs = apiMsgs.toMutableList()
-                    toolCalls.forEach { tc ->
+                    validCalls.forEach { tc ->
                         usedTools.add(tc.name)
                         _lastStats.value = "🔧 调用 ${tc.name}…"
                         asstCalls.put(
@@ -265,21 +471,108 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                     newMsgs.add(ChatClient.ChatMessage("assistant", null, toolCalls = asstCalls))
-                        toolCalls.forEach { tc ->
+                        validCalls.forEach { tc ->
                         val result = runCatching {
-                            val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
-                            ServerProcessManager.appLog("MCP 调用：${tc.name}")
-                            McpHttpClient.callTool(mcpUrl, null, tc.name, args)
+                            if (tc.name == "web_search") {
+                                val query = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                    .optString("query")
+                                val norm = query.trim().lowercase()
+                                // 隐私策略：含图片轮次可"禁止/先问我/允许"
+                                val turnPolicy =
+                                    if (turnHasImage) AppSettings.imageSearchPolicy else "allow"
+                                when {
+                                    turnPolicy == "block" -> {
+                                        ServerProcessManager.appLog("图片轮已阻止联网搜索（策略=禁止）")
+                                        "本轮消息包含图片，出于隐私保护禁止联网搜索，请基于已有信息回答。"
+                                    }
+                                    turnPolicy == "ask" && !askSearchApproval(query) -> {
+                                        ServerProcessManager.appLog("用户拒绝了本次图片轮搜索")
+                                        "用户拒绝了本次联网搜索，请基于已有信息直接回答。"
+                                    }
+                                    norm.isNotBlank() && searchedQueries.containsKey(norm) -> {
+                                        ServerProcessManager.appLog("内置搜索：相同查询「${query.take(30)}」复用已有结果（不占用配额）")
+                                        searchedQueries[norm]!!
+                                    }
+                                    searchCount >= 3 -> {
+                                        ServerProcessManager.appLog("搜索已达本消息上限（3次），返回提示")
+                                        "本轮搜索次数已达上限，请基于已有搜索结果直接回答。"
+                                    }
+                                    else -> {
+                                        searchCount++
+                                        if (WebSearch.sanitizeQuery(query).second) {
+                                            ServerProcessManager.appLog("搜索词含身份证/手机号/卡号，已脱敏后再出网")
+                                        }
+                                        ServerProcessManager.appLog("内置搜索：「${query.take(40)}」…")
+                                        val rs = WebSearch.search(query)
+                                        searchSources.addAll(rs)
+                                        ServerProcessManager.appLog("内置搜索：返回 ${rs.size} 条结果")
+                                        val text = WebSearch.formatResults(rs)
+                                        searchedQueries[norm] = text
+                                        text
+                                    }
+                                }
+                            } else {
+                                val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                val route = mcpRoute[tc.name]
+                                    ?: throw IllegalStateException("未路由的工具：${tc.name}")
+                                ServerProcessManager.appLog("MCP 调用：${tc.name}")
+                                McpHttpClient.callTool(route.first, null, route.second, args)
+                            }
                         }.getOrElse { e ->
-                            ServerProcessManager.appLog("MCP 失败：${tc.name} — ${e.message}")
+                            ServerProcessManager.appLog("工具失败：${tc.name} — ${e.message}")
                             "工具执行失败：${e.message}"
                         }
-                        if (!result.startsWith("工具执行失败")) {
+                        if (!result.startsWith("工具执行失败") && tc.name != "web_search") {
                             ServerProcessManager.appLog("MCP 完成：${tc.name}")
                         }
                         newMsgs.add(ChatClient.ChatMessage("tool", result, toolCallId = tc.id))
                     }
                     apiMsgs = newMsgs
+                }
+
+                // 兜底：轮次用尽仍无任何正文 → 无工具模式强问一次，保证用户一定拿到回答
+                if (_streaming.value && !autoStopped &&
+                    _messages.value.lastOrNull()?.content.isNullOrEmpty() == true
+                ) {
+                    ServerProcessManager.appLog("已达最大轮数（5）仍无正文，改用无工具模式强制回答…")
+                    var forcedStats: String? = null
+                    runCatching {
+                        ChatClient.chatStream(
+                            port = AppSettings.port,
+                            messages = apiMsgs + listOf(
+                                ChatClient.ChatMessage("user", "请直接用中文简要回答上面的问题，不要再调用任何工具。")
+                            ),
+                            apiToken = if (cloud) AppSettings.chatCloudKey.ifBlank { null }
+                                       else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
+                            baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
+                            model = if (cloud) AppSettings.chatCloudModel.ifBlank { "default" } else "local",
+                            thinking = if (cloud) null else AppSettings.thinkEnabled,
+                            maxTokens = if (cloud) null else 4096,
+                            tools = null,
+                            onDelta = { d ->
+                                if (_streaming.value) {
+                                    val list = _messages.value.toMutableList()
+                                    val m = list.removeLast()
+                                    list.add(m.copy(content = m.content + d))
+                                    _messages.value = list
+                                }
+                            },
+                            onReasoning = { r ->
+                                if (AppSettings.thinkEnabled && _streaming.value) {
+                                    val list = _messages.value.toMutableList()
+                                    val m = list.removeLast()
+                                    list.add(m.copy(reasoning = (m.reasoning ?: "") + r))
+                                    _messages.value = list
+                                }
+                            },
+                            onFinal = { tokens, tps, prompt ->
+                                val tpsPart = if (tps > 0) " · ${String.format("%.1f", tps)} tok/s" else ""
+                                forcedStats = "共 $tokens token$tpsPart" + ctxNote(prompt + tokens)
+                            }
+                        )
+                    }.onFailure { ServerProcessManager.appLog("强制回答失败：${it.message}") }
+                    forcedStats?.let { _lastStats.value = it }
+                    ServerProcessManager.appLog("聊天：完成 · ${_lastStats.value ?: "（无统计）"}")
                 }
 
                 if (usedTools.isNotEmpty()) {
@@ -288,8 +581,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                ServerProcessManager.appLog("聊天失败：${friendlyError(e)}")
-                _error.value = friendlyError(e)
+                if (autoStopped) {
+                    // 主动截断导致的断连：不是错误，给出截断统计
+                    _lastStats.value = "共 $abortDeltas token · 已截断重复思考"
+                } else {
+                    ServerProcessManager.appLog("聊天失败：${friendlyError(e)}")
+                    _error.value = friendlyError(e)
+                }
             } finally {
                 if (_messages.value.lastOrNull()?.content.isNullOrEmpty()) {
                     _messages.value = _messages.value.dropLast(1)
@@ -305,6 +603,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 停止：先关门（回调失效）→ 立即断连（思考流也停）→ 取消协程 → 落盘已生成部分 */
     fun stop() {
+        ServerProcessManager.appLog("用户手动停止生成")
         _streaming.value = false
         ChatClient.abort()
         streamJob?.cancel()
@@ -348,6 +647,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun clearError() { _error.value = null }
+
+    /** 删除一条消息；若删的是正在生成的那条，先停止生成再删 */
+    fun deleteAt(index: Int) {
+        val list = _messages.value
+        if (index !in list.indices) return
+        if (index == list.lastIndex && _streaming.value) {
+            _streaming.value = false
+            ChatClient.abort()
+            streamJob?.cancel()
+            streamJob = null
+        }
+        val m = list[index]
+        _messages.value = list.toMutableList().also { it.removeAt(index) }
+        ServerProcessManager.appLog(
+            "已删除一条${if (m.role == "user") "用户" else "助手"}消息（${m.content.length} 字）"
+        )
+        persist()
+    }
 
     private fun append(msg: ChatStore.Msg) {
         _messages.value = _messages.value + msg

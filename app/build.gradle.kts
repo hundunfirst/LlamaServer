@@ -109,4 +109,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // OCR：ML Kit 中文文字识别（bundled 离线模型，无需 GMS 在线下载）
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
 }

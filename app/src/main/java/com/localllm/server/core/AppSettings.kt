@@ -173,40 +173,124 @@ object AppSettings {
         get() = prefs.getBoolean("think_enabled", true)
         set(value) = prefs.edit().putBoolean("think_enabled", value).apply()
 
-    /** MCP 服务器列表 JSON：[{"name","command","args"}]（stdio 型，由 llama-server 拉起） */
-    var mcpServersJson: String
-        get() = prefs.getString("mcp_servers", "[]") ?: "[]"
-        set(value) = prefs.edit().putString("mcp_servers", value).apply()
+    /** HTTP MCP 多服务器列表 JSON：[{id,name,url,enabled,tools:[{name,description,inputSchema,enabled}]}] */
+    var mcpHttpServersJson: String
+        get() = prefs.getString("mcp_http_servers", "[]") ?: "[]"
+        set(value) = prefs.edit().putString("mcp_http_servers", value).apply()
 
-    /** HTTP 型 MCP 是否启用（app 侧客户端，聊天时注入 tools） */
+    // ---- 以下为旧「单服务器」配置，仅迁移使用，勿再新增引用 ----
     var mcpHttpEnabled: Boolean
         get() = prefs.getBoolean("mcp_http_enabled", false)
         set(value) = prefs.edit().putBoolean("mcp_http_enabled", value).apply()
-
-    /** HTTP 型 MCP 端点 URL（Streamable HTTP，如 http://192.168.1.5:8787/mcp） */
     var mcpHttpUrl: String
         get() = prefs.getString("mcp_http_url", "") ?: ""
         set(value) = prefs.edit().putString("mcp_http_url", value).apply()
-
-    /** HTTP 型 MCP 可选鉴权 token */
     var mcpHttpKey: String
         get() = prefs.getString("mcp_http_key", "") ?: ""
         set(value) = prefs.edit().putString("mcp_http_key", value).apply()
-
-    /** HTTP MCP 显示别名（如 "Mt"） */
     var mcpHttpName: String
         get() = prefs.getString("mcp_http_name", "") ?: ""
         set(value) = prefs.edit().putString("mcp_http_name", value).apply()
-
-    /** 工具列表缓存 JSON：[{name,description,inputSchema}]（拉取成功后落盘，聊天直接用，不再每次请求现拉） */
     var mcpToolsJson: String
         get() = prefs.getString("mcp_tools", "[]") ?: "[]"
         set(value) = prefs.edit().putString("mcp_tools", value).apply()
-
-    /** 每个工具的启用状态 JSON：{toolName: bool}（缺省=启用） */
     var mcpToolsEnabledJson: String
         get() = prefs.getString("mcp_tools_enabled", "{}") ?: "{}"
         set(value) = prefs.edit().putString("mcp_tools_enabled", value).apply()
+
+    fun loadMcpServers(): List<McpHttpServer> = runCatching {
+        val arr = org.json.JSONArray(mcpHttpServersJson)
+        (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val ta = o.optJSONArray("tools") ?: org.json.JSONArray()
+            McpHttpServer(
+                id = o.optString("id").ifBlank { java.util.UUID.randomUUID().toString() },
+                name = o.optString("name").ifBlank { "MCP" },
+                url = o.optString("url"),
+                enabled = o.optBoolean("enabled", true),
+                tools = (0 until ta.length()).mapNotNull { j ->
+                    val t = ta.optJSONObject(j) ?: return@mapNotNull null
+                    val n = t.optString("name")
+                    if (n.isBlank()) return@mapNotNull null
+                    McpHttpTool(
+                        name = n,
+                        description = t.optString("description"),
+                        inputSchema = t.optJSONObject("inputSchema")
+                            ?: org.json.JSONObject().put("type", "object"),
+                        enabled = t.optBoolean("enabled", true)
+                    )
+                }
+            )
+        }.filter { it.url.isNotBlank() }
+    }.getOrDefault(emptyList())
+
+    fun saveMcpServers(list: List<McpHttpServer>) {
+        val arr = org.json.JSONArray()
+        list.forEach { s ->
+            val o = org.json.JSONObject()
+                .put("id", s.id).put("name", s.name).put("url", s.url).put("enabled", s.enabled)
+            val ta = org.json.JSONArray()
+            s.tools.forEach { t ->
+                ta.put(
+                    org.json.JSONObject()
+                        .put("name", t.name).put("description", t.description)
+                        .put("inputSchema", t.inputSchema).put("enabled", t.enabled)
+                )
+            }
+            o.put("tools", ta)
+            arr.put(o)
+        }
+        mcpHttpServersJson = arr.toString()
+    }
+
+    /** 旧单服务器配置一次性迁移为多服务器列表（App 启动时调用） */
+    fun migrateMcpSingleToMulti() {
+        if (mcpHttpServersJson.trim() != "[]") return
+        val url = mcpHttpUrl.trim()
+        if (url.isBlank()) return
+        val toolsArr = runCatching { org.json.JSONArray(mcpToolsJson) }
+            .getOrDefault(org.json.JSONArray())
+        val en = runCatching { org.json.JSONObject(mcpToolsEnabledJson) }
+            .getOrDefault(org.json.JSONObject())
+        val tools = (0 until toolsArr.length()).mapNotNull { i ->
+            val t = toolsArr.optJSONObject(i) ?: return@mapNotNull null
+            val n = t.optString("name")
+            if (n.isBlank()) return@mapNotNull null
+            McpHttpTool(
+                name = n,
+                description = t.optString("description"),
+                inputSchema = t.optJSONObject("inputSchema")
+                    ?: org.json.JSONObject().put("type", "object"),
+                enabled = en.optBoolean(n, true)
+            )
+        }
+        saveMcpServers(
+            listOf(
+                McpHttpServer(
+                    id = java.util.UUID.randomUUID().toString(),
+                    name = mcpHttpName.ifBlank { "MCP" },
+                    url = url,
+                    enabled = mcpHttpEnabled,
+                    tools = tools
+                )
+            )
+        )
+    }
+
+    /** 内置网页搜索开关（聊天顶栏 🔍）：开启后向模型注入 web_search 工具 */
+    var webSearchEnabled: Boolean
+        get() = prefs.getBoolean("web_search_enabled", false)
+        set(value) = prefs.edit().putBoolean("web_search_enabled", value).apply()
+
+    /** 图片处理方式："auto"（有多模态直读、否则 OCR）/ "vision" / "ocr" */
+    var imageInputMode: String
+        get() = prefs.getString("image_input_mode", "auto") ?: "auto"
+        set(value) = prefs.edit().putString("image_input_mode", value).apply()
+
+    /** 含图片轮次的联网搜索策略："block"（默认，禁止）/ "ask"（先征求同意）/ "allow" */
+    var imageSearchPolicy: String
+        get() = prefs.getString("image_search_policy", "block") ?: "block"
+        set(value) = prefs.edit().putString("image_search_policy", value).apply()
 
     /** 聊天云端渠道 */
     var chatCloudEnabled: Boolean
@@ -262,3 +346,20 @@ object AppSettings {
         aliasMap = m
     }
 }
+
+/** HTTP MCP 服务器（多服务器列表中的一条） */
+data class McpHttpServer(
+    val id: String,
+    val name: String,
+    val url: String,
+    val enabled: Boolean,
+    val tools: List<McpHttpTool>
+)
+
+/** 一个 MCP 工具（含拉取缓存的 schema 与单独开关） */
+data class McpHttpTool(
+    val name: String,
+    val description: String,
+    val inputSchema: org.json.JSONObject,
+    val enabled: Boolean
+)

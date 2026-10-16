@@ -26,7 +26,7 @@ App 本体也做得挺完整：
 🖼️ 支持图片理解，Markdown 表格代码块都渲染
 ⚡ 流式输出 + 实时速度显示
 ☁️ 也接云端渠道，MiMo/DeepSeek/通义/智谱/Kimi 随切多预设
-🔧 还有 MCP 工具调用（stdio + HTTP）
+🔧 还有 MCP 工具调用（多服务器 HTTP）
 📥 内置 hf-mirror，手机上直接下 GGUF 模型
 
 重点是 MIT 开源，代码全在 GitHub（hundunfirst/LlamaServer），想自己改也行。
