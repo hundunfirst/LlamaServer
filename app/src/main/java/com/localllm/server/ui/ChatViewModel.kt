@@ -145,6 +145,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             // 模型“答完又想再答”（单次生成内二次思考）时自动截断本轮
             var autoStopped = false
             var abortDeltas = 0
+            val sendStartedAt = System.currentTimeMillis()
             try {
                 // 提示词保持最小化：过多硬性约束会让小模型在思考里反复“检查规则”而失控。
                 // LaTeX 已有客户端转换器兜底，不再要求模型禁用。
@@ -414,16 +415,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
 
                     if (validCalls.isEmpty()) {
-                        // 最终回复：合并统计
+                        // 最终回复：合并统计（含本次问答总耗时，从发送算起）
+                        val usedSec = (System.currentTimeMillis() - sendStartedAt) / 1000.0
                         val timing = timingNote?.let { "$it · " } ?: ""
+                        val secPart = " · 用时 ${String.format("%.1f", usedSec)}s"
                         if (serverStats != null) {
-                            _lastStats.value = timing + serverStats
+                            _lastStats.value = timing + serverStats + secPart
                         } else if (deltaCount > 0 && firstDeltaMs > 0) {
                             val genSecs = (System.currentTimeMillis() - firstDeltaMs) / 1000.0
                             if (genSecs > 0.05) {
                                 val tps = deltaCount / genSecs
-                                _lastStats.value = timing + "共 $deltaCount token · ${String.format("%.1f", tps)} tok/s"
+                                _lastStats.value = timing +
+                                        "共 $deltaCount token · ${String.format("%.1f", tps)} tok/s" + secPart
+                            } else {
+                                _lastStats.value = timing + "共 $deltaCount token" + secPart
                             }
+                        } else {
+                            _lastStats.value = (timing + "用时 ${String.format("%.1f", usedSec)}s").trim('·', ' ')
                         }
                         // 搜索来源页脚：只列正文实际引用到的来源（域名或标题命中），
                         // 命中不到时回退前 5 条，避免「正文2条、来源15条」的错配
@@ -567,7 +575,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             },
                             onFinal = { tokens, tps, prompt ->
                                 val tpsPart = if (tps > 0) " · ${String.format("%.1f", tps)} tok/s" else ""
-                                forcedStats = "共 $tokens token$tpsPart" + ctxNote(prompt + tokens)
+                                forcedStats = "共 $tokens token$tpsPart" + ctxNote(prompt + tokens) +
+                                        " · 用时 ${String.format("%.1f", (System.currentTimeMillis() - sendStartedAt) / 1000.0)}s"
                             }
                         )
                     }.onFailure { ServerProcessManager.appLog("强制回答失败：${it.message}") }

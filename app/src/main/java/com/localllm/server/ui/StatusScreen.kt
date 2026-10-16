@@ -113,7 +113,7 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 val effOut = com.localllm.server.core.AppSettings.effectiveOut(selectedModel)
                 val ctxOver = com.localllm.server.core.AppSettings.localModelParam(selectedModel)?.ctx != null
                 val outOver = com.localllm.server.core.AppSettings.localModelParam(selectedModel)?.out != null
-                fun k(n: Int) = if (n >= 1000) String.format("%.0fK", n / 1000.0) else "$n"
+                fun k(n: Int) = if (n >= 1024) "${n / 1024}K" else "$n"
                 Text(
                     "生效参数：上下文 ${k(effCtx)}${if (ctxOver) "（模型级）" else ""}" +
                             " · 输出上限 ${k(effOut)}${if (outOver) "（模型级）" else ""}",

@@ -533,6 +533,26 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                 Text("聊天", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                // 会话计时：进入/新建本会话起计（切会话重置），每秒跳动；始终可见
+                var sessionStart by remember(activeId) { mutableStateOf(System.currentTimeMillis()) }
+                var sessionNow by remember(activeId) { mutableStateOf(System.currentTimeMillis()) }
+                LaunchedEffect(activeId) {
+                    while (true) {
+                        kotlinx.coroutines.delay(1000)
+                        sessionNow = System.currentTimeMillis()
+                    }
+                }
+                val sessionSecs = ((sessionNow - sessionStart) / 1000).coerceAtLeast(0)
+                val sessionClock = if (sessionSecs >= 3600) {
+                    String.format("%d:%02d:%02d", sessionSecs / 3600, (sessionSecs % 3600) / 60, sessionSecs % 60)
+                } else {
+                    String.format("%02d:%02d", sessionSecs / 60, sessionSecs % 60)
+                }
+                Text(
+                    "  ⏱ $sessionClock",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 // 渠道快捷切换
                 TextButton(onClick = {
                     cloudPresets.value = com.localllm.server.core.AppSettings.loadCloudPresets()
