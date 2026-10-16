@@ -338,76 +338,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         persistDownloads()
     }
 
-    // ---- 云端渠道：拉取模型列表 ----
-    private val _cloudModels = MutableStateFlow<List<String>>(emptyList())
-    val cloudModels: StateFlow<List<String>> = _cloudModels.asStateFlow()
-
-    private val _fetchingCloud = MutableStateFlow(false)
-    val fetchingCloud: StateFlow<Boolean> = _fetchingCloud.asStateFlow()
-
-    fun fetchCloudModels() {
-        var base = _settings.value.chatCloudUrl.trim().removeSuffix("/")
-        // 容错：粘贴了完整 chat/models 地址时自动截到基地址
-        for (suffix in listOf("/v1/chat/completions", "/chat/completions", "/v1/models", "/models", "/v1")) {
-            if (base.endsWith(suffix)) {
-                base = base.removeSuffix(suffix)
-                break
-            }
-        }
-        if (base.isBlank()) {
-            _actionError.value = "请先填写云端接口地址"
-            return
-        }
-        if (_fetchingCloud.value) return
-        _fetchingCloud.value = true
-        viewModelScope.launch {
-            runCatching {
-                // 主线程禁止网络 IO（NetworkOnMainThreadException），与 ChatClient 一致放 IO 调度器
-                withContext(Dispatchers.IO) {
-                    val urlStr = if (base.endsWith("/v1")) "$base/models" else "$base/v1/models"
-                    val conn = URL(urlStr).openConnection() as HttpURLConnection
-                    conn.connectTimeout = 10_000
-                    conn.readTimeout = 15_000
-                    val key = _settings.value.chatCloudKey.trim()
-                    if (key.isNotBlank()) {
-                        conn.setRequestProperty("Authorization", "Bearer $key")
-                        // MiMo 等服务商文档给出的另一种鉴权头
-                        conn.setRequestProperty("api-key", key)
-                    }
-                    try {
-                        val code = conn.responseCode
-                        if (code !in 200..299) {
-                            val errText = runCatching {
-                                conn.errorStream?.bufferedReader()?.use { it.readText() }
-                            }.getOrNull().orEmpty().take(300)
-                            throw IllegalStateException(
-                                if (errText.isBlank()) "HTTP $code" else "HTTP $code：$errText"
-                            )
-                        }
-                        val body = conn.inputStream.bufferedReader().use { it.readText() }
-                        val data = org.json.JSONObject(body).optJSONArray("data") ?: org.json.JSONArray()
-                        (0 until data.length()).mapNotNull { i ->
-                            data.optJSONObject(i)?.optString("id")?.takeIf { it.isNotBlank() }
-                        }.distinct()
-                    } finally {
-                        conn.disconnect()
-                    }
-                }
-            }.onSuccess { list ->
-                if (list.isEmpty()) _actionError.value = "该接口未返回可用模型列表"
-                else _cloudModels.value = list
-            }.onFailure { e ->
-                val msg = e.message ?: e.javaClass.simpleName
-                _actionError.value = if (msg.contains("NetworkOnMainThread")) {
-                    "拉取模型失败：主线程网络错误（请反馈，本应已修复）"
-                } else {
-                    "拉取模型失败：$msg（检查地址是否为服务商 Base URL，如 https://api.xiaomimimo.com）"
-                }
-            }
-            _fetchingCloud.value = false
-        }
-    }
-
     /**
      * 云端渠道即时生效：改内存态并立刻落盘。
      * 聊天路由每次发送都直接读 AppSettings（磁盘），若只改 StateFlow 会与实际路由不一致
@@ -607,7 +537,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         ).joinToString("|")
         val oldThink = AppSettings.thinkEnabled
         val port = s.port.toIntOrNull()?.coerceIn(1024, 65535) ?: AppSettings.port
-        val ctx = s.ctxSize.toIntOrNull()?.coerceIn(512, 131072) ?: AppSettings.ctxSize
+        val ctx = s.ctxSize.toIntOrNull()?.coerceIn(512, 262144) ?: AppSettings.ctxSize
         val threads = s.threads.toIntOrNull()?.coerceIn(0, 64) ?: AppSettings.threads
         val ngl = s.ngl.toIntOrNull()?.coerceIn(0, 999) ?: AppSettings.ngl
         AppSettings.port = port

@@ -93,7 +93,9 @@ class DeviceCheckup(private val context: Context) {
     }
 
     private fun gb(bytes: Long): String = String.format("%.1f", bytes / (1024.0 * 1024.0 * 1024.0))
-    private fun mb(bytes: Long): String = String.format("%.1f", bytes / (1024.0 * 1024.0))
+    private fun mb(bytes: Long): String =
+        if (bytes < 1024 * 1024) String.format("%.1f KB", bytes / 1024.0)
+        else String.format("%.1f MB", bytes / (1024.0 * 1024.0))
 
     private fun checkSystem(): CheckItem {
         val abis = Build.SUPPORTED_ABIS.joinToString("、")
@@ -143,7 +145,7 @@ class DeviceCheckup(private val context: Context) {
             title = "存储",
             detail = "应用数据可用 ${gb(availBytes)} GB" +
                     (if (low) "（不足 5 GB，请清理空间）" else "") +
-                    "\nengines 目录：${mb(engSize)} MB，${engCount} 个文件\n" +
+                    "\nengines 目录：${mb(engSize)}，${engCount} 个文件\n" +
                     "filesDir：${filesDir.absolutePath}"
         )
     }
@@ -188,13 +190,13 @@ class DeviceCheckup(private val context: Context) {
                 allOk = false
                 sb.append("$mode/llama-server：缺失（❌）")
             } else {
-                sb.append("$mode/llama-server：${mb(binary.length())} MB")
+                sb.append("$mode/llama-server：${mb(binary.length())}")
             }
             if (ggml.isEmpty()) {
                 allOk = false
                 sb.append("；libggml*.so：缺失（❌）")
             } else {
-                sb.append("；libggml*.so ${ggml.size} 个，共 ${mb(ggml.sumOf { it.length() })} MB")
+                sb.append("；libggml*.so ${ggml.size} 个，共 ${mb(ggml.sumOf { it.length() })}")
             }
             sb.append("\n")
         }
@@ -263,8 +265,9 @@ class DeviceCheckup(private val context: Context) {
             com.localllm.server.core.ServerUiState.Status.STOPPED -> "已停止"
         }
         val ok = state.status != com.localllm.server.core.ServerUiState.Status.ERROR
+        val extra = state.message.trim()
         val detail = "状态：$label" +
-                (if (state.message.isNotBlank()) "\n${state.message}" else "") +
+                (if (extra.isNotEmpty() && extra != label) "\n$extra" else "") +
                 "\n端点：${state.endpoint}"
         return CheckItem(ok = ok, warn = !ok, title = "服务", detail = detail)
     }

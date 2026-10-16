@@ -825,13 +825,13 @@ private fun MessageBubble(
                             }
                         }
                     }
-                    DropdownMenu(expanded = menuOpen, onDismissRequest = onMenuClose) {
-                        DropdownMenuItem(
-                            text = { Text("复制") },
-                            leadingIcon = { Icon(Icons.Default.ContentCopy, null) },
-                            onClick = onCopy
-                        )
-                        if (isUser) {
+                    if (isUser) {
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = onMenuClose) {
+                            DropdownMenuItem(
+                                text = { Text("复制") },
+                                leadingIcon = { Icon(Icons.Default.ContentCopy, null) },
+                                onClick = onCopy
+                            )
                             DropdownMenuItem(
                                 text = { Text("重发") },
                                 leadingIcon = { Icon(Icons.Default.Refresh, null) },
@@ -843,14 +843,30 @@ private fun MessageBubble(
                                 onClick = onEdit
                             )
                         }
+                        IconButton(onClick = onMenuOpen, modifier = Modifier.width(36.dp)) {
+                            Icon(
+                                Icons.Default.MoreHoriz,
+                                contentDescription = "消息操作",
+                                modifier = Modifier.width(18.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
-                    IconButton(onClick = onMenuOpen, modifier = Modifier.width(36.dp)) {
+                }
+                if (!isUser && msg.content.isNotBlank()) {
+                    TextButton(
+                        onClick = onCopy,
+                        modifier = Modifier.padding(top = 0.dp)
+                    ) {
                         Icon(
-                            Icons.Default.MoreHoriz,
-                            contentDescription = "消息操作",
-                            modifier = Modifier.width(18.dp),
+                            Icons.Default.ContentCopy,
+                            contentDescription = "复制回复",
+                            modifier = Modifier.size(14.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("复制", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
                 if (showStats) {

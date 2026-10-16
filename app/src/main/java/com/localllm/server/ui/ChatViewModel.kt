@@ -7,8 +7,10 @@ import com.localllm.server.core.AppSettings
 import com.localllm.server.core.ChatClient
 import com.localllm.server.core.ChatStore
 import com.localllm.server.core.McpHttpClient
+import com.localllm.server.core.ServerProcessManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -111,13 +113,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             _error.value = null
             _lastStats.value = null
             try {
-                val mathRule =
-                    "数学公式与计算过程用 Unicode 符号直接书写（√ × ÷ ≈ ± ≤ ≥ ² ³ ½，分数写成 a/b），" +
-                    "严禁使用 LaTeX 语法（不要出现 $$、\\frac、\\sqrt、\\times、\\text 等反斜杠命令和花括号）。"
+                // 提示词保持最小化：过多硬性约束会让小模型在思考里反复“检查规则”而失控。
+                // LaTeX 已有客户端转换器兜底，不再要求模型禁用。
                 val systemText = if (AppSettings.thinkEnabled) {
-                    "请始终用中文进行思考和回答。$mathRule"
+                    "用中文简洁回答。"
                 } else {
-                    "请不要输出任何思考/推理过程，直接用中文给出最终答案。$mathRule"
+                    "不要输出思考过程，直接用中文简洁回答。"
                 }
                 val history = _messages.value.dropLast(1)
                 val payloadMsgs = listOf(ChatClient.ChatMessage("system", systemText)) +
@@ -138,16 +139,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         }
                 val cloud = AppSettings.chatCloudEnabled && AppSettings.chatCloudUrl.isNotBlank()
 
-                // HTTP 型 MCP：拉工具并注入（失败降级为无工具，不阻断聊天）
+                // HTTP 型 MCP：用弹窗里拉取并保存的工具缓存（按开关过滤），聊天不再现拉
                 val mcpUrl = AppSettings.mcpHttpUrl.trim()
                 val mcpTools = if (AppSettings.mcpHttpEnabled && mcpUrl.isNotBlank()) {
                     runCatching {
-                        McpHttpClient.toOpenAiTools(McpHttpClient.listTools(mcpUrl))
+                        val cached = McpHttpClient.parseTools(
+                            org.json.JSONArray(AppSettings.mcpToolsJson)
+                        )
+                        val enabledMap = org.json.JSONObject(AppSettings.mcpToolsEnabledJson)
+                        val on = cached.filter { enabledMap.optBoolean(it.name, true) }
+                        if (on.isEmpty()) null else McpHttpClient.toOpenAiTools(on)
                     }.getOrElse { e ->
-                        _error.value = "MCP 工具拉取失败（本次不注入）：${e.message}"
+                        _error.value = "MCP 工具注入失败：${e.message}"
                         null
                     }
                 } else null
+
+                ServerProcessManager.appLog(
+                    "聊天：发送（" +
+                            (if (cloud) "云端 ${AppSettings.chatCloudModel.ifBlank { "default" }}" else "本地") +
+                            " · 历史 ${payloadMsgs.size - 1} 条" +
+                            (mcpTools?.let { " · 工具 ${it.length()} 个" } ?: "") + "）"
+                )
 
                 var apiMsgs = payloadMsgs
                 val usedTools = mutableListOf<String>()
@@ -155,10 +168,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
                 // 最多 5 轮工具调用，防止模型死循环
                 repeat(5) { round ->
+                    ensureActive() // 停止/切换后不再进入下一轮
                     var deltaCount = 0
                     var firstDeltaMs = 0L
                     var serverStats: String? = null
                     var toolCalls: List<ChatClient.ToolCall> = emptyList()
+                    // 正文开始后冻结思考卡：部分模型会在正文期间/之后仍吐 reasoning，
+                    // 导致“回答完了思考还在滚”。首个内容 delta 到达即停止追加。
+                    var contentStarted = false
 
                     ChatClient.chatStream(
                         port = AppSettings.port,
@@ -167,6 +184,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                    else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
                         baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
                         model = if (cloud) AppSettings.chatCloudModel.ifBlank { "default" } else "local",
+                        // 本地走 jinja 模板真开关；云端模板自管不干预
+                        thinking = if (cloud) null else AppSettings.thinkEnabled,
+                        // 本地生成上限：退化复读时不至于跑到撑满上下文
+                        maxTokens = if (cloud) null else 4096,
                         tools = if (round == 0) mcpTools else mcpTools, // 每轮都带工具，模型可连续调用
                         onToolCalls = { toolCalls = it },
                         onTiming = { ttfb, firstToken ->
@@ -177,29 +198,36 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             }
                         },
                         onDelta = { delta ->
-                            deltaCount++
-                            if (firstDeltaMs == 0L) firstDeltaMs = System.currentTimeMillis()
-                            val elapsed = (System.currentTimeMillis() - firstDeltaMs) / 1000.0
-                            if (elapsed > 0.3) {
-                                val tps = deltaCount / elapsed
-                                _lastStats.value =
-                                    "生成中 · $deltaCount token · ${String.format("%.1f", tps)} tok/s"
+                            // 停止后一律不再上屏（abort 断连前的在途分片也丢弃）
+                            if (_streaming.value) {
+                                contentStarted = true
+                                deltaCount++
+                                if (firstDeltaMs == 0L) firstDeltaMs = System.currentTimeMillis()
+                                val elapsed = (System.currentTimeMillis() - firstDeltaMs) / 1000.0
+                                if (elapsed > 0.3) {
+                                    val tps = deltaCount / elapsed
+                                    _lastStats.value =
+                                        "生成中 · $deltaCount token · ${String.format("%.1f", tps)} tok/s"
+                                }
+                                val list = _messages.value.toMutableList()
+                                val last = list.removeLast()
+                                list.add(last.copy(content = last.content + delta))
+                                _messages.value = list
                             }
-                            val list = _messages.value.toMutableList()
-                            val last = list.removeLast()
-                            list.add(last.copy(content = last.content + delta))
-                            _messages.value = list
                         },
                         onReasoning = { r ->
-                            if (AppSettings.thinkEnabled) {
+                            if (AppSettings.thinkEnabled && !contentStarted && _streaming.value) {
                                 val list = _messages.value.toMutableList()
                                 val last = list.removeLast()
                                 list.add(last.copy(reasoning = (last.reasoning ?: "") + r))
                                 _messages.value = list
                             }
                         },
-                        onFinal = { tokens, tps ->
-                            serverStats = "共 $tokens token · ${String.format("%.1f", tps)} tok/s"
+                        onFinal = { tokens, tps, prompt ->
+                            val tpsPart = if (tps > 0) " · ${String.format("%.1f", tps)} tok/s" else ""
+                            // 上下文占用 = 本次输入 + 刚生成的回复（下一轮会话的实际起点）
+                            serverStats = "共 $tokens token$tpsPart" +
+                                    ctxNote(prompt + tokens)
                         }
                     )
 
@@ -215,6 +243,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 _lastStats.value = timing + "共 $deltaCount token · ${String.format("%.1f", tps)} tok/s"
                             }
                         }
+                        ServerProcessManager.appLog("聊天：完成 · ${_lastStats.value ?: "（无统计）"}")
                         return@repeat
                     }
 
@@ -236,11 +265,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                     newMsgs.add(ChatClient.ChatMessage("assistant", null, toolCalls = asstCalls))
-                    toolCalls.forEach { tc ->
+                        toolCalls.forEach { tc ->
                         val result = runCatching {
                             val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                            ServerProcessManager.appLog("MCP 调用：${tc.name}")
                             McpHttpClient.callTool(mcpUrl, null, tc.name, args)
-                        }.getOrElse { e -> "工具执行失败：${e.message}" }
+                        }.getOrElse { e ->
+                            ServerProcessManager.appLog("MCP 失败：${tc.name} — ${e.message}")
+                            "工具执行失败：${e.message}"
+                        }
+                        if (!result.startsWith("工具执行失败")) {
+                            ServerProcessManager.appLog("MCP 完成：${tc.name}")
+                        }
                         newMsgs.add(ChatClient.ChatMessage("tool", result, toolCallId = tc.id))
                     }
                     apiMsgs = newMsgs
@@ -252,6 +288,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
+                ServerProcessManager.appLog("聊天失败：${friendlyError(e)}")
                 _error.value = friendlyError(e)
             } finally {
                 if (_messages.value.lastOrNull()?.content.isNullOrEmpty()) {
@@ -266,10 +303,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 停止：先关门（回调失效）→ 立即断连（思考流也停）→ 取消协程 → 落盘已生成部分 */
     fun stop() {
+        _streaming.value = false
+        ChatClient.abort()
         streamJob?.cancel()
         streamJob = null
-        _streaming.value = false
         persist()
     }
 
@@ -342,5 +381,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "连接失败：请先在「状态」页启动服务"
         e.message?.contains("401") == true -> "鉴权失败：请在设置中检查访问令牌/云端 Key"
         else -> e.message ?: "请求失败"
+    }
+
+    /** 上下文占用（本次输入+本轮回复 = 下一轮的实际起点，服务端权威计数，含模板开销）；≥90% 加 ⚠️ */
+    private fun ctxNote(usedTokens: Int): String {
+        if (usedTokens <= 0) return ""
+        val ctx = AppSettings.ctxSize
+        if (ctx <= 0) return ""
+        val cur = if (usedTokens >= 1000) String.format("%.1fk", usedTokens / 1000.0) else "$usedTokens"
+        val max = if (ctx >= 1000) String.format("%.1fk", ctx / 1000.0) else "$ctx"
+        val near = usedTokens.toDouble() / ctx >= 0.9
+        return " · 上下文 $cur/$max" + if (near) " ⚠️" else ""
     }
 }

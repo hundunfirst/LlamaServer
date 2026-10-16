@@ -8,19 +8,33 @@ object AppSettings {
 
     private lateinit var prefs: SharedPreferences
 
-    /** 云端渠道预设：一组可切换的 API 配置 */
+    /** 供应商下的模型条目：id=请求用的上游模型名；label/ctx/out/modalities 为本地展示元数据 */
+    data class CloudModel(
+        val id: String,
+        val label: String = "",
+        val ctx: Int = 32768,
+        val out: Int = 8192,
+        val modalities: List<String> = listOf("文本")
+    )
+
+    /** 云端渠道预设：一组可切换的 OpenAI 兼容 API 配置（老配置缺 id/models 时自动迁移） */
     data class CloudPreset(
+        val id: String = "",
         val name: String,
         val url: String,
         val key: String,
-        val model: String
+        val model: String,
+        val protocol: String = "openai",
+        val models: List<CloudModel> = emptyList()
     )
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         // 迁移：老的单渠道配置 → 预设列表（只跑一次）
         if (cloudPresetsJson == "[]" && chatCloudUrl.isNotBlank()) {
-            saveCloudPresets(listOf(CloudPreset("当前配置", chatCloudUrl, chatCloudKey, chatCloudModel)))
+            saveCloudPresets(
+                listOf(CloudPreset(name = "当前配置", url = chatCloudUrl, key = chatCloudKey, model = chatCloudModel))
+            )
         }
     }
 
@@ -31,13 +45,45 @@ object AppSettings {
 
     fun loadCloudPresets(): List<CloudPreset> = runCatching {
         val arr = org.json.JSONArray(cloudPresetsJson)
+        val used = mutableSetOf<String>()
         (0 until arr.length()).mapNotNull { i ->
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val name = o.optString("name")
+            // 老数据无 id → 生成稳定 id；撞名兜底
+            var id = o.optString("id").ifBlank {
+                "sup${i + 1}_" + (name.ifBlank { "p$i" }).hashCode().toUInt().toString(16).take(6)
+            }
+            while (!used.add(id)) id = "${id}_$i"
+
+            val models = mutableListOf<CloudModel>()
+            o.optJSONArray("models")?.let { ma ->
+                for (j in 0 until ma.length()) {
+                    val mo = ma.optJSONObject(j) ?: continue
+                    val mid = mo.optString("id").takeIf { it.isNotBlank() } ?: continue
+                    models += CloudModel(
+                        id = mid,
+                        label = mo.optString("label"),
+                        ctx = mo.optInt("ctx", 32768),
+                        out = mo.optInt("out", 8192),
+                        modalities = mo.optJSONArray("modalities")?.let { pa ->
+                            (0 until pa.length()).mapNotNull { k -> pa.optString(k).takeIf { s -> s.isNotBlank() } }
+                        }?.takeIf { it.isNotEmpty() } ?: listOf("文本")
+                    )
+                }
+            }
+            // 老配置：只有单个 model 字段 → 补成列表项
+            val legacyModel = o.optString("model")
+            if (legacyModel.isNotBlank() && models.none { it.id == legacyModel }) {
+                models += CloudModel(id = legacyModel)
+            }
             CloudPreset(
-                name = o.optString("name"),
+                id = id,
+                name = name,
                 url = o.optString("url"),
                 key = o.optString("key"),
-                model = o.optString("model")
+                model = legacyModel,
+                protocol = o.optString("protocol").ifBlank { "openai" },
+                models = models
             )
         }
     }.getOrDefault(emptyList())
@@ -47,10 +93,27 @@ object AppSettings {
         list.forEach { p ->
             arr.put(
                 org.json.JSONObject()
+                    .put("id", p.id)
                     .put("name", p.name)
                     .put("url", p.url)
                     .put("key", p.key)
                     .put("model", p.model)
+                    .put("protocol", p.protocol)
+                    .put(
+                        "models",
+                        org.json.JSONArray().also { ma ->
+                            p.models.forEach { m ->
+                                ma.put(
+                                    org.json.JSONObject()
+                                        .put("id", m.id)
+                                        .put("label", m.label)
+                                        .put("ctx", m.ctx)
+                                        .put("out", m.out)
+                                        .put("modalities", org.json.JSONArray().also { pa -> m.modalities.forEach(pa::put) })
+                                )
+                            }
+                        }
+                    )
             )
         }
         cloudPresetsJson = arr.toString()
@@ -129,6 +192,21 @@ object AppSettings {
     var mcpHttpKey: String
         get() = prefs.getString("mcp_http_key", "") ?: ""
         set(value) = prefs.edit().putString("mcp_http_key", value).apply()
+
+    /** HTTP MCP 显示别名（如 "Mt"） */
+    var mcpHttpName: String
+        get() = prefs.getString("mcp_http_name", "") ?: ""
+        set(value) = prefs.edit().putString("mcp_http_name", value).apply()
+
+    /** 工具列表缓存 JSON：[{name,description,inputSchema}]（拉取成功后落盘，聊天直接用，不再每次请求现拉） */
+    var mcpToolsJson: String
+        get() = prefs.getString("mcp_tools", "[]") ?: "[]"
+        set(value) = prefs.edit().putString("mcp_tools", value).apply()
+
+    /** 每个工具的启用状态 JSON：{toolName: bool}（缺省=启用） */
+    var mcpToolsEnabledJson: String
+        get() = prefs.getString("mcp_tools_enabled", "{}") ?: "{}"
+        set(value) = prefs.edit().putString("mcp_tools_enabled", value).apply()
 
     /** 聊天云端渠道 */
     var chatCloudEnabled: Boolean

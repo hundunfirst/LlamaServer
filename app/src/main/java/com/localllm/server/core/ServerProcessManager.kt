@@ -369,8 +369,15 @@ object ServerProcessManager {
         if (mmprojPath != null && File(mmprojPath).exists()) {
             cmd += listOf("--mmproj", mmprojPath)
         }
-        if (faMode == "on" || faMode == "off") {
-            cmd += listOf("-fa", faMode)
+        // 量化 V 缓存必须开 FA（引擎硬性要求：quantized V cache requires flash_attn），
+        // 用户设了 off/自动时强制 on 并留日志，避免启动失败。
+        var fa = faMode
+        if (cacheTypeV.isNotEmpty() && cacheTypeV != "f16" && fa != "on") {
+            appendLog("V缓存量化（$cacheTypeV）需要 Flash Attention，已自动将 -fa 设为 on（原设置：${faMode.ifBlank { "自动" }}）")
+            fa = "on"
+        }
+        if (fa == "on" || fa == "off") {
+            cmd += listOf("-fa", fa)
         }
         // MCP（stdio 型，llama-server 内置客户端；Cursor 兼容格式）
         runCatching {
@@ -416,11 +423,15 @@ object ServerProcessManager {
         }
     }
 
-    /** 高频噪音行（slot 调度/计时细节）——开发者可通过 logcat 查看原文，日志页直接过滤 */
+    /** 高频噪音行（slot 调度细节）——开发者可通过 logcat 查看原文，日志页直接过滤。
+     *  注意：slot release / print_timings 是每请求一次的进度与耗时，不许过滤（否则运行期日志全空）。 */
     private fun isNoiseLine(line: String): Boolean =
-        line.contains("slot print_timing") || line.contains("slot get_availabl") ||
-                line.contains("slot launch_slot_") || line.contains("slot release") ||
+        line.contains("slot get_availabl") ||
+                line.contains("slot launch_slot_") ||
                 line.contains("graphs reused") || line.contains("graph reallocs")
+
+    /** 供聊天等 app 侧组件写入同一日志缓冲（日志页可见） */
+    fun appLog(line: String) = appendLog(line)
 
     private fun appendLog(line: String) {
         Log.d(TAG, line)
@@ -453,6 +464,10 @@ object ServerProcessManager {
             "正在停止服务" to "正在停止服务",
             "服务已停止" to "服务已停止",
             "启动:" to "启动命令：",
+            "print_timings : prompt eval" to "预填充耗时",
+            "print_timings : eval time" to "生成耗时",
+            "slot release" to "请求完成（slot 释放）",
+            "quantized V cache requires flash_attn" to "错误：量化 V 缓存需要开启 Flash Attention（设置里把 FA 改为开/自动）",
             "load_hparams: more info" to "（可忽略）模型超参提示"
         )
         for ((en, zh) in rules) {

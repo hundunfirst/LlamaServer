@@ -44,9 +44,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 @OptIn(ExperimentalLayoutApi::class)
 fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val settings by vm.settings.collectAsStateWithLifecycle()
-    val cloudModels by vm.cloudModels.collectAsStateWithLifecycle()
-    val fetchingCloud by vm.fetchingCloud.collectAsStateWithLifecycle()
-    var showModelPicker by remember { mutableStateOf(false) }
+    var showModelDialog by remember { mutableStateOf(false) }
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(
@@ -84,7 +82,7 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             )
         }
 
-        // ---- 聊天渠道（本地引擎 / 云端 OpenAI 兼容 API，多预设） ----
+        // ---- 聊天渠道（OpenAI 兼容供应商，弹窗配置） ----
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -93,7 +91,7 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("云端模型渠道", style = MaterialTheme.typography.bodyLarge)
                 Text(
-                    "开启后聊天走云端接口，可存多组预设随时切换（改动立即生效）",
+                    "开启后聊天走云端 OpenAI 兼容接口；多供应商与模型在「配置模型」弹窗里管理",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -103,157 +101,25 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 onCheckedChange = { v -> vm.updateCloudSettings { it.copy(chatCloudEnabled = v) } }
             )
         }
-        if (settings.chatCloudEnabled) {
-            // 预设列表：点击即切换
-            val presets = com.localllm.server.core.AppSettings.loadCloudPresets()
-            if (presets.isNotEmpty()) {
-                Text("渠道预设（点击切换）", style = MaterialTheme.typography.labelMedium)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    presets.forEach { p ->
-                        val active = settings.chatCloudUrl.trim().removeSuffix("/") == p.url.trim().removeSuffix("/")
-                        FilterChip(
-                            selected = active,
-                            onClick = {
-                                if (!active) {
-                                    com.localllm.server.core.AppSettings.activateCloudPreset(p)
-                                    vm.reloadSettings()
-                                }
-                            },
-                            label = { Text(p.name, style = MaterialTheme.typography.labelSmall) }
-                        )
-                    }
-                }
-                Text(
-                    "当前：${settings.chatCloudModel.ifBlank { "未选模型" }}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            OutlinedTextField(
-                value = settings.chatCloudUrl,
-                onValueChange = { v -> vm.updateCloudSettings { it.copy(chatCloudUrl = v) } },
-                label = { Text("接口地址（如 https://api.xiaomimimo.com）") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-            OutlinedTextField(
-                value = settings.chatCloudKey,
-                onValueChange = { v -> vm.updateCloudSettings { it.copy(chatCloudKey = v) } },
-                label = { Text("API Key") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-            OutlinedTextField(
-                value = settings.chatCloudModel,
-                onValueChange = { v -> vm.updateCloudSettings { it.copy(chatCloudModel = v) } },
-                label = { Text("模型名（如 mimo-v2.6-pro）") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-            // 保存为预设：把当前三件套存进列表
-            var presetNameT by remember { mutableStateOf("") }
-            var savePresetOpen by remember { mutableStateOf(false) }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                OutlinedButton(
-                    onClick = { savePresetOpen = true },
-                    enabled = settings.chatCloudUrl.isNotBlank(),
-                    modifier = Modifier.weight(1f)
-                ) { Text("存为预设…") }
-                OutlinedButton(
-                    onClick = { vm.fetchCloudModels(); showModelPicker = true },
-                    enabled = !fetchingCloud,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    if (fetchingCloud) {
-                        CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(8.dp))
-                        Text("拉取中…")
-                    } else Text("拉取模型列表")
-                }
-            }
-            if (savePresetOpen) {
-                AlertDialog(
-                    onDismissRequest = { savePresetOpen = false },
-                    title = { Text("保存预设") },
-                    text = {
-                        OutlinedTextField(
-                            value = presetNameT,
-                            onValueChange = { presetNameT = it },
-                            label = { Text("预设名称（如 MiMo/DeepSeek）") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            if (presetNameT.isNotBlank()) {
-                                val list = com.localllm.server.core.AppSettings.loadCloudPresets().toMutableList()
-                                val p = com.localllm.server.core.AppSettings.CloudPreset(
-                                    name = presetNameT.trim(),
-                                    url = settings.chatCloudUrl.trim(),
-                                    key = settings.chatCloudKey.trim(),
-                                    model = settings.chatCloudModel.trim()
-                                )
-                                val idx = list.indexOfFirst { it.name == p.name }
-                                if (idx >= 0) list[idx] = p else list.add(p)
-                                com.localllm.server.core.AppSettings.saveCloudPresets(list)
-                                presetNameT = ""
-                                savePresetOpen = false
-                            }
-                        }) { Text("保存") }
-                    },
-                    dismissButton = { TextButton(onClick = { savePresetOpen = false }) { Text("取消") } }
-                )
-            }
-            // 服务商快捷填址
-            Text("常用服务商", style = MaterialTheme.typography.labelMedium)
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                listOf(
-                    "MiMo" to "https://api.xiaomimimo.com",
-                    "DeepSeek" to "https://api.deepseek.com",
-                    "通义" to "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                    "智谱" to "https://open.bigmodel.cn/api/paas/v4",
-                    "Kimi" to "https://api.moonshot.cn/v1"
-                ).forEach { (label, url) ->
-                    FilterChip(
-                        selected = settings.chatCloudUrl.trim().removeSuffix("/") == url,
-                        onClick = { vm.updateCloudSettings { it.copy(chatCloudUrl = url) } },
-                        label = { Text(label, style = MaterialTheme.typography.labelSmall) }
-                    )
-                }
-            }
-                cloudModels.let { list ->
-                if (list.isNotEmpty() && showModelPicker) {
-                    AlertDialog(
-                        onDismissRequest = { showModelPicker = false },
-                        title = { Text("选择模型（${list.size}）") },
-                        text = {
-                            LazyColumn {
-                                items(list) { m ->
-                                    Text(
-                                        m,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable {
-                                                vm.updateCloudSettings { it.copy(chatCloudModel = m) }
-                                                showModelPicker = false
-                                            }
-                                            .padding(vertical = 10.dp),
-                                        color = if (m == settings.chatCloudModel)
-                                            MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                            }
-                        },
-                        confirmButton = {
-                            TextButton(onClick = { showModelPicker = false }) { Text("关闭") }
-                        }
-                    )
-                }
-            }
+        val presetsNow = com.localllm.server.core.AppSettings.loadCloudPresets()
+        val activePreset = presetsNow.firstOrNull {
+            settings.chatCloudUrl.isNotBlank() &&
+                    it.url.trim().removeSuffix("/") == settings.chatCloudUrl.trim().removeSuffix("/")
+        }
+        Text(
+            if (settings.chatCloudEnabled)
+                "当前：" + (activePreset?.name ?: settings.chatCloudUrl.ifBlank { "未配置地址" }) +
+                        " · " + settings.chatCloudModel.ifBlank { "未选模型" }
+            else "当前：本地模型（内置服务）",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        OutlinedButton(
+            onClick = { showModelDialog = true },
+            modifier = Modifier.padding(top = 2.dp)
+        ) { Text("配置模型…") }
+        if (showModelDialog) {
+            ModelConfigDialog(vm = vm, onDismiss = { showModelDialog = false })
         }
 
         // ---- MCP 服务器（实验，stdio 型，llama-server 内置客户端） ----
@@ -297,7 +163,7 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         OutlinedTextField(
             value = settings.ngl,
             onValueChange = { v -> vm.updateSettings { it.copy(ngl = v.filter(Char::isDigit)) } },
-            label = { Text("GPU 层数 -ngl（0 = 纯 CPU；Adreno 试 99）") },
+            label = { Text("GPU 层数 -ngl（0 = 纯 CPU，本机实测更快，推荐）") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             modifier = Modifier.fillMaxWidth()
@@ -320,7 +186,7 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         OutlinedTextField(
             value = settings.cacheTypeV,
             onValueChange = { v -> vm.updateSettings { it.copy(cacheTypeV = v) } },
-            label = { Text("KV 缓存 V 类型（留空 = f16）") },
+            label = { Text("KV 缓存 V 类型（留空 = f16；量化时自动开 FA）") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
@@ -523,59 +389,48 @@ private fun McpSection() {
         )
     }
 
-    // ---- HTTP 型 MCP（app 侧客户端，聊天时自动注入 tools） ----
+    // ---- HTTP 型 MCP（app 侧客户端，聊天时自动注入 tools；配置在独立弹窗） ----
     Spacer(modifier = Modifier.height(16.dp))
-    Text("HTTP MCP（实验）", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+    var mcpDialogOpen by remember { mutableStateOf(false) }
+    var mcpSummaryTick by remember { mutableStateOf(0) }
+    @Suppress("UNUSED_EXPRESSION") mcpSummaryTick
+    Text("MCP 工具（HTTP）", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
     Text(
-        "远程 HTTP 端点（如 MT 管理器 http://IP:8787/mcp）。" +
-                "开启后聊天时自动拉取工具列表，模型可直接调用，无需重启服务。",
+        "远程流式 HTTP 端点（如 MT 管理器）。连接拉取工具后聊天直接可用，无需重启服务。",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
-    var httpEnabled by remember {
-        mutableStateOf(com.localllm.server.core.AppSettings.mcpHttpEnabled)
-    }
-    var httpUrl by remember {
-        mutableStateOf(com.localllm.server.core.AppSettings.mcpHttpUrl)
-    }
-    var httpToken by remember {
-        mutableStateOf(com.localllm.server.core.AppSettings.mcpHttpKey)
-    }
+    val mcpOn = com.localllm.server.core.AppSettings.mcpHttpEnabled
+    val mcpName = com.localllm.server.core.AppSettings.mcpHttpName
+    val mcpUrl = com.localllm.server.core.AppSettings.mcpHttpUrl
+    val mcpToolCount = runCatching {
+        org.json.JSONArray(com.localllm.server.core.AppSettings.mcpToolsJson).length()
+    }.getOrDefault(0)
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text("启用 HTTP MCP", style = MaterialTheme.typography.bodyLarge)
-        Switch(
-            checked = httpEnabled,
-            onCheckedChange = {
-                httpEnabled = it
-                com.localllm.server.core.AppSettings.mcpHttpEnabled = it
-            }
-        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                if (mcpOn && mcpUrl.isNotBlank())
+                    (if (mcpName.isNotBlank()) mcpName else "MCP") + " · $mcpUrl"
+                else "未配置",
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1
+            )
+            Text(
+                if (mcpToolCount > 0) "$mcpToolCount 个工具" else "点「配置」连接服务器拉取工具",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        OutlinedButton(onClick = { mcpDialogOpen = true }) { Text("配置") }
     }
-    if (httpEnabled) {
-        OutlinedTextField(
-            value = httpUrl,
-            onValueChange = {
-                httpUrl = it
-                com.localllm.server.core.AppSettings.mcpHttpUrl = it
-            },
-            label = { Text("MCP 端点 URL") },
-            placeholder = { Text("http://192.168.1.5:8787/mcp") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-        OutlinedTextField(
-            value = httpToken,
-            onValueChange = {
-                httpToken = it
-                com.localllm.server.core.AppSettings.mcpHttpKey = it
-            },
-            label = { Text("Token（可选）") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
+    if (mcpDialogOpen) {
+        com.localllm.server.ui.McpConfigDialog(onDismiss = {
+            mcpDialogOpen = false
+            mcpSummaryTick++
+        })
     }
 }

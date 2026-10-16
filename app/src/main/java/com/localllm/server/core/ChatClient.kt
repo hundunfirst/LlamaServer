@@ -35,6 +35,21 @@ object ChatClient {
         val arguments: String
     )
 
+    /** 当前进行中的请求连接（单会话单请求）；停止按钮通过 abort() 立即断开 */
+    @Volatile
+    private var activeConn: HttpURLConnection? = null
+
+    /** 立即中断正在进行的流式请求：断开连接让阻塞中的读马上返回，
+     *  对思考流（reasoning）同样生效——仅靠协程取消对阻塞 readLine 无效。 */
+    fun abort() {
+        val c = activeConn
+        activeConn = null
+        try {
+            c?.disconnect()
+        } catch (_: Exception) {
+        }
+    }
+
     suspend fun chatStream(
         port: Int,
         messages: List<ChatMessage>,
@@ -43,10 +58,15 @@ object ChatClient {
         /** 思考过程增量（thinking 模型的 reasoning_content） */
         onReasoning: (String) -> Unit = {},
         /** 服务端权威统计：completion_tokens 与 predicted tok/s（流式末尾 usage 块） */
-        onFinal: (completionTokens: Int, serverTps: Double) -> Unit = { _, _ -> },
+        /** 流结束后回调聚合的 tool_calls（无则空列表） */
+        onFinal: (completionTokens: Int, serverTps: Double, promptTokens: Int) -> Unit = { _, _, _ -> },
         /** 非空时使用云端 OpenAI 兼容端点（如 https://api.xxx.com）；为空走本机回环 */
         baseUrl: String? = null,
         model: String = "local",
+        /** 本地 jinja 模板思考真开关（chat_template_kwargs.enable_thinking）；null=不干预（云端模板自管） */
+        thinking: Boolean? = null,
+        /** 本地生成上限：防止退化复读跑到撑满上下文（约几十分钟）；null=不设 */
+        maxTokens: Int? = null,
         /** OpenAI tools 数组；null/空则不注入 */
         tools: JSONArray? = null,
         /** 流结束后回调聚合的 tool_calls（无则空列表） */
@@ -57,8 +77,8 @@ object ChatClient {
         val url = if (baseUrl.isNullOrBlank()) {
             URL("http://127.0.0.1:$port/v1/chat/completions")
         } else {
-            val b = baseUrl.trim().removeSuffix("/")
-            URL(if (b.endsWith("/v1")) "$b/chat/completions" else "$b/v1/chat/completions")
+            // 通用 OpenAI 兼容拼接：裸域名补 /v1，带版本路径（/v1、/paas/v4 …）原样追加
+            URL(OpenAiCompat.chatUrl(baseUrl))
         }
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -70,6 +90,7 @@ object ChatClient {
                 setRequestProperty("Authorization", "Bearer $apiToken")
             }
         }
+        activeConn = conn
         val t0 = System.currentTimeMillis()
         var ttfbMs = -1L
         var firstTokenMs: Long? = null
@@ -95,6 +116,12 @@ object ChatClient {
             if (tools != null && tools.length() > 0) {
                 body.put("tools", tools)
             }
+            if (maxTokens != null && maxTokens > 0) {
+                body.put("max_tokens", maxTokens)
+            }
+            if (thinking != null) {
+                body.put("chat_template_kwargs", JSONObject().put("enable_thinking", thinking))
+            }
             conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
 
             val code = conn.responseCode
@@ -111,6 +138,8 @@ object ChatClient {
                 var line: String?
                 while (reader.readLine().also { line = it } != null) {
                     val l = line ?: continue
+                    // 每行都检查取消（含思考流/工具流）：abort() 断连后此处也会抛
+                    currentCoroutineContext().ensureActive()
                     if (!l.startsWith("data:")) continue
                     val payload = l.removePrefix("data:").trim()
                     if (payload == "[DONE]") break
@@ -120,8 +149,10 @@ object ChatClient {
                     if (usage != null) {
                         val timings = obj.optJSONObject("timings")
                         val tokens = usage.optInt("completion_tokens", 0)
+                        val prompt = usage.optInt("prompt_tokens", 0)
+                        // tps 可能缺失（云端 OpenAI 风格无 timings）：照样采纳权威 token 数
                         val tps = timings?.optDouble("predicted_per_second", 0.0) ?: 0.0
-                        if (tokens > 0 && tps > 0) onFinal(tokens, tps)
+                        if (tokens > 0) onFinal(tokens, tps, prompt)
                         continue
                     }
                     val choices = obj.optJSONArray("choices") ?: continue
@@ -157,7 +188,6 @@ object ChatClient {
                     // Android org.json 的坑：显式 null 会被 optString 转成字符串 "null"
                     val text = if (delta.isNull("content")) "" else delta.optString("content")
                     if (text.isNotEmpty()) {
-                        currentCoroutineContext().ensureActive()
                         if (firstTokenMs == null) firstTokenMs = System.currentTimeMillis() - t0
                         onDelta(text)
                     }
@@ -174,6 +204,7 @@ object ChatClient {
             }
             onToolCalls(calls)
         } finally {
+            if (activeConn === conn) activeConn = null
             conn.disconnect()
         }
     }
