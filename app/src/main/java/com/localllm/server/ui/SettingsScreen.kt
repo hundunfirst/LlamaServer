@@ -145,6 +145,24 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             com.localllm.server.core.AppSettings.searchMaxCalls = v.toIntOrNull() ?: 3
         }
 
+        // ---- 搜索是否抓取正文 ----
+        var fetchFull by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.searchFetchFullText)
+        }
+        SectionHeader(
+            title = "搜索时抓取正文",
+            help = "开启：每次搜索抓取前 3 条结果的网页正文（每篇约 1800 字）作为回答依据，回答更实在、不易照搬标题，代价是每次搜索多 1~3 秒；关闭：只用标题与摘要，更快但信息单薄。立即生效。",
+            titleStyle = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        QuickChips(
+            options = listOf("true" to "开启（更实在）", "false" to "关闭（更快）"),
+            current = fetchFull.toString()
+        ) { v ->
+            fetchFull = v.toBoolean()
+            com.localllm.server.core.AppSettings.searchFetchFullText = fetchFull
+        }
+
         // ---- 聊天渠道（OpenAI 兼容供应商，弹窗配置） ----
         Row(
             modifier = Modifier.fillMaxWidth(),

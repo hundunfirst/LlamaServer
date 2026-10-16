@@ -467,8 +467,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         } else {
                             _lastStats.value = (timing + "用时 ${String.format("%.1f", usedSec)}s").trim('·', ' ')
                         }
-                        // 搜索来源页脚：只列正文实际引用到的来源（域名或标题命中），
-                        // 命中不到时回退前 5 条，避免「正文2条、来源15条」的错配
+                        // 搜索来源 → 消息 sources 字段（UI 渲染为可点击列表，不再塞进正文文本）
                         if (searchSources.isNotEmpty()) {
                             val answerText = _messages.value.lastOrNull()?.content ?: ""
                             val cited = searchSources.filter { s ->
@@ -480,15 +479,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             }
                             val picked = (if (cited.isNotEmpty()) cited else searchSources)
                                 .distinctBy { it.url }.take(5)
-                            val footer = buildString {
-                                append("\n\n🔗 来源：\n")
-                                picked.forEachIndexed { i, s ->
-                                    append("${i + 1}. ${s.title}\n   ${s.url}\n")
-                                }
-                            }.trimEnd()
                             val list = _messages.value.toMutableList()
-                            val last = list.removeLast()
-                            list.add(last.copy(content = last.content + footer))
+                            list[list.lastIndex] = list.last().copy(
+                                sources = picked.map { ChatStore.Source(it.title, it.url) }
+                            )
                             _messages.value = list
                         }
                         ServerProcessManager.appLog("聊天：完成 · ${_lastStats.value ?: "（无统计）"}")
@@ -550,12 +544,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                             ServerProcessManager.appLog("搜索词含身份证/手机号/卡号，已脱敏后再出网")
                                         }
                                         ServerProcessManager.appLog("内置搜索：「${query.take(40)}」…")
-                                        val rs = WebSearch.search(query)
+                                        val rs = WebSearch.search(
+                                            query, fetchFullText = AppSettings.searchFetchFullText
+                                        )
                                         searchSources.addAll(rs)
                                         ServerProcessManager.appLog("内置搜索：返回 ${rs.size} 条结果")
                                         val text = WebSearch.formatResults(rs)
                                         searchedQueries[norm] = text
-                                        steps.add(ChatStore.Step("search", "搜索网页：${query.take(60)}", "共 ${rs.size} 条结果"))
+                                        val fetched = rs.count { it.content != null }
+                                        steps.add(
+                                            ChatStore.Step(
+                                                "search",
+                                                "搜索网页：${query.take(60)}",
+                                                "共 ${rs.size} 条结果" +
+                                                        if (AppSettings.searchFetchFullText && fetched > 0)
+                                                            "（已抓取 $fetched 篇正文）" else ""
+                                            )
+                                        )
                                         syncSteps()
                                         text
                                     }

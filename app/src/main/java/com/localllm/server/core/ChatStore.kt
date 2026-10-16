@@ -19,12 +19,16 @@ object ChatStore {
         val millis: Long = 0
     )
 
+    /** 搜索来源（可点击跳转） */
+    data class Source(val title: String, val url: String)
+
     data class Msg(
         val role: String,
         val content: String,
         val imageB64: String? = null,
         val reasoning: String? = null,
-        val steps: List<Step> = emptyList()
+        val steps: List<Step> = emptyList(),
+        val sources: List<Source> = emptyList()
     )
 
     data class Session(
@@ -73,7 +77,8 @@ object ChatStore {
                         m.optString("content"),
                         m.optString("image").takeIf { it.isNotEmpty() },
                         m.optString("reasoning").takeIf { it.isNotEmpty() },
-                        steps = parseSteps(m.optJSONArray("steps"))
+                        steps = parseSteps(m.optJSONArray("steps")),
+                        sources = parseSources(m.optJSONArray("sources"))
                     )
                 }
                 Session(o.optString("id"), o.optString("title"), o.optLong("updatedAt"), msgs)
@@ -82,6 +87,16 @@ object ChatStore {
             }
             Store(if (sessions.any { it.id == active }) active else sessions.first().id, sessions)
         }.getOrDefault(Store("1", listOf(Session("1", "新会话", System.currentTimeMillis(), emptyList()))))
+    }
+
+    private fun parseSources(arr: JSONArray?): List<Source> {
+        if (arr == null) return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val u = o.optString("url")
+            if (u.isBlank()) return@mapNotNull null
+            Source(o.optString("title"), u)
+        }
     }
 
     private fun parseSteps(arr: JSONArray?): List<Step> {
@@ -116,6 +131,13 @@ object ChatStore {
                         )
                     }
                     o.put("steps", sArr)
+                }
+                if (m.sources.isNotEmpty()) {
+                    val uArr = JSONArray()
+                    m.sources.forEach { sc ->
+                        uArr.put(JSONObject().put("title", sc.title).put("url", sc.url))
+                    }
+                    o.put("sources", uArr)
                 }
                 mArr.put(o)
             }

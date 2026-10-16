@@ -17,7 +17,13 @@ import java.net.URLEncoder
  */
 object WebSearch {
 
-    data class Result(val title: String, val url: String, val snippet: String)
+    data class Result(
+        val title: String,
+        val url: String,
+        val snippet: String,
+        /** 抓取到的正文摘录（可为空） */
+        val content: String? = null
+    )
 
     private const val UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
@@ -39,7 +45,42 @@ object WebSearch {
 
     /** 搜索并返回前 max 条结果；失败抛 IllegalStateException（模型收到失败说明后自行降级回答）。
      *  出网前自动脱敏（身份证/手机号/银行卡号）。 */
-    suspend fun search(query: String, max: Int = 5): List<Result> = withContext(Dispatchers.IO) {
+    suspend fun search(query: String, max: Int = 5, fetchFullText: Boolean = false): List<Result> =
+        withContext(Dispatchers.IO) {
+        val results = searchSerp(query, max)
+        if (!fetchFullText || results.isEmpty()) return@withContext results
+        // 只抓前 3 条正文，避免拖慢与打搅站点
+        val enriched = results.mapIndexed { i, r ->
+            if (i < 3) r.copy(content = fetchText(r.url)) else r
+        }
+        enriched
+    }
+
+    /** 抓取页面正文并压缩为纯文本（失败返回 null，不影响搜索本身） */
+    private fun fetchText(url: String, limit: Int = 1800): String? = runCatching {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.connectTimeout = 5_000
+        conn.readTimeout = 6_000
+        conn.instanceFollowRedirects = true
+        conn.setRequestProperty("User-Agent", UA)
+        conn.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9")
+        val html = try {
+            if (conn.responseCode !in 200..299) return null
+            conn.inputStream.bufferedReader().use(BufferedReader::readText)
+        } finally {
+            conn.disconnect()
+        }
+        val text = html
+            .replace(Regex("(?s)<script.*?</script>"), " ")
+            .replace(Regex("(?s)<style.*?</style>"), " ")
+            .replace(Regex("(?s)<noscript.*?</noscript>"), " ")
+            .let { stripHtml(it) }
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        text.takeIf { it.length >= 80 }?.take(limit)
+    }.getOrNull()
+
+    private suspend fun searchSerp(query: String, max: Int): List<Result> = withContext(Dispatchers.IO) {
         val q = sanitizeQuery(query).first.trim()
         if (q.isEmpty()) throw IllegalStateException("缺少搜索关键词")
         val urlStr = "https://www.bing.com/search?q=" + URLEncoder.encode(q, "UTF-8") +
@@ -121,6 +162,7 @@ object WebSearch {
         results.forEachIndexed { i, r ->
             sb.append("${i + 1}. ${r.title}\n   链接: ${r.url}\n")
             if (r.snippet.isNotBlank()) sb.append("   摘要: ${r.snippet}\n")
+            r.content?.let { c -> sb.append("   正文摘录: $c\n") }
         }
         return sb.toString().trimEnd()
     }

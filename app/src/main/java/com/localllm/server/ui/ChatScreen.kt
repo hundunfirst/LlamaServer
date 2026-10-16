@@ -1078,6 +1078,45 @@ private fun MessageBubble(
                         }
                     }
                 }
+                if (!isUser && msg.sources.isNotEmpty()) {
+                    Column(Modifier.padding(top = 6.dp)) {
+                        Text(
+                            "🔗 来源（点击打开浏览器）",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        msg.sources.forEach { s ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        runCatching {
+                                            context.startActivity(
+                                                android.content.Intent(
+                                                    android.content.Intent.ACTION_VIEW,
+                                                    android.net.Uri.parse(s.url)
+                                                )
+                                            )
+                                        }.onFailure {
+                                            Toast.makeText(context, "无法打开链接", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                    .padding(vertical = 3.dp)
+                            ) {
+                                Text(
+                                    s.title.ifBlank { s.url }.take(64),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    runCatching { java.net.URI(s.url).host ?: s.url }.getOrDefault(s.url),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
                 if (!isUser && msg.content.isNotBlank()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         TextButton(

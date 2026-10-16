@@ -297,6 +297,11 @@ object AppSettings {
         get() = prefs.getInt("search_max_calls", 3)
         set(value) = prefs.edit().putInt("search_max_calls", value).apply()
 
+    /** 搜索时是否抓取结果页正文（提升回答质量，代价是每次搜索多 1~3 秒） */
+    var searchFetchFullText: Boolean
+        get() = prefs.getBoolean("search_fetch_full", true)
+        set(value) = prefs.edit().putBoolean("search_fetch_full", value).apply()
+
     // ---- 本地模型的按模型参数覆盖（精简版：上下文 / 输出上限 / mmproj 绑定）----
     /** {模型绝对路径: {"ctx":Int?, "out":Int?, "mmproj":String?}}；字段缺省=跟随全局 */
     var localModelParamsJson: String
