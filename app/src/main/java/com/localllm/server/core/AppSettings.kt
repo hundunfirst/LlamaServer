@@ -292,6 +292,11 @@ object AppSettings {
         get() = prefs.getString("image_search_policy", "block") ?: "block"
         set(value) = prefs.edit().putString("image_search_policy", value).apply()
 
+    /** 每条消息的联网搜索次数上限；0 = 不限制 */
+    var searchMaxCalls: Int
+        get() = prefs.getInt("search_max_calls", 3)
+        set(value) = prefs.edit().putInt("search_max_calls", value).apply()
+
     // ---- 本地模型的按模型参数覆盖（精简版：上下文 / 输出上限 / mmproj 绑定）----
     /** {模型绝对路径: {"ctx":Int?, "out":Int?, "mmproj":String?}}；字段缺省=跟随全局 */
     var localModelParamsJson: String

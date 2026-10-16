@@ -127,6 +127,24 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             com.localllm.server.core.AppSettings.imageSearchPolicy = v
         }
 
+        // ---- 联网搜索次数上限 ----
+        var searchCapSel by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.searchMaxCalls.toString())
+        }
+        SectionHeader(
+            title = "联网搜索次数上限",
+            help = "每条消息最多允许调用几次联网搜索（相同查询复用不计数）。次数用完会移除搜索工具，强制模型基于已有结果作答；「不限」适合需要多轮检索的深度问题，弱模型可能反复搜索。立即生效。",
+            titleStyle = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        QuickChips(
+            options = listOf("2" to "2 次", "3" to "3 次", "5" to "5 次", "0" to "不限"),
+            current = searchCapSel
+        ) { v ->
+            searchCapSel = v
+            com.localllm.server.core.AppSettings.searchMaxCalls = v.toIntOrNull() ?: 3
+        }
+
         // ---- 聊天渠道（OpenAI 兼容供应商，弹窗配置） ----
         Row(
             modifier = Modifier.fillMaxWidth(),

@@ -287,6 +287,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }?.toSet()
                 } ?: emptySet()
                 var searchCount = 0
+                val searchCap = AppSettings.searchMaxCalls.let { if (it <= 0) Int.MAX_VALUE else it }
                 var loggedNoSearch = false
                 val searchedQueries = mutableMapOf<String, String>() // 规范化查询 → 结果文本（相同查询复用）
 
@@ -303,7 +304,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     // 提前强制：已搜过但走到第4轮仍无正文 → 立即移除搜索工具，逼模型作答
                     val forceNoTools = searchAvailable && round >= 3 &&
                             _messages.value.lastOrNull()?.content.isNullOrEmpty() == true
-                    if ((forceNoTools || (searchAvailable && searchCount >= 3)) && !loggedNoSearch) {
+                    if ((forceNoTools || (searchAvailable && searchCount >= searchCap)) && !loggedNoSearch) {
                         loggedNoSearch = true
                         ServerProcessManager.appLog(
                             if (forceNoTools) "连续多轮未产出正文，本轮移除搜索工具（强制模型作答）"
@@ -334,7 +335,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         // 本地生成上限：退化复读时不至于跑到撑满上下文
                         maxTokens = if (cloud) null else AppSettings.effectiveOut(AppSettings.selectedModelPath),
                         // 搜索配额用尽 / 多轮无正文 → 不再提供搜索工具（防止弱模型空转到轮数上限、永远不回答）
-                        tools = if (forceNoTools || (searchAvailable && searchCount >= 3)) toolsNoSearch else toolsJson,
+                        tools = if (forceNoTools || (searchAvailable && searchCount >= searchCap)) toolsNoSearch else toolsJson,
                         onToolCalls = { toolCalls = it },
                         onTiming = { ttfb, firstToken ->
                             // 云端慢排查：ttfb vs 首token 分离，判断慢在网络还是在推理
@@ -502,8 +503,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                         ServerProcessManager.appLog("内置搜索：相同查询「${query.take(30)}」复用已有结果（不占用配额）")
                                         searchedQueries[norm]!!
                                     }
-                                    searchCount >= 3 -> {
-                                        ServerProcessManager.appLog("搜索已达本消息上限（3次），返回提示")
+                                    searchCount >= searchCap -> {
+                                        ServerProcessManager.appLog("搜索已达本消息上限（$searchCap 次），返回提示")
                                         "本轮搜索次数已达上限，请基于已有搜索结果直接回答。"
                                     }
                                     else -> {
