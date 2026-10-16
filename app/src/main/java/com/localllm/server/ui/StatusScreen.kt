@@ -87,21 +87,26 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                         onValueChange = { v ->
                             vm.updateSettings { it.copy(port = v.filter(Char::isDigit)) }
                         },
-                        label = { Text("服务端口") },
+                        label = { Text("端口", style = MaterialTheme.typography.labelSmall) },
+                        textStyle = MaterialTheme.typography.bodySmall,
                         singleLine = true,
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                             keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
                         ),
-                        modifier = Modifier.width(150.dp)
+                        modifier = Modifier.width(104.dp)
                     )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    OutlinedButton(
+                        onClick = { vm.saveSettings() },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp)
+                    ) { Text("保存", style = MaterialTheme.typography.labelMedium) }
                     Spacer(modifier = Modifier.width(8.dp))
-                    OutlinedButton(onClick = { vm.saveSettings() }) { Text("保存") }
+                    Text(
+                        "改端口后需重启服务",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
-                Text(
-                    "修改端口后需重启服务生效（本机 API 地址随之变化）",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
                 val rawName = models.find { it.file.absolutePath == selectedModel }?.name
                 val modelName = com.localllm.server.core.AppSettings.aliasFor(state.modelPath) ?: rawName
                 Text(

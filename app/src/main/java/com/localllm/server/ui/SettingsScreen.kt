@@ -41,7 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 @Composable
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
 fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     var showModelDialog by remember { mutableStateOf(false) }
@@ -171,26 +171,43 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         // ---- MCP 服务器（实验，stdio 型，llama-server 内置客户端） ----
         McpSection()
 
-        Text(
-            "服务端口已移至「状态」页（服务状态卡片内），改动后需重启服务生效。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        OutlinedTextField(
-            value = settings.ctxSize,
-            onValueChange = { v -> vm.updateSettings { it.copy(ctxSize = v.filter(Char::isDigit)) } },
-            label = { Text("上下文长度 (-c)") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth()
-        )
-        QuickChips(
-            options = listOf(
-                "4096" to "4K", "8192" to "8K", "16384" to "16K", "32768" to "32K",
-                "65536" to "64K", "131072" to "128K", "262144" to "256K"
-            ),
-            current = settings.ctxSize
-        ) { v -> vm.updateSettings { it.copy(ctxSize = v) } }
+        // 上下文长度：输入框 + 预置值下拉（省掉一整行 chips）
+        var ctxExpanded by remember { mutableStateOf(false) }
+        androidx.compose.material3.ExposedDropdownMenuBox(
+            expanded = ctxExpanded,
+            onExpandedChange = { ctxExpanded = it }
+        ) {
+            OutlinedTextField(
+                value = settings.ctxSize,
+                onValueChange = { v -> vm.updateSettings { it.copy(ctxSize = v.filter(Char::isDigit)) } },
+                label = { Text("上下文长度 (-c)") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                trailingIcon = {
+                    androidx.compose.material3.ExposedDropdownMenuDefaults.TrailingIcon(expanded = ctxExpanded)
+                },
+                modifier = Modifier
+                    .menuAnchor(androidx.compose.material3.MenuAnchorType.PrimaryEditable)
+                    .fillMaxWidth()
+            )
+            ExposedDropdownMenu(
+                expanded = ctxExpanded,
+                onDismissRequest = { ctxExpanded = false }
+            ) {
+                listOf(
+                    4096 to "4K", 8192 to "8K", 16384 to "16K", 32768 to "32K",
+                    65536 to "64K", 131072 to "128K", 262144 to "256K"
+                ).forEach { (v, label) ->
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("$label（$v）") },
+                        onClick = {
+                            vm.updateSettings { it.copy(ctxSize = v.toString()) }
+                            ctxExpanded = false
+                        }
+                    )
+                }
+            }
+        }
         OutlinedTextField(
             value = settings.threads,
             onValueChange = { v -> vm.updateSettings { it.copy(threads = v.filter(Char::isDigit)) } },
