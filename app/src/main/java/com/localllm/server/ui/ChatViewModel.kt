@@ -355,7 +355,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 if (elapsed > 0.3) {
                                     val tps = deltaCount / elapsed
                                     _lastStats.value =
-                                        "生成中 · $deltaCount token · ${String.format("%.1f", tps)} tok/s"
+                                        "生成中 · $deltaCount token · ${String.format("%.1f", tps)} tok/s" +
+                                                " · ${String.format("%.0f", elapsed)}s"
                                 }
                                 val list = _messages.value.toMutableList()
                                 val last = list.removeLast()
