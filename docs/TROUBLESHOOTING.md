@@ -173,6 +173,21 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
   超低比特只省内存，**解码不会更快**。
 - 另：Bonsai 2 是 thinking 模型，`max_tokens` 给小了会全花在思考上、正文为空（官方建议 ≥ 数 k）。
 
+### #25b 用 PrismML fork 引擎解锁 PQ2_0（实测可行，2026-10-18）
+
+- **产物**：他们 release `prism-b10777-e3de715` 里有 `...-bin-android-arm64.tar.gz`（74MB），**不用自己交叉编译**。
+- **结构兼容**：解压是平铺目录（`llama-server` 壳 + `libllama*` / `libggml*` / `libmtmd`），
+  与 `assets/engines/{cpu,opencl}` 的布局一致；`llvm-strip` 后 **19.5MB / 9 个文件**（未瘦身 202MB）。
+- **对齐/依赖**：全部 `LOAD align=0x4000`（16KB 满足发布要求），NEEDED 只有系统库。
+- **实测（本机 CPU、`-t 6`）**：Bonsai 4B **PQ2_0** decode **18.4 tok/s**（上游引擎同模型 Q2_0 只有 9.0）；
+  普通 Qwen3.5-4B Q4_K_M 在 fork 上 15.4 tok/s，比上游 13.5 略快 → 老模型兼容没问题。
+- **注意**：该 Android 包是**纯 CPU 构建**（没有 `libggml-opencl.so`），所以只能替换 `engines/cpu`，
+  GPU 路径继续用上游 `engines/opencl`；`libggml-cpu` 是按 `libggml-cpu-android_armvX_Y.so` 分变体的，
+  两个变体（armv8.0 / armv9.2）都要带上，它靠 dlopen 扫描选最优。
+- **进包前还要回归**：mmproj 视觉、KV 量化（`-fa`）、`--spec-type`（MTP/DFlash）、长上下文、停止；
+  fork 版本线是 `0.2.0-dev (build 10777)`，与上游 v0.7.0 不同线，双线维护成本要算进去。
+
+
 ### #26 OCR 数字/小数识别误差 [APP]
 - **现象**：表格类截图里个别金额小数点丢失（如 `7177.50` → `717750`）。
 - **原因**：ML Kit 对小字号数字的固有误差；已做「原图识别 + 坐标重建行 + 放大灰度预处理」降低概率。
