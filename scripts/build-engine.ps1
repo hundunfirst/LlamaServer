@@ -3,7 +3,10 @@
 # 说明: 见 docs/ENVIRONMENT.md §五；16KB 页对齐已在链接参数中（发布硬性要求）
 param()
 
-$ErrorActionPreference = "Stop"
+# cmake / ninja 会往 stderr 写进度（如 -- CMAKE_BUILD_TYPE=Release），
+# PowerShell 5.1 在 EAP=Stop 下把原生 stderr 当终止错误（NativeCommandError），
+# 所以这里保持 Continue，成败一律由 $LASTEXITCODE 判定
+$ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
 
 # 中文 Windows 下 Python 代码生成必须 UTF-8（GBK 会崩）
@@ -31,7 +34,7 @@ function Build-Engine {
         -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 `
         -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=OFF -DLLAMA_OPENSSL=OFF `
         -DGGML_CPU_KLEIDIAI=OFF `
-        "-DCMAKE_EXE_LINKER_FLAGS=$align" "-DCMAKE_SHARED_LINKER_FLAGS=$align" `
+        "-DCMAKE_EXE_LINKER_FLAGS=$align" "-DCMAKE_SHARED_LINKER_FLAGS=$align" "-DCMAKE_MODULE_LINKER_FLAGS=$align" `
         @CmakeArgs | Select-Object -Last 3
     if ($LASTEXITCODE -ne 0) { throw "configure failed: $Name" }
     Write-Host "== [build] $Name =="
@@ -62,8 +65,11 @@ if (-not (Test-Path "$oc\icd-install\lib\libOpenCL.so")) {
         -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 `
         -DOPENCL_ICD_LOADER_HEADERS_DIR="$oc\OpenCL-Headers" `
         "-DCMAKE_INSTALL_PREFIX=$oc\icd-install" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "configure failed: icd-loader" }
     & $cmake --build "$oc\icd-build" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "build failed: icd-loader" }
     & $cmake --install "$oc\icd-build" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "install failed: icd-loader" }
 }
 Build-Engine -Name "opencl" -CmakeArgs @(
     "-DGGML_OPENCL=ON", "-DGGML_BACKEND_DL=ON", "-DGGML_CPU_ALL_VARIANTS=OFF",
