@@ -300,7 +300,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val sessionPrompt = _sessions.value.find { it.id == _activeId.value }?.systemPrompt
                 val basePrompt = sessionPrompt ?: AppSettings.activeSysPrompt()
                 val todoHint = if (todoOn) {
-                    "多步任务请先用 todo_write 列出计划，之后每完成一步更新任务状态。"
+                    "多步任务可先用 todo_write 列出计划（同一消息最多 3 次），随后必须在正文中直接给出实际产出（代码/文件内容），" +
+                            "绝不能用「已完成…」之类的进度描述代替真正的内容。"
                 } else ""
                 val systemText = (if (basePrompt.isNotBlank())
                     "【本会话角色设定，优先遵守】" + basePrompt + " "
@@ -458,6 +459,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }?.toSet()
                 } ?: emptySet()
                 var searchCount = 0
+                var todoCalls = 0
                 val searchCap = AppSettings.searchMaxCalls.let { if (it <= 0) Int.MAX_VALUE else it }
                 var loggedNoSearch = false
                 // 执行步骤时间线（思考/搜索/工具），落到消息上供 UI 展示
@@ -690,20 +692,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         validCalls.forEach { tc ->
                         val result = runCatching {
                             if (tc.name == TodoTool.NAME) {
-                                val todos = TodoTool.parse(tc.arguments.ifBlank { "{}" })
-                                if (todos.isEmpty()) {
-                                    "参数无效：未能解析任务清单，请按 tasks[{title,status}] 格式重新提交。"
+                                todoCalls++
+                                if (todoCalls > 3) {
+                                    "任务清单更新已达上限（3 次）。请立即在正文中给出用户要的实际内容（代码/文件），不要再更新清单。"
                                 } else {
-                                    val list = _messages.value.toMutableList()
-                                    if (list.isNotEmpty()) {
-                                        list[list.lastIndex] = list.last().copy(todos = todos)
-                                        _messages.value = list
+                                    val todos = TodoTool.parse(tc.arguments.ifBlank { "{}" })
+                                    if (todos.isEmpty()) {
+                                        "参数无效：未能解析任务清单，请按 tasks[{title,status}] 格式重新提交。"
+                                    } else {
+                                        val list = _messages.value.toMutableList()
+                                        if (list.isNotEmpty()) {
+                                            list[list.lastIndex] = list.last().copy(todos = todos)
+                                            _messages.value = list
+                                        }
+                                        val done = todos.count { it.status == "completed" }
+                                        ServerProcessManager.appLog("任务清单更新：$done/${todos.size} 已完成")
+                                        "任务清单已更新（${done}/${todos.size} 完成）。请继续在正文中产出实际内容，完成后再次调用 ${TodoTool.NAME} 更新状态。"
                                     }
-                                    val done = todos.count { it.status == "completed" }
-                                    ServerProcessManager.appLog("任务清单更新：$done/${todos.size} 已完成")
-                                    "任务清单已更新（${done}/${todos.size} 完成）。继续执行下一步，完成后再次调用 ${
-                                        TodoTool.NAME
-                                    } 更新状态。"
                                 }
                             } else if (tc.name == "web_search") {
                                 val query = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
@@ -782,17 +787,27 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     apiMsgs = newMsgs
                 }
 
-                // 兜底：轮次用尽仍无任何正文 → 无工具模式强问一次，保证用户一定拿到回答
-                if (_streaming.value && !autoStopped &&
-                    _messages.value.lastOrNull()?.content.isNullOrEmpty() == true
-                ) {
-                    ServerProcessManager.appLog("已达最大轮数（8）仍无正文，改用无工具模式强制回答…")
+                // 兜底：无正文，或只列了清单就报"已完成"（产出过短）→ 强制无工具直接产出
+                val lastContentNow = _messages.value.lastOrNull()?.content.orEmpty()
+                val needsRealOutput = lastContentNow.isBlank() ||
+                        (lastContentNow.length < 120 && todoCalls > 0)
+                if (_streaming.value && !autoStopped && needsRealOutput) {
+                    ServerProcessManager.appLog(
+                        if (lastContentNow.isBlank()) "无正文输出，改用无工具模式强制回答…"
+                        else "疑似只报进度未产出内容（${lastContentNow.length} 字），强制直接产出…"
+                    )
                     var forcedStats: String? = null
                     runCatching {
                         ChatClient.chatStream(
                             port = AppSettings.port,
                             messages = apiMsgs + listOf(
-                                ChatClient.ChatMessage("user", "请直接用中文简要回答上面的问题，不要再调用任何工具。")
+                                ChatClient.ChatMessage(
+                                    "user",
+                                    if (todoCalls > 0)
+                                        "请直接输出用户要的实际内容（完整代码/文件内容），不要只描述进度，也不要再调用工具。"
+                                    else
+                                        "请直接用中文简要回答上面的问题，不要再调用任何工具。"
+                                )
                             ),
                             apiToken = if (cloud) AppSettings.chatCloudKey.ifBlank { null }
                                        else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
