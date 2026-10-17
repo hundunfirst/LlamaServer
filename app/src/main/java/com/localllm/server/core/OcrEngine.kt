@@ -33,12 +33,34 @@ object OcrEngine {
                 val image = InputImage.fromBitmap(bmp, 0)
                 recognizer.process(image)
                     .addOnSuccessListener { result ->
-                        val sb = StringBuilder()
+                        // 按坐标重建行：多列/卡片式布局直接拼行序会串行，导致数字错位
+                        data class El(val x: Int, val y: Int, val h: Int, val text: String)
+
+                        val els = mutableListOf<El>()
                         for (block in result.textBlocks) {
                             for (line in block.lines) {
-                                if (sb.isNotEmpty()) sb.append('\n')
-                                sb.append(line.text)
+                                val bb = line.boundingBox ?: continue
+                                if (line.text.isBlank()) continue
+                                els.add(El(bb.left, bb.top, bb.height(), line.text))
                             }
+                        }
+                        els.sortBy { it.y }
+                        val rows = mutableListOf<MutableList<El>>()
+                        for (e in els) {
+                            val row = rows.lastOrNull()
+                            if (row != null &&
+                                kotlin.math.abs(e.y - row.first().y) < maxOf(12, row.first().h / 2)
+                            ) {
+                                row.add(e)
+                            } else {
+                                rows.add(mutableListOf(e))
+                            }
+                        }
+                        val sb = StringBuilder()
+                        for (row in rows) {
+                            row.sortBy { it.x }
+                            if (sb.isNotEmpty()) sb.append('\n')
+                            sb.append(row.joinToString(" | ") { it.text })
                         }
                         cont.resume(sb.toString().trim())
                     }

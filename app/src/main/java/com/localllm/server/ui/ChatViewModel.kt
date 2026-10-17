@@ -10,6 +10,7 @@ import com.localllm.server.core.DocExtract
 import com.localllm.server.core.McpHttpClient
 import com.localllm.server.core.OcrEngine
 import com.localllm.server.core.ServerProcessManager
+import com.localllm.server.core.ServerUiState
 import com.localllm.server.core.UrlFetch
 import com.localllm.server.core.WebSearch
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +49,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val searchApproval: StateFlow<String?> = _searchApproval.asStateFlow()
     private var approvalDeferred: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
 
+    /** 本次发送用于 OCR 的原图（压缩图给小字识别不准）；发送后清空 */
+    @Volatile
+    private var ocrSourceB64: String? = null
+
     /** 链接抓取缓存：url → (抓取时间, 内容)，10 分钟内复用（避免重发时重复抓取） */
     private val linkCache = mutableMapOf<String, Pair<Long, String>>()
 
@@ -78,6 +83,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val lastStats: StateFlow<String?> = _lastStats.asStateFlow()
 
     private val _pendingImageB64 = MutableStateFlow<String?>(null)
+    /** 原图 base64（仅用于 OCR，不传模型、不落盘） */
+    private val _pendingImageFullB64 = MutableStateFlow<String?>(null)
     val pendingImageB64: StateFlow<String?> = _pendingImageB64.asStateFlow()
 
     private var streamJob: Job? = null
@@ -85,6 +92,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun onInput(v: String) { _input.value = v }
 
     init {
+        // 服务就绪后自动清掉"请先启动服务"之类的连接错误（避免回到会话页仍显示红字）
+        viewModelScope.launch {
+            ServerProcessManager.state.collect { st ->
+                if (st.status == ServerUiState.Status.RUNNING) {
+                    val cur = _error.value ?: return@collect
+                    if (cur.contains("启动服务") || cur.contains("连接失败")) {
+                        _error.value = null
+                    }
+                }
+            }
+        }
         // 接收外部分享内容：填进输入框并提示
         viewModelScope.launch {
             com.localllm.server.core.ShareInbox.text.collect { shared ->
@@ -115,13 +133,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, baos)
                 bmp.recycle()
                 _pendingImageB64.value = android.util.Base64.encodeToString(baos.toByteArray(), android.util.Base64.NO_WRAP)
+                // OCR 用原图（压缩图会让小字/小数点糊掉，数字容易错）
+                runCatching {
+                    val fullBytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                    if (fullBytes != null && fullBytes.size <= 8 * 1024 * 1024) {
+                        _pendingImageFullB64.value =
+                            android.util.Base64.encodeToString(fullBytes, android.util.Base64.NO_WRAP)
+                    }
+                }
             }.onFailure {
                 _error.value = "图片处理失败：${it.message}"
             }
         }
     }
 
-    fun clearPendingImage() { _pendingImageB64.value = null }
+    fun clearPendingImage() {
+        _pendingImageB64.value = null
+        _pendingImageFullB64.value = null
+    }
 
     // ---- 文本类附件（文档/代码等）：读成文本随消息一起发送 ----
     private val _pendingFile = MutableStateFlow<Pair<String, String>?>(null) // (文件名, 文本)
@@ -188,6 +217,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _input.value = ""
         _pendingImageB64.value = null
         _pendingFile.value = null
+        ocrSourceB64 = _pendingImageFullB64.value
+        _pendingImageFullB64.value = null
         val content = if (file != null) {
             // 附件按上下文预算截断：避免 prompt 超限或预填充过慢
             val ctx = AppSettings.effectiveCtx(AppSettings.selectedModelPath)
@@ -319,11 +350,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         history.map { m ->
                             if (m.imageB64 != null) {
                                 if (useOcr) {
+                                    val ocrSrc = ocrSourceB64 ?: m.imageB64
                                     val ocrText = runCatching {
                                         OcrEngine.recognize(
-                                            android.util.Base64.decode(
-                                                m.imageB64, android.util.Base64.NO_WRAP
-                                            )
+                                            android.util.Base64.decode(ocrSrc, android.util.Base64.NO_WRAP)
                                         )
                                     }.getOrElse { e ->
                                         ServerProcessManager.appLog("图片OCR失败：${e.message}，本次改为多模态直传")
