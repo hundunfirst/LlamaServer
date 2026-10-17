@@ -149,7 +149,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _pendingImageB64.value = null
         _pendingFile.value = null
         val content = if (file != null) {
-            "【附件：${file.first}】\n```\n${file.second}\n```\n\n" + text
+            // 附件按上下文预算截断：避免 prompt 超限或预填充过慢
+            val ctx = AppSettings.effectiveCtx(AppSettings.selectedModelPath)
+            val historyEst = _messages.value.sumOf { estimateTokens(it.content) }
+            val budgetTokens = (ctx * 0.45).toInt() - historyEst - 1024
+            val maxChars = maxOf(500, (budgetTokens * 1.6).toInt())
+            val raw = file.second
+            val kept = if (raw.length > maxChars) raw.take(maxChars) else raw
+            val note = if (kept.length < raw.length)
+                "\n[附件过长已截断：原文 " + raw.length + " 字，本次仅发送前 " + kept.length + " 字]"
+            else ""
+            ServerProcessManager.appLog(
+                "附件 " + file.first + "：" + raw.length + " 字，估算 ~" + estimateTokens(raw) +
+                        " tokens；预算 " + budgetTokens + "，实际发送 " + kept.length + " 字" +
+                        if (note.isEmpty()) "" else "（已截断）"
+            )
+            "【附件：" + file.first + "】\n```\n" + kept + "\n```" + note + "\n\n" + text
         } else {
             text
         }
@@ -748,6 +763,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             _messages.value = remaining.first().messages
         }
         saveStore()
+    }
+
+    /** 粗略 token 估算：汉字约 1 token，其它字符约 1/4 token */
+    private fun estimateTokens(text: String): Int {
+        var cjk = 0
+        var other = 0
+        for (ch in text) {
+            if (ch.code in 0x4E00..0x9FFF || ch.code in 0x3000..0x303F) cjk++ else other++
+        }
+        return cjk + other / 4 + 1
     }
 
     fun clearError() { _error.value = null }
