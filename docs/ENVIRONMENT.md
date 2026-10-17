@@ -38,10 +38,10 @@
 
 | 依赖 | 版本/commit | 获取方式 |
 |---|---|---|
-| **llama.cpp** | **3fb4767**（2026-10-14，ggml 0.26.0） | 浅克隆于 `llama.cpp/` |
+| **llama.cpp** | **620d2225c**（v0.7.0，2026-10-15，ggml 0.27.0） | 浅克隆于 `llama.cpp/`，已 checkout 到 tag `v0.7.0` |
 | OpenCL-Headers | 30bc20a | 浅克隆于 `opencl-deps/OpenCL-Headers` |
 | OpenCL-ICD-Loader | 5192c84 | 浅克隆于 `opencl-deps/OpenCL-ICD-Loader`，NDK 交叉编译产出 `libOpenCL.so`（仅链接用，不进 APK） |
-| 引擎产物 | strip 后 ~17.5MB：`llama-server` + 8 个 .so（含 `libggml-opencl.so`） | 见下方构建命令，同步在 `app-native/` 与 `app/src/main/` |
+| 引擎产物 | strip 后：cpu 14.7MB（8 个文件）/ opencl 18.2MB（9 个文件） | 见下方构建命令，`scripts/build-engine.ps1` 同步产出到 `app/src/main/assets/engines/{cpu,opencl}` |
 
 > llama.cpp 无独立版本号，**以 commit 为准**；升级后回填此表。
 
@@ -56,6 +56,7 @@ $ninja = "C:\Users\mingliang\AppData\Local\Android\Sdk\cmake\3.22.1\bin\ninja.ex
 $ndk   = "C:\Users\mingliang\AppData\Local\Android\Sdk\ndk\27.3.13750724"
 $root  = "C:\Users\mingliang\XiaomiMiMoProjects\LlamaServer"
 $oc    = "$root\opencl-deps"
+$align = "-Wl,-z,max-page-size=16384"   # 16KB 页对齐：EXE/SHARED/MODULE 三个都要给（见 TROUBLESHOOTING #28）
 
 # (a) 若 OpenCL ICD 尚未构建：
 & $cmake -S "$oc\OpenCL-ICD-Loader" -B "$oc\icd-build" -G Ninja `
@@ -74,6 +75,7 @@ $oc    = "$root\opencl-deps"
   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 `
   -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=OFF -DLLAMA_OPENSSL=OFF `
   -DGGML_CPU_KLEIDIAI=OFF -DGGML_OPENCL=ON `
+  "-DCMAKE_EXE_LINKER_FLAGS=$align" "-DCMAKE_SHARED_LINKER_FLAGS=$align" "-DCMAKE_MODULE_LINKER_FLAGS=$align" `
   "-DOpenCL_INCLUDE_DIR=$oc\OpenCL-Headers" `
   "-DOpenCL_LIBRARY=$oc\icd-install\lib\libOpenCL.so" `
   "-DPython3_EXECUTABLE=C:\Users\mingliang\AppData\Local\Programs\Python\Python314\python.exe"
@@ -82,14 +84,22 @@ $oc    = "$root\opencl-deps"
 
 ### 5.2 产物入包（strip → 拷贝）
 
+当前运行时布局是 `assets/engines/{cpu,opencl}/`（由 `BinaryInstaller` 首启释放到 `files/engines/{mode}/`，按 ngl 自动选）。
+`scripts/build-engine.ps1` 已包含下面全部步骤，手改时照抄：
+
 ```powershell
 $strip = "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe"
-$src   = "$root\llama.cpp\build-android-opencl\bin"
-Get-ChildItem $src -Filter *.so | ForEach-Object { & $strip --strip-unneeded $_.FullName }
-Copy-Item "$src\*" "$root\app-native\" -Force
-Copy-Item "$src\*" "$root\app\src\main\jniLibs\arm64-v8a\" -Force
-Copy-Item "$src\llama-server" "$root\app\src\main\assets\bin\" -Force
+foreach ($mode in @("cpu","opencl")) {
+  $src = "$root\llama.cpp\build-android-$mode\bin"
+  Get-ChildItem $src -Filter *.so | ForEach-Object { & $strip --strip-unneeded $_.FullName }
+  $dest = "$root\app\src\main\assets\engines\$mode"
+  Remove-Item "$dest\*" -Force -ErrorAction SilentlyContinue
+  Copy-Item "$src\*" $dest -Force
+  Remove-Item "$dest\libggml-cpu-android_armv8.6*","$dest\libggml-cpu-android_armv9*" -Force -ErrorAction SilentlyContinue
+}
 ```
+
+改完引擎必须**同时**把 `core/BinaryInstaller.kt` 的 `VERSION` 加一，否则已装设备不会重新释放引擎。
 
 ### 5.3 APK
 

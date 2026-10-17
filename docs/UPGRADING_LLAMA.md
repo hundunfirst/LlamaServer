@@ -69,7 +69,10 @@ llama.cpp 的**公共契约是 CLI 参数和 OpenAI API**，出现以下任一�
 
 **不需要改**：进程管理、FGS、SELinux/LD 策略、模型目录、UI——这些与 llama 版本无关。
 
-## 三、当前引擎结构存档（3fb4767 基线）
+## 三、当前引擎结构存档（620d2225c / v0.7.0 基线）
+
+> 与 3fb4767 基线逐文件比对：产物集合**完全一致**（cpu 8 个 / opencl 9 个），仅体积变化，
+> 说明 CLI 与模块划分稳定；升级实测见 §六。
 
 ```
 bin/llama-server              ~7KB 壳，main.cpp 仅一行：return llama_server(argc, argv);
@@ -96,3 +99,27 @@ bin/libggml-opencl.so         OpenCL 后端（运行时按需 dlopen，非链接
 - 已具备：NDK 自带 `glslc`；缺：主机 C++ 编译器（构建 `vulkan-shaders-gen` 需要）
 - 路径：下载 w64devkit（GitHub release 国内限速 ~31KB/s，需耐心或代理）→ configure 加 `-DGGML_VULKAN=ON` 并在 PATH 前置 w64devkit/bin 与 glslc 目录 → 产物多一个 `libggml-vulkan.so` 按 §1.2 入包
 - 收益：Mali 等无 OpenCL 机型的 GPU 加速（当前这些机型走 CPU，可用但无加速）
+
+## 六、升级实测记录（v0.7.0，2026-10-17）
+
+**路径**：`3fb4767` → tag `v0.7.0`（`620d2225c`），中间 40 个提交，产物集合未变。
+对本机（Adreno 840）相关的修复：`opencl: fix OOB tail access for adreno noshuffle gemv kernels`（#30421）、
+`opencl: apply flash attn softcap before mask`（#30546）、server 侧 SWA 复用阈值与 slot 状态落盘修复。
+
+A/B 方法：同一台机器、同一模型（MiniCPM-V-4.7-1B-F16，ctx 131072，mmproj 挂载），
+把旧引擎从已发布的 v0.3.3 APK 里取出替换进 `files/engines/cpu` 复测，`ignore_eos` 固定生成 128 token。
+提示词约 1023 token。
+
+| 项目 | 旧引擎 3fb4767 | 新引擎 v0.7.0 |
+|---|---|---|
+| CPU prefill | 84.5 tok/s | 88.8 tok/s |
+| CPU decode | 32.2 tok/s | 31.6 tok/s |
+| GPU prefill（ngl=99） | 未测 | 543 tok/s |
+| GPU decode（ngl=99） | 未测 | 27.1 tok/s |
+
+结论：CPU 解码在噪声范围内持平（±2%），prefill 略升；GPU 的 prefill 约为 CPU 的 6 倍，
+decode 反而低于 CPU——与设置页「0 = 纯 CPU 更快」的提示一致，本次无需改默认值。
+
+功能回归：mmproj 视觉请求（红色圆形）识别正确；起停 3 轮无 crash、进程树干净；
+opencl 引擎 `libggml-opencl.so` 正常加载（进程内 231 处 `/dev/kgsl-3d0` 映射）。
+

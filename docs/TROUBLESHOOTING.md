@@ -162,3 +162,16 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
 - **现象**：表格类截图里个别金额小数点丢失（如 `7177.50` → `717750`）。
 - **原因**：ML Kit 对小字号数字的固有误差；已做「原图识别 + 坐标重建行 + 放大灰度预处理」降低概率。
 - **建议**：关键金额人工核对；或改用「图片处理方式 = 多模态直读」让视觉模型读表格。
+
+### #27 build-engine.ps1 在 configure 阶段 «假失败» [构建]
+- **现象**：脚本刚打印 `== [configure] cpu ==` 就抛 `NativeCommandError: CMAKE_BUILD_TYPE=Release`，但手动执行同一条 cmake 命令 `$LASTEXITCODE=0` 成功。
+- **原因**：cmake/ninja 把进度写 stderr，PowerShell 5.1 在 `$ErrorActionPreference="Stop"` 下把**原生 stderr 当终止错误**。
+- **处理**：脚本已改为 `Continue`，成败一律用 `$LASTEXITCODE` 判定；新增原生调用必须自己补 `$LASTEXITCODE` 检查。
+- **连带坑**：带中文注释的 `.ps1` **必须存 UTF-8 with BOM**。丢了 BOM 后 PS 5.1 按 GBK 解码，报「字符串缺少终止符 / 意外的标记」一串解析错误（不是脚本逻辑问题）。
+
+### #28 16KB 页对齐漏掉 MODULE 库 [构建]
+- **现象**：`libggml-cpu.so` / `libggml-opencl.so` 的 LOAD align 是 `0x1000`，而其他产物是 `0x4000`。
+- **原因**：`GGML_BACKEND_DL=ON` 下后端被编成 **MODULE** 库（dlopen 插件），链接走 `CMAKE_MODULE_LINKER_FLAGS`，只设 EXE/SHARED 两个变量管不到。
+- **处理**：configure 三个变量一起给 `-Wl,-z,max-page-size=16384`。复核命令：
+  `llvm-readelf.exe -l <so> | findstr LOAD`，末列必须全是 `0x4000`。
+
