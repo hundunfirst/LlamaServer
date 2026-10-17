@@ -15,6 +15,23 @@ class App : Application() {
         BinaryInstaller.init(this)
         ServerProcessManager.init(this)
         modelRepository = ModelRepository(this)
+
+        // 捕获未处理异常：写入 files/crash.log 与运行日志（排查闪退用），随后交给系统默认处理
+        val prevHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, e ->
+            runCatching {
+                val stamp = java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.CHINA)
+                    .format(java.util.Date())
+                val stack = android.util.Log.getStackTraceString(e)
+                java.io.File(filesDir, "crash.log").appendText(
+                    "\n=== $stamp  thread=${thread.name} ===\n$stack\n"
+                )
+                com.localllm.server.core.ServerProcessManager.appLog(
+                    "应用崩溃（${e.javaClass.simpleName}）：${e.message ?: ""}，详情见 crash.log"
+                )
+            }
+            prevHandler?.uncaughtException(thread, e)
+        }
     }
 
     companion object {

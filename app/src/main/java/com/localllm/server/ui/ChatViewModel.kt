@@ -84,6 +84,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onInput(v: String) { _input.value = v }
 
+    init {
+        // 接收外部分享内容：填进输入框并提示
+        viewModelScope.launch {
+            com.localllm.server.core.ShareInbox.text.collect { shared ->
+                val v = com.localllm.server.core.ShareInbox.consume() ?: return@collect
+                _input.value = v
+                _lastStats.value = "已接收分享内容（${v.length} 字），确认后点发送"
+                ServerProcessManager.appLog("已接收分享内容：${v.take(60)}")
+            }
+        }
+    }
+
     fun attachImage(uri: android.net.Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {

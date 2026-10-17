@@ -49,6 +49,47 @@ object ServerProcessManager {
     @Volatile
     private var restartPending = false
 
+    /** 上下文/KV 过大导致的 context 创建失败（与量化不支持区分开：后者重试无意义） */
+    private fun ctxFailed(): Boolean = synchronized(logBuffer) {
+        logBuffer.any { it.contains("failed to create llama_context") }
+    }
+
+    @Volatile
+    private var ctxDegradeUsed = false
+
+    /** 上下文过大 → 自动减半重试一次 */
+    private fun degradeCtxAndRestart(
+        modelPath: String, port: Int, ctxSize: Int, threads: Int, ngl: Int,
+        lanEnabled: Boolean, apiToken: String, cacheTypeK: String, cacheTypeV: String,
+        specType: String, mmprojPath: String?, faMode: String, apiTokenEnabled: Boolean,
+        displayHost: String
+    ): Boolean {
+        synchronized(this) {
+            if (ctxDegradeUsed || ctxSize <= 2048) return false
+            ctxDegradeUsed = true
+            val newCtx = maxOf(ctxSize / 2, 2048)
+            appendLog("上下文过大导致 context 创建失败，自动减半重试：-c $ctxSize → $newCtx")
+            restartPending = true
+            killCurrentQuiet()
+            _state.value = ServerUiState(
+                status = ServerUiState.Status.STARTING,
+                host = displayHost,
+                port = port,
+                modelPath = modelPath,
+                runningMmproj = mmprojPath,
+                message = "上下文过大，已自动减半重试…"
+            )
+            scope.launch {
+                kotlinx.coroutines.delay(500)
+                start(
+                    modelPath, port, newCtx, threads, ngl, lanEnabled, apiToken,
+                    cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled
+                )
+            }
+            return true
+        }
+    }
+
     /** 仅识别 GPU/显存相关的分配失败（范围过宽会误伤正常启动） */
     private fun allocFailed(): Boolean = synchronized(logBuffer) {
         logBuffer.any {
@@ -127,6 +168,7 @@ object ServerProcessManager {
         synchronized(this) {
             if (process?.isAlive == true) return
             degradedRetryUsed = false
+            ctxDegradeUsed = false
             restartPending = false
             // 清空上一次启动的日志残留：否则历史分配失败会误触发本次降级
             synchronized(logBuffer) {
@@ -201,6 +243,15 @@ object ServerProcessManager {
                     }
                     val exit = try { process?.waitFor() } catch (_: Exception) { null }
                     appendLog("进程已退出 (code=$exit)")
+                    // 上下文过大 → 先减半重试（优先于 ngl 降级）
+                    if (ctxFailed() &&
+                        degradeCtxAndRestart(
+                            modelPath, port, ctxSize, threads, ngl, lanEnabled, apiToken,
+                            cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost
+                        )
+                    ) {
+                        return@launch
+                    }
                     // GPU 分配失败导致的崩溃 → 自动降级重启
                     if (ngl > 0 && allocFailed() &&
                         degradeAndRestart(
@@ -476,6 +527,9 @@ object ServerProcessManager {
             "print_timings : prompt eval" to "预填充耗时",
             "print_timings : eval time" to "生成耗时",
             "slot release" to "请求完成（slot 释放）",
+            "llama_model_loader: failed to load model" to "模型加载失败（引擎可能不支持该量化格式：建议换 Q4/Q5 的 GGUF，或升级引擎）",
+            "failed to create llama_context" to "上下文/内存不足：请调小该模型的上下文长度后重试",
+            "unknown model architecture" to "引擎不支持该模型架构（需要升级引擎）",
             "quantized V cache requires flash_attn" to "错误：量化 V 缓存需要开启 Flash Attention（设置里把 FA 改为开/自动）",
             "load_hparams: more info" to "（可忽略）模型超参提示"
         )
