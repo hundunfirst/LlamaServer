@@ -37,3 +37,4 @@ dist/
 .idea/
 *.iml
 .DS_Store
+HANDOFF.md
