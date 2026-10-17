@@ -197,6 +197,19 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
   普通模型报 `model doesn't contain MTP layers`；端到端未验（设备上已无 MTP 模型） |
 
 
+### #25c App 会读 GGUF 头判定文件类型（2026-10-18）
+
+- **动机**：文件名不可靠——`MTP` 既可能是"主模型自带 MTP 头"的能力标签，也可能是独立侧车；
+  投影器也是 `.gguf`，混进模型目录就能被选成主模型，然后启动才报底层 loader 错。
+- **实现**：`core/GgufInfo.kt` 读头部前 512KB（碰到词表大数组提前收工），按
+  `general.type` + `general.architecture` 判成 `MAIN / MMPROJ / DRAFT / ADAPTER / IMATRIX`，
+  结果按「路径+大小+mtime」缓存。
+- **三处生效**：① 模型页只在"放错类别"时标红（对话区里出现草稿/投影器、投影区里出现主模型）；
+  ② 下载完成时核对所选类别，选错就不自动选中并写明原因；③ 启动前拦截，
+  报「不是主模型：这是投机解码的草稿/侧车文件（architecture=dflash）」而不是让 llama-server 抛 loader 错。
+- **验证**：造了一个 156 字节的最小 GGUF（arch=clip）放进模型目录，模型页正确标红、
+  启动被拦截（用户真机确认）。
+
 ### #26 OCR 数字/小数识别误差 [APP]
 - **现象**：表格类截图里个别金额小数点丢失（如 `7177.50` → `717750`）。
 - **原因**：ML Kit 对小字号数字的固有误差；已做「原图识别 + 坐标重建行 + 放大灰度预处理」降低概率。
