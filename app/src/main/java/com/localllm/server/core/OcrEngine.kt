@@ -26,8 +26,33 @@ object OcrEngine {
 
     /** 识别 JPEG 字节中的文字（按行拼接）；识别为空返回空串 */
     suspend fun recognize(jpegBytes: ByteArray): String {
-        val bmp = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+        val raw = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
             ?: throw IllegalStateException("无法解码图片")
+        // 预处理：偏小的图放大 2 倍 + 转灰度，小字号与小数点识别率明显更好
+        val bmp = runCatching {
+            val maxDim = maxOf(raw.width, raw.height)
+            val scaled = if (maxDim in 1..1600) {
+                val s = minOf(2.0f, 3200f / maxDim)
+                android.graphics.Bitmap.createScaledBitmap(
+                    raw,
+                    (raw.width * s).toInt().coerceAtLeast(1),
+                    (raw.height * s).toInt().coerceAtLeast(1),
+                    true
+                )
+            } else raw
+            val gray = android.graphics.Bitmap.createBitmap(
+                scaled.width, scaled.height, android.graphics.Bitmap.Config.ARGB_8888
+            )
+            val canvas = android.graphics.Canvas(gray)
+            val paint = android.graphics.Paint().apply {
+                colorFilter = android.graphics.ColorMatrixColorFilter(
+                    android.graphics.ColorMatrix().apply { setSaturation(0f) }
+                )
+            }
+            canvas.drawBitmap(scaled, 0f, 0f, paint)
+            if (scaled !== raw) scaled.recycle()
+            gray
+        }.getOrDefault(raw)
         return withContext(Dispatchers.Default) {
             suspendCancellableCoroutine { cont ->
                 val image = InputImage.fromBitmap(bmp, 0)

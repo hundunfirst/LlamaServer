@@ -1193,6 +1193,7 @@ private fun MessageBubble(
             Column(Modifier.padding(8.dp)) {
                 Row(verticalAlignment = Alignment.Top) {
                     Column(Modifier.weight(1f)) {
+                        androidx.compose.foundation.text.selection.SelectionContainer {
                         // 任务清单卡片（todo_write 产生）
                         if (!isUser && msg.todos.isNotEmpty()) {
                             val done = msg.todos.count { it.status == "completed" }
@@ -1326,6 +1327,14 @@ private fun MessageBubble(
                                             strokeWidth = 1.5.dp,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
+                                    }
+                                    TextButton(onClick = {
+                                        clipboard.setText(
+                                            androidx.compose.ui.text.AnnotatedString(msg.reasoning ?: "")
+                                        )
+                                        Toast.makeText(context, "思考过程已复制", Toast.LENGTH_SHORT).show()
+                                    }) {
+                                        Text("复制", style = MaterialTheme.typography.labelSmall)
                                     }
                                     TextButton(onClick = { thinkOpen = !thinkOpen }) {
                                         Text(if (thinkOpen) "收起" else "展开", style = MaterialTheme.typography.labelSmall)
@@ -1465,6 +1474,7 @@ private fun MessageBubble(
                                 }
                             }
                         }
+                    }
                     }
                     if (isUser) {
                         DropdownMenu(expanded = menuOpen, onDismissRequest = onMenuClose) {
