@@ -7,6 +7,20 @@ Android 手机上的本地 LLM 推理服务 APP：导入 GGUF 模型 → 后台�
 - 协议：MIT（llama.cpp 及其依赖均为 MIT / 公有领域）
 - 目标设备：arm64-v8a，Android 12+（minSdk 31，targetSdk 28——原因见架构文档）
 
+## 功能概览
+
+**推理服务**：导入 GGUF → 后台前台服务拉起 llama-server → OpenAI 兼容接口；双引擎（CPU / OpenCL）按 `ngl` 自动选择；
+模型级参数（上下文 / 输出上限 / mmproj 绑定）；KV 缓存量化（V 量化自动开 FA）；自动降级（上下文过大减半重试、显存不足降 ngl）。
+
+**聊天**：多会话 / 云端渠道（任意 OpenAI 兼容端点，含电脑上的 llama.cpp）/ 思考卡 / 步骤时间线 / 每次回答用时 / 上下文占用与压缩 /
+自动会话标题 / 助手指令预设（全局 + 会话级）/ 技能与技能链 / 任务清单卡片 / 阅读视图（拖选复制）。
+
+**工具（模型可调用）**：`web_search`（Bing，可抓正文，来源可点）、`todo_write`、`memory_write`（本地长期记忆）、
+`file_list/read/write/grep`（SAF 授权目录内）、`make_xlsx`、`make_pdf`、外部 MCP（HTTP，多服务器）。
+
+**附件与隐私**：图片（多模态直读 / 本地 OCR 自动分流）、文本、PDF、docx、xlsx 文本抽取；附件 token 预算保护；
+图片轮联网搜索三档（禁止 / 先问我 / 允许）；搜索词自动脱敏；全部推理与记忆仅在本机（云端渠道除外，由用户自行配置）。
+
 ## 文档索引（维护必读）
 
 | 文档 | 内容 |
