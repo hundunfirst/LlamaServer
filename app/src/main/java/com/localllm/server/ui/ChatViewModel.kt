@@ -1006,16 +1006,30 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return cjk + other / 4 + 1
     }
 
-    /** 设置/清除本会话的助手指令覆盖（null/空 = 回落到全局预设） */
-    fun setSessionSystemPrompt(text: String?) {
+    /**
+     * 设置/清除本会话的助手指令覆盖（null/空 = 回落到全局预设）。
+     * [skillId] / [chainId] 记录这份指令是"哪个技能/技能链"带来的，界面据此显示生效标记；
+     * 手写指令时两者都传 null，会清掉旧标记。
+     */
+    fun setSessionSystemPrompt(text: String?, skillId: String? = null, chainId: String? = null) {
         val id = _activeId.value
         val v = text?.trim()?.takeIf { it.isNotBlank() }
         _sessions.value = _sessions.value.map {
-            if (it.id == id) it.copy(systemPrompt = v, updatedAt = System.currentTimeMillis()) else it
+            if (it.id == id) it.copy(
+                systemPrompt = v,
+                appliedSkillId = if (v == null) null else skillId,
+                appliedChainId = if (v == null) null else chainId,
+                updatedAt = System.currentTimeMillis()
+            ) else it
         }
         saveStore()
         ServerProcessManager.appLog(
-            if (v == null) "本会话指令已清除（使用全局预设）" else "本会话指令已更新（${v.length} 字）"
+            when {
+                v == null -> "本会话指令已清除（使用全局预设）"
+                chainId != null -> "已应用技能链（${v.length} 字）"
+                skillId != null -> "已应用技能（${v.length} 字）"
+                else -> "本会话指令已更新（${v.length} 字）"
+            }
         )
     }
 

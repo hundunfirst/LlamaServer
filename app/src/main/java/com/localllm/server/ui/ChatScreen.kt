@@ -70,6 +70,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -95,6 +96,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.localllm.server.core.AppSettings
 import com.localllm.server.core.ChatStore
 
 private sealed class Seg {
@@ -763,18 +765,27 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
 
     // 技能选择 / 管理
     if (showSkills) {
+        val cur = sessions.find { it.id == activeId }
         SkillDialog(
             onDismiss = { showSkills = false },
             onApply = { skill ->
-                vm.setSessionSystemPrompt(skill.prompt)
+                vm.setSessionSystemPrompt(skill.prompt, skillId = skill.id)
+                Toast.makeText(context, "已应用技能：${skill.name}", Toast.LENGTH_SHORT).show()
                 showSkills = false
             },
             onApplyChain = { chain ->
                 val prompt = com.localllm.server.core.AppSettings.chainPrompt(chain)
-                if (prompt.isNotBlank()) vm.setSessionSystemPrompt(prompt)
-                showSkills = false
+                if (prompt.isBlank()) {
+                    Toast.makeText(context, "这条技能链里的技能都被删掉了，请重新配置", Toast.LENGTH_LONG).show()
+                } else {
+                    vm.setSessionSystemPrompt(prompt, chainId = chain.id)
+                    Toast.makeText(context, "已应用技能链：${chain.name}", Toast.LENGTH_SHORT).show()
+                    showSkills = false
+                }
             },
-            onClear = { vm.setSessionSystemPrompt(null) }
+            onClear = { vm.setSessionSystemPrompt(null) },
+            appliedSkillId = cur?.appliedSkillId,
+            appliedChainId = cur?.appliedChainId
         )
     }
 
@@ -1150,25 +1161,61 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             }
         }
 
-        // 当前生效的技能（会话指令与某技能 prompt 完全一致时显示）
-        val activeSkill = remember(sessions, activeId) {
-            val cur = vm.currentSessionSystemPrompt() ?: return@remember null
-            com.localllm.server.core.AppSettings.loadSkills().firstOrNull { it.prompt == cur }
+        // 当前生效的技能 / 技能链 / 手写指令：优先用会话里记录的结构化来源；
+        // 老会话（升级前只存了 prompt 文本）回退到按文本反查技能链、技能。
+        val activeSetup = remember(sessions, activeId) {
+            val s = sessions.find { it.id == activeId } ?: return@remember null
+            val cur = s.systemPrompt ?: return@remember null
+            val skills = AppSettings.loadSkills()
+            val chains = AppSettings.loadSkillChains()
+
+            fun chainSetup(c: com.localllm.server.core.SkillChain) = ActiveSetup(
+                "⛓ 技能链：" + c.name,
+                c.skillIds.mapNotNull { cid -> skills.firstOrNull { it.id == cid }?.name }
+                    .joinToString(" → ").ifBlank { "步骤缺失，建议重新选择" }
+            )
+
+            fun skillSetup(sk: com.localllm.server.core.Skill) =
+                ActiveSetup("⚡ 技能：" + sk.name, sk.desc)
+
+            s.appliedChainId?.let { id -> chains.firstOrNull { it.id == id } }
+                ?.let { return@remember chainSetup(it) }
+            s.appliedSkillId?.let { id -> skills.firstOrNull { it.id == id } }
+                ?.let { return@remember skillSetup(it) }
+            skills.firstOrNull { it.prompt == cur }?.let { return@remember skillSetup(it) }
+            chains.firstOrNull { AppSettings.chainPrompt(it) == cur }?.let { return@remember chainSetup(it) }
+            ActiveSetup("📝 本会话专用指令", "${cur.length} 字，可在此取消")
         }
-        activeSkill?.let { sk ->
-            Row(
+        activeSetup?.let { a ->
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer,
+                shape = RoundedCornerShape(10.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
             ) {
-                Text(
-                    "⚡ 技能：${sk.name}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.weight(1f)
-                )
-                TextButton(onClick = { vm.setSessionSystemPrompt(null) }) { Text("取消技能") }
+                Row(
+                    modifier = Modifier.padding(start = 12.dp, top = 6.dp, bottom = 6.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            a.title,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        if (a.sub.isNotBlank()) {
+                            Text(
+                                a.sub,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f),
+                                maxLines = 1
+                            )
+                        }
+                    }
+                    TextButton(onClick = { vm.setSessionSystemPrompt(null) }) { Text("取消") }
+                }
             }
         }
         pendingFile?.let { f ->
@@ -2056,13 +2103,18 @@ private fun highlightCode(
     }
 }
 
+/** 聊天页顶部/输入区显示的"当前生效"标记 */
+private data class ActiveSetup(val title: String, val sub: String)
+
 /** 技能选择/管理弹窗：技能、技能链，点选即写入本会话助手指令 */
 @Composable
 private fun SkillDialog(
     onDismiss: () -> Unit,
     onApply: (com.localllm.server.core.Skill) -> Unit,
     onApplyChain: (com.localllm.server.core.SkillChain) -> Unit,
-    onClear: () -> Unit
+    onClear: () -> Unit,
+    appliedSkillId: String? = null,
+    appliedChainId: String? = null
 ) {
     var list by remember { mutableStateOf(com.localllm.server.core.AppSettings.loadSkills()) }
     var chains by remember { mutableStateOf(com.localllm.server.core.AppSettings.loadSkillChains()) }
@@ -2100,7 +2152,12 @@ private fun SkillDialog(
                                     .clickable { onApplyChain(c) }
                                     .padding(vertical = 6.dp)
                             ) {
-                                Text("⛓ ${c.name}", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    "⛓ ${c.name}" + if (c.id == appliedChainId) "　✓ 生效中" else "",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (c.id == appliedChainId) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurface
+                                )
                                 Text(
                                     names.joinToString(" → "),
                                     style = MaterialTheme.typography.labelSmall,
@@ -2130,7 +2187,12 @@ private fun SkillDialog(
                                 .clickable { onApply(sk) }
                                 .padding(vertical = 6.dp)
                         ) {
-                            Text(sk.name, style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                sk.name + if (sk.id == appliedSkillId) "　✓ 生效中" else "",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (sk.id == appliedSkillId) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurface
+                            )
                             if (sk.desc.isNotBlank()) {
                                 Text(
                                     sk.desc,

@@ -45,7 +45,10 @@ object ChatStore {
         val updatedAt: Long,
         val messages: List<Msg>,
         /** 本会话的助手指令覆盖；null = 使用全局预设 */
-        val systemPrompt: String? = null
+        val systemPrompt: String? = null,
+        /** 生效来源：单个技能或技能链的 id（互斥）；null = 手写指令或未设置 */
+        val appliedSkillId: String? = null,
+        val appliedChainId: String? = null
     )
 
     data class Store(val activeId: String, val sessions: List<Session>)
@@ -98,7 +101,9 @@ object ChatStore {
                     o.optString("title"),
                     o.optLong("updatedAt"),
                     msgs,
-                    o.optString("systemPrompt").takeIf { it.isNotEmpty() }
+                    o.optString("systemPrompt").takeIf { it.isNotEmpty() },
+                    o.optString("appliedSkillId").takeIf { it.isNotEmpty() },
+                    o.optString("appliedChainId").takeIf { it.isNotEmpty() }
                 )
             }.ifEmpty {
                 listOf(Session("1", "新会话", System.currentTimeMillis(), emptyList()))
@@ -203,7 +208,11 @@ object ChatStore {
                     .put("updatedAt", s.updatedAt)
                     .put("messages", mArr)
                     as JSONObject)
-                    .apply { s.systemPrompt?.let { put("systemPrompt", it) } }
+                    .apply {
+                        s.systemPrompt?.let { put("systemPrompt", it) }
+                        s.appliedSkillId?.let { put("appliedSkillId", it) }
+                        s.appliedChainId?.let { put("appliedChainId", it) }
+                    }
             )
         }
         root.put("sessions", arr)
