@@ -186,6 +186,15 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
   两个变体（armv8.0 / armv9.2）都要带上，它靠 dlopen 扫描选最优。
 - **进包前还要回归**：mmproj 视觉、KV 量化（`-fa`）、`--spec-type`（MTP/DFlash）、长上下文、停止；
   fork 版本线是 `0.2.0-dev (build 10777)`，与上游 v0.7.0 不同线，双线维护成本要算进去。
+- **回归结果（2026-10-18，App 内开关打开，普通模型）**：
+  | 项目 | 结果 |
+  |---|---|
+  | 普通模型加载/生成 | 通过；0.5B **99.9 tok/s**（上游同机 79.7）、Qwen3.5-4B 15.4（上游 13.5）→ 反而更快 |
+  | 视觉 mmproj | 通过；Qwen2.5-VL-3B + 配套投影器正确识别"蓝圆 + 红矩形" |
+  | KV 量化 + `-fa` | 通过；`--cache-type-k/v q8_0` + 自动 `-fa on`，0.5B 107 tok/s |
+  | 投机 `--spec-type ngram-simple` | 通过；带 `--spec-draft-n-max 32` 正常起 |
+  | 投机 `--spec-type draft-mtp` | **参数被接受**（会走 "creating MTP draft context"），但要求模型自带 MTP 头，
+  普通模型报 `model doesn't contain MTP layers`；端到端未验（设备上已无 MTP 模型） |
 
 
 ### #26 OCR 数字/小数识别误差 [APP]
