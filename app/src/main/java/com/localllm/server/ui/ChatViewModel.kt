@@ -106,13 +106,59 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearPendingImage() { _pendingImageB64.value = null }
 
+    // ---- 文本类附件（文档/代码等）：读成文本随消息一起发送 ----
+    private val _pendingFile = MutableStateFlow<Pair<String, String>?>(null) // (文件名, 文本)
+    val pendingFile: StateFlow<Pair<String, String>?> = _pendingFile.asStateFlow()
+
+    fun clearPendingFile() { _pendingFile.value = null }
+
+    fun attachFile(uri: android.net.Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val cr = getApplication<Application>().contentResolver
+                val name = runCatching {
+                    cr.query(uri, null, null, null, null)?.use { c ->
+                        val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                        if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+                    }
+                }.getOrNull() ?: uri.lastPathSegment ?: "文件"
+                val text = runCatching {
+                    cr.openInputStream(uri)?.use { ins ->
+                        val bytes = ins.readNBytes(256 * 1024)
+                        String(bytes, Charsets.UTF_8)
+                    }
+                }.getOrNull().orEmpty()
+                if (text.isBlank()) {
+                    _error.value = "文件为空或不是文本格式（暂支持图片与文本类文件）"
+                    return@launch
+                }
+                _pendingFile.value = name to text
+                ServerProcessManager.appLog("已附加文件：$name（${text.length} 字）")
+            } catch (e: Exception) {
+                _error.value = "读取文件失败：${e.message}"
+            }
+        }
+    }
+
     fun send() {
         val text = _input.value.trim()
         val image = _pendingImageB64.value
-        if ((text.isEmpty() && image == null) || _streaming.value) return
+        val file = _pendingFile.value
+        if ((text.isEmpty() && image == null && file == null) || _streaming.value) return
         _input.value = ""
         _pendingImageB64.value = null
-        append(ChatStore.Msg("user", text.ifEmpty { "请描述这张图片" }, image))
+        _pendingFile.value = null
+        val content = if (file != null) {
+            "【附件：${file.first}】\n```\n${file.second}\n```\n\n" + text
+        } else {
+            text
+        }
+        val fallback = when {
+            image != null -> "请描述这张图片"
+            file != null -> "请阅读附件内容"
+            else -> text
+        }
+        append(ChatStore.Msg("user", content.ifBlank { fallback }, image))
         append(ChatStore.Msg("assistant", ""))
         doStream()
     }

@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.MoreHoriz
@@ -391,6 +392,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     val error by vm.error.collectAsStateWithLifecycle()
     val lastStats by vm.lastStats.collectAsStateWithLifecycle()
     val pendingImage by vm.pendingImageB64.collectAsStateWithLifecycle()
+    val pendingFile by vm.pendingFile.collectAsStateWithLifecycle()
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val activeId by vm.activeId.collectAsStateWithLifecycle()
     var showSessions by remember { mutableStateOf(false) }
@@ -404,8 +406,12 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     var showCompressConfirm by remember { mutableStateOf(false) }
     var editText by remember { mutableStateOf("") }
 
+    // 附加文件：图片走多模态/OCR，文本类文件读成文本随消息发送（其余类型暂不支持）
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) vm.attachImage(uri)
+        if (uri != null) {
+            val mime = context.contentResolver.getType(uri) ?: ""
+            if (mime.startsWith("image/")) vm.attachImage(uri) else vm.attachFile(uri)
+        }
     }
 
     // 智能贴底滚动：新消息必到底；流式增长仅当"最后一条消息可见且离其底部<400px"（用户未上翻）时跟随。
@@ -749,6 +755,22 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             }
         }
 
+        pendingFile?.let { f ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "📄 已附带文件：${f.first}（${f.second.length} 字）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = vm::clearPendingFile) { Text("移除") }
+            }
+        }
         if (pendingImage != null) {
             Row(
                 modifier = Modifier
@@ -772,8 +794,23 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = { pickImage.launch(arrayOf("image/*")) }, enabled = !streaming) {
-                Icon(Icons.Default.Image, contentDescription = "附加图片", tint = MaterialTheme.colorScheme.primary)
+            IconButton(
+                onClick = {
+                    pickImage.launch(
+                        arrayOf(
+                            "image/*", "text/*",
+                            "application/json", "application/xml", "application/javascript",
+                            "application/x-yaml", "application/csv"
+                        )
+                    )
+                },
+                enabled = !streaming
+            ) {
+                Icon(
+                    Icons.Default.AttachFile,
+                    contentDescription = "附加文件（图片/文本）",
+                    tint = MaterialTheme.colorScheme.primary
+                )
             }
             OutlinedTextField(
                 value = input,

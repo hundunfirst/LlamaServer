@@ -83,6 +83,14 @@ fun LogsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             ) {
                 Text("运行日志", style = MaterialTheme.typography.headlineSmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+                    val ctx = androidx.compose.ui.platform.LocalContext.current
+                    OutlinedButton(onClick = {
+                        clipboard.setText(androidx.compose.ui.text.AnnotatedString(logs.joinToString("\n")))
+                        android.widget.Toast.makeText(
+                            ctx, "已复制 ${logs.size} 条日志", android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }) { Text("复制") }
                     Text(
                         "${logs.size} 条",
                         style = MaterialTheme.typography.labelMedium,

@@ -508,6 +508,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _actionError.value =
                 "内存紧张：预计需约 ${need / (1024 * 1024 * 1024)} GB，当前可用约 ${mi.availMem / (1024 * 1024 * 1024)} GB——仍为你启动，但可能失败或被系统回收"
         }
+        // 启动本地服务即视为使用本地模型：聊天渠道自动切回本地
+        if (AppSettings.chatCloudEnabled) {
+            AppSettings.chatCloudEnabled = false
+            _settings.value = _settings.value.copy(chatCloudEnabled = false)
+            ServerProcessManager.appLog("已自动切换聊天渠道：本地模型（因启动本地服务）")
+        }
         ServerService.start(getApplication(), modelPath)
     }
 

@@ -163,35 +163,23 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             com.localllm.server.core.AppSettings.searchFetchFullText = fetchFull
         }
 
-        // ---- 聊天渠道（OpenAI 兼容供应商，弹窗配置） ----
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            SectionHeader(
-                title = "云端模型渠道",
-                help = "开启后聊天走云端 OpenAI 兼容接口；多供应商与模型在「配置模型」弹窗里管理",
-                titleStyle = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.weight(1f)
-            )
-            Switch(
-                checked = settings.chatCloudEnabled,
-                onCheckedChange = { v -> vm.updateCloudSettings { it.copy(chatCloudEnabled = v) } }
-            )
-        }
+        // ---- 模型渠道（无开关：选谁用谁；启动本地服务自动回本地） ----
+        SectionHeader(
+            title = "模型渠道",
+            help = "聊天用哪个模型在这里管：启动本地服务后自动使用本地模型；在「配置模型」里选择云端供应商的模型后，聊天走云端。多供应商与模型在弹窗里增删改。",
+            titleStyle = MaterialTheme.typography.bodyLarge
+        )
         val presetsNow = com.localllm.server.core.AppSettings.loadCloudPresets()
         val activePreset = presetsNow.firstOrNull {
             settings.chatCloudUrl.isNotBlank() &&
                     it.url.trim().removeSuffix("/") == settings.chatCloudUrl.trim().removeSuffix("/")
         }
         Text(
-            if (settings.chatCloudEnabled)
-                "当前：" + (activePreset?.name ?: settings.chatCloudUrl.ifBlank { "未配置地址" }) +
+            "当前渠道：" + if (settings.chatCloudEnabled)
+                (activePreset?.name ?: settings.chatCloudUrl.ifBlank { "未配置地址" }) +
                         " · " + settings.chatCloudModel.ifBlank { "未选模型" }
-            else "当前：本地模型（内置服务）",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            else "本地模型（内置服务）",
+            style = MaterialTheme.typography.bodyMedium
         )
         OutlinedButton(
             onClick = { showModelDialog = true },
