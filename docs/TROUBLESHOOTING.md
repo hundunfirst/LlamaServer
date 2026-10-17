@@ -152,11 +152,26 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
 - **正确做法**：在内部存储根下新建专用文件夹（如 `LlamaWork`）并选中它；`Download` 下的**子目录**也可以。
 - 相关：`file_write` 自动建子目录；拒绝 `..` 越界；单文件读写有大小上限。
 
-### #25 三元量化（TQ/Q2_0）模型加载失败 [引擎]
-- **现象**：加载 `*-Q2_0.gguf` 等三元量化报 `llama_model_loader: failed to load model`。
-- **原因**：当前内置引擎版本较旧，不认识该类量化类型。
-- **处理**：改用 `Q4_K_M / Q5_K_M / IQ4_XS` 等常规 GGUF；或按 `docs/UPGRADING_LLAMA.md` 升级引擎。
-- 另：超低比特模型体积小但**计算量不变**，手机上未必更快（优化内核主要在 x86/Metal）。
+### #25 三元 / 1-bit 量化模型加载失败（Bonsai 家族）[引擎]
+- **现象**：加载 `*-Q2_0.gguf` 等超低比特模型报 `llama_model_loader: failed to load model` 或 `dflash requires ctx_other to be set`。
+- **先分清是哪种文件**（Bonsai 2 有三种打包，只有一种能用本引擎）：
+
+  | 文件 | 张量类型 | 能否用本引擎（v0.7.0） |
+  |---|---|---|
+  | `*-Q2_0.gguf`（官方 group-64） | 42 `Q2_0` | **能**，实测可加载并正常出字 |
+  | `*-Q1_0.gguf`（Bonsai 1 的 1-bit） | 41 `Q1_0` | **能**（ARM 有 NEON kernel），但很慢 |
+  | `*-PQ2_0.gguf` | 142 `PQ2_0` | **不能**，PrismML fork 专属 |
+  | `*-PTQ1_0.gguf` / `*-MTP-Q8_0.gguf` | fork 专属打包 | **不能**，需要 fork |
+  | `*-DFlash2-*.gguf` / `*-dspark-*.gguf` | arch = `dflash` / `dspark` | **不能当主模型**：它们是投机解码的草稿侧车 |
+
+- **诊断方法**：读 GGUF 头看 `general.architecture` 与张量类型（本仓库会话里用过的小脚本思路：解析 magic `GGUF` → n_kv → KV → tensor infos）。
+  报 `dflash requires ctx_other to be set` 就说明加载的是草稿模型；报 `failed to load model` 且类型是 142 就是 fork 打包。
+- **处理**：只用 `*-Q2_0.gguf`；草稿模型要配主模型走 `--spec-type draft-dflash` / `draft-dspark`，本 App 还没有对应开关。
+- **上下文**：Bonsai 2 声明 262144，但 Bonsai 1 的 8B 训练上下文只有 65536；把 App 上下文设到 131072 会触发
+  `n_ctx_seq > n_ctx_train` 并因内存 fitting 失败起不来 → 降到 32768 可正常加载。
+- **速度预期**（本机小米 17 Pro Max，CPU）：Ternary-Bonsai-2-9B-Q2_0 约 5 tok/s、Bonsai-8B（1-bit）约 6.6 tok/s；
+  超低比特只省内存，**解码不会更快**。
+- 另：Bonsai 2 是 thinking 模型，`max_tokens` 给小了会全花在思考上、正文为空（官方建议 ≥ 数 k）。
 
 ### #26 OCR 数字/小数识别误差 [APP]
 - **现象**：表格类截图里个别金额小数点丢失（如 `7177.50` → `717750`）。
