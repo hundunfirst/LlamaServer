@@ -25,6 +25,9 @@ object ChatStore {
     /** 任务清单项（status: pending / in_progress / completed） */
     data class Todo(val title: String, val status: String)
 
+    /** 由文件工具生成的文件（内容截断保存，供聊天内预览） */
+    data class GenFile(val path: String, val content: String)
+
     data class Msg(
         val role: String,
         val content: String,
@@ -32,7 +35,8 @@ object ChatStore {
         val reasoning: String? = null,
         val steps: List<Step> = emptyList(),
         val sources: List<Source> = emptyList(),
-        val todos: List<Todo> = emptyList()
+        val todos: List<Todo> = emptyList(),
+        val genFiles: List<GenFile> = emptyList()
     )
 
     data class Session(
@@ -85,7 +89,8 @@ object ChatStore {
                         m.optString("reasoning").takeIf { it.isNotEmpty() },
                         steps = parseSteps(m.optJSONArray("steps")),
                         sources = parseSources(m.optJSONArray("sources")),
-                        todos = parseTodos(m.optJSONArray("todos"))
+                        todos = parseTodos(m.optJSONArray("todos")),
+                        genFiles = parseGenFiles(m.optJSONArray("genFiles"))
                     )
                 }
                 Session(
@@ -100,6 +105,16 @@ object ChatStore {
             }
             Store(if (sessions.any { it.id == active }) active else sessions.first().id, sessions)
         }.getOrDefault(Store("1", listOf(Session("1", "新会话", System.currentTimeMillis(), emptyList()))))
+    }
+
+    private fun parseGenFiles(arr: JSONArray?): List<GenFile> {
+        if (arr == null) return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val path = o.optString("path")
+            if (path.isBlank()) return@mapNotNull null
+            GenFile(path, o.optString("content"))
+        }
     }
 
     private fun parseTodos(arr: JSONArray?): List<Todo> {
@@ -154,6 +169,16 @@ object ChatStore {
                         )
                     }
                     o.put("steps", sArr)
+                }
+                if (m.genFiles.isNotEmpty()) {
+                    val gArr = JSONArray()
+                    m.genFiles.forEach { gf ->
+                        gArr.put(
+                            JSONObject().put("path", gf.path)
+                                .put("content", gf.content.take(20000))
+                        )
+                    }
+                    o.put("genFiles", gArr)
                 }
                 if (m.todos.isNotEmpty()) {
                     val tArr = JSONArray()

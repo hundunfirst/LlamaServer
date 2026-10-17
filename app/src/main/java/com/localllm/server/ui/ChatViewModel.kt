@@ -736,6 +736,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     FileTools.TOOL_LIST -> "列出目录"
                                     else -> "搜索「" + args.optString("pattern") + "」"
                                 }
+                                if (tc.name == FileTools.TOOL_WRITE) {
+                                    val p0 = args.optString("path")
+                                    val body = args.optString("content")
+                                    if (p0.isNotBlank() && body.isNotBlank()) {
+                                        val list = _messages.value.toMutableList()
+                                        if (list.isNotEmpty()) {
+                                            val last = list.last()
+                                            val merged = (last.genFiles.filter { it.path != p0 } +
+                                                    ChatStore.GenFile(p0, body)).takeLast(5)
+                                            list[list.lastIndex] = last.copy(genFiles = merged)
+                                            _messages.value = list
+                                        }
+                                    }
+                                }
                                 steps.add(ChatStore.Step("tool", "文件：${tc.name}", detail.take(120)))
                                 syncSteps()
                                 ServerProcessManager.appLog("文件工具完成：$detail")

@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -479,6 +480,9 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     var previewImageB64 by remember { mutableStateOf<String?>(null) }
     var previewFileName by remember { mutableStateOf("") }
     var showSkills by remember { mutableStateOf(false) }
+    var previewGenFile by remember {
+        mutableStateOf<com.localllm.server.core.ChatStore.GenFile?>(null)
+    }
     var previewFileText by remember { mutableStateOf("") }
     var showFilePreview by remember { mutableStateOf(false) }
     var sysPromptText by remember { mutableStateOf("") }
@@ -641,6 +645,45 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             },
             confirmButton = {
                 TextButton(onClick = { showFilePreview = false }) { Text("关闭") }
+            }
+        )
+    }
+
+    // 生成文件预览
+    previewGenFile?.let { gf ->
+        val lang = gf.path.substringAfterLast('.', "").lowercase()
+        AlertDialog(
+            onDismissRequest = { previewGenFile = null },
+            title = {
+                Text(gf.path.substringAfterLast('/'), maxLines = 1)
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 460.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        highlightCode(
+                            lang, gf.content,
+                            keywordColor = MaterialTheme.colorScheme.primary,
+                            stringColor = androidx.compose.ui.graphics.Color(0xFF2E7D32),
+                            commentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            numberColor = androidx.compose.ui.graphics.Color(0xFF6A1B9A)
+                        ),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    clipboard.setText(AnnotatedString(gf.content))
+                    Toast.makeText(context, "已复制文件内容", Toast.LENGTH_SHORT).show()
+                }) { Text("复制") }
+            },
+            dismissButton = {
+                TextButton(onClick = { previewGenFile = null }) { Text("关闭") }
             }
         )
     }
@@ -1007,6 +1050,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                         menuIndex = null
                         deleteIndex = i
                     },
+                    onOpenGenFile = { gf -> previewGenFile = gf },
                     onSpeak = {
                         val engine = tts
                         if (engine == null || !ttsReady) {
@@ -1175,7 +1219,8 @@ private fun MessageBubble(
     onResend: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
-    onSpeak: () -> Unit = {}
+    onSpeak: () -> Unit = {},
+    onOpenGenFile: (com.localllm.server.core.ChatStore.GenFile) -> Unit = {}
 ) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
@@ -1201,6 +1246,53 @@ private fun MessageBubble(
             Column(Modifier.padding(8.dp)) {
                 Row(verticalAlignment = Alignment.Top) {
                     Column(Modifier.weight(1f)) {
+                        // 生成的文件卡片（file_write 产生）：聊天内可见 + 预览
+                        if (!isUser && msg.genFiles.isNotEmpty()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 6.dp)
+                                    .background(
+                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .padding(8.dp)
+                            ) {
+                                Text(
+                                    "📄 已生成文件（${msg.genFiles.size}）",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                msg.genFiles.forEach { gf ->
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { onOpenGenFile(gf) }
+                                            .padding(vertical = 3.dp)
+                                    ) {
+                                        Column(Modifier.weight(1f)) {
+                                            Text(
+                                                gf.path,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                            Text(
+                                                "${gf.content.length} 字符 · 点击预览",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Icon(
+                                            Icons.Default.ChevronRight,
+                                            contentDescription = "预览",
+                                            modifier = Modifier.size(16.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         // 任务清单卡片（todo_write 产生）
                         if (!isUser && msg.todos.isNotEmpty()) {
                             val done = msg.todos.count { it.status == "completed" }
