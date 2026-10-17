@@ -10,7 +10,7 @@ import java.io.File
  * 启动服务时按 ngl 自动选择；两套引擎首次使用时分别从 assets 释放。
  */
 object BinaryInstaller {
-    private const val VERSION = "3"
+    private const val VERSION = "4"
     private const val ASSET_ROOT = "engines"
 
     private lateinit var appContext: Context
