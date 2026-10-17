@@ -7,6 +7,7 @@ import com.localllm.server.core.AppSettings
 import com.localllm.server.core.ChatClient
 import com.localllm.server.core.ChatStore
 import com.localllm.server.core.DocExtract
+import com.localllm.server.core.DocMaker
 import com.localllm.server.core.FileTools
 import com.localllm.server.core.McpHttpClient
 import com.localllm.server.core.MemoryStore
@@ -308,8 +309,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     "\n\n【长期记忆（用户偏好/背景，供参考）】\n" + memoryText
                 } else ""
                 val fileHint = if (fileOn) {
-                    "如需生成文件（如 HTML/代码/表格），请用 file_write 直接写入工作目录，并在回答里告知文件名；" +
-                            "需要查看已有文件时用 file_list / file_read / file_grep。"
+                    "如需生成文件（HTML/代码/CSV）用 file_write；需要真正的 Excel 表格用 make_xlsx（rows 二维数组）；" +
+                            "需要 PDF 用 make_pdf。都写入工作目录，并在回答里告知文件名；" +
+                            "查看已有文件用 file_list / file_read / file_grep。"
                 } else ""
                 val todoHint = if (todoOn) {
                     "多步任务可先用 todo_write 列出计划（同一消息最多 3 次），随后必须在正文中直接给出实际产出（代码/文件内容），" +
@@ -452,6 +454,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         for (i in 0 until fa.length()) arr.put(fa.getJSONObject(i))
                     }
                     if (memoryOn) arr.put(MemoryStore.toolJson())
+                    if (fileOn) DocMaker.toolsJson().let { da ->
+                        for (i in 0 until da.length()) arr.put(da.getJSONObject(i))
+                    }
                     for (i in 0 until mcpAgg.length()) arr.put(mcpAgg.getJSONObject(i))
                 }.takeIf { it.length() > 0 }
                 // 搜索配额用尽后本轮请求不带 web_search：模型无工具可调，只能产出文本回答
@@ -739,6 +744,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     syncSteps()
                                     "已写入长期记忆（当前共 $count 条）。"
                                 }
+                            } else if (fileOn && tc.name in DocMaker.NAMES) {
+                                val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                ServerProcessManager.appLog("文档生成：${tc.name}")
+                                val r = DocMaker.execute(getApplication(), tc.name, args)
+                                steps.add(
+                                    ChatStore.Step(
+                                        "tool",
+                                        "生成文档：${tc.name}",
+                                        args.optString("path").take(80)
+                                    )
+                                )
+                                syncSteps()
+                                ServerProcessManager.appLog("文档生成完成：$r")
+                                r
                             } else if (fileOn && tc.name in FileTools.NAMES) {
                                 val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                                 ServerProcessManager.appLog("文件工具：${tc.name}")
