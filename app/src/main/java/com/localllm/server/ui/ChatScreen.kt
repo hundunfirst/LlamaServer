@@ -1188,12 +1188,19 @@ private fun MessageBubble(
                 containerColor = if (isUser) MaterialTheme.colorScheme.primaryContainer
                 else MaterialTheme.colorScheme.surfaceVariant
             ),
-            modifier = Modifier.fillMaxWidth(if (isUser) 0.88f else 1f)
+            modifier = Modifier
+                .fillMaxWidth(if (isUser) 0.88f else 1f)
+                .combinedClickable(
+                    onClick = {},
+                    onLongClick = {
+                        clipboard.setText(AnnotatedString(msg.content))
+                        Toast.makeText(context, "已复制整条消息", Toast.LENGTH_SHORT).show()
+                    }
+                )
         ) {
             Column(Modifier.padding(8.dp)) {
                 Row(verticalAlignment = Alignment.Top) {
                     Column(Modifier.weight(1f)) {
-                        androidx.compose.foundation.text.selection.SelectionContainer {
                         // 任务清单卡片（todo_write 产生）
                         if (!isUser && msg.todos.isNotEmpty()) {
                             val done = msg.todos.count { it.status == "completed" }
@@ -1475,7 +1482,6 @@ private fun MessageBubble(
                             }
                         }
                     }
-                    }
                     if (isUser) {
                         DropdownMenu(expanded = menuOpen, onDismissRequest = onMenuClose) {
                             DropdownMenuItem(
@@ -1655,6 +1661,9 @@ private fun MarkdownTable(rows: List<List<String>>, modifier: Modifier = Modifie
                         style = if (ri == 0) MaterialTheme.typography.labelMedium
                         else MaterialTheme.typography.bodySmall,
                         fontWeight = if (ri == 0) FontWeight.Bold else FontWeight.Normal,
+                        // 短内容（数字/状态）不折行，避免 0.00 被拆成两行
+                        maxLines = if (cell.length <= 8) 1 else 3,
+                        softWrap = cell.length > 8,
                         modifier = Modifier
                             .weight(weights[ci] / total)
                             .padding(horizontal = 6.dp, vertical = 5.dp)
