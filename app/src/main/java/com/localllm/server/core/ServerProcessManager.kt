@@ -62,7 +62,7 @@ object ServerProcessManager {
         modelPath: String, port: Int, ctxSize: Int, threads: Int, ngl: Int,
         lanEnabled: Boolean, apiToken: String, cacheTypeK: String, cacheTypeV: String,
         specType: String, mmprojPath: String?, faMode: String, apiTokenEnabled: Boolean,
-        displayHost: String
+        displayHost: String, prismEngine: Boolean
     ): Boolean {
         synchronized(this) {
             if (ctxDegradeUsed || ctxSize <= 2048) return false
@@ -83,7 +83,7 @@ object ServerProcessManager {
                 kotlinx.coroutines.delay(500)
                 start(
                     modelPath, port, newCtx, threads, ngl, lanEnabled, apiToken,
-                    cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled
+                    cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, prismEngine
                 )
             }
             return true
@@ -116,7 +116,7 @@ object ServerProcessManager {
         modelPath: String, port: Int, ctxSize: Int, threads: Int, ngl: Int,
         lanEnabled: Boolean, apiToken: String, cacheTypeK: String, cacheTypeV: String,
         specType: String, mmprojPath: String?, faMode: String, apiTokenEnabled: Boolean,
-        displayHost: String
+        displayHost: String, prismEngine: Boolean
     ): Boolean {
         synchronized(this) {
             if (degradedRetryUsed || ngl <= 0) return false
@@ -137,7 +137,7 @@ object ServerProcessManager {
                 kotlinx.coroutines.delay(500)
                 start(
                     modelPath, port, ctxSize, threads, newNgl, lanEnabled, apiToken,
-                    cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled
+                    cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, prismEngine
                 )
             }
             return true
@@ -163,7 +163,9 @@ object ServerProcessManager {
         specType: String = "none",
         mmprojPath: String? = null,
         faMode: String = "",
-        apiTokenEnabled: Boolean = false
+        apiTokenEnabled: Boolean = false,
+        /** 纯 CPU 模式下是否改用 PrismML fork 引擎（见 BinaryInstaller.MODE_PRISM） */
+        prismEngine: Boolean = false
     ) {
         synchronized(this) {
             if (process?.isAlive == true) return
@@ -176,13 +178,21 @@ object ServerProcessManager {
                 _logLines.value = emptyList()
             }
             val useGpu = ngl > 0
+            val engineMode = BinaryInstaller.modeFor(useGpu, prismEngine)
             val engineDir = try {
-                BinaryInstaller.ensureInstalled(useGpu)
+                BinaryInstaller.ensureInstalled(engineMode)
             } catch (e: Exception) {
                 appendLog("错误：引擎安装失败: ${e.message}")
                 _state.value = ServerUiState(status = ServerUiState.Status.ERROR, message = "引擎安装失败: ${e.message}")
                 return
             }
+            appendLog(
+                when (engineMode) {
+                    BinaryInstaller.MODE_PRISM -> "引擎：prism（PrismML fork，支持 PQ2_0/PTQ1_0）"
+                    BinaryInstaller.MODE_OPENCL -> "引擎：opencl（上游，GPU）"
+                    else -> "引擎：cpu（上游）"
+                }
+            )
             val binary = File(engineDir, "llama-server")
             if (!binary.exists()) {
                 _state.value = ServerUiState(status = ServerUiState.Status.ERROR, message = "引擎不完整，请重装 APP")
@@ -247,7 +257,7 @@ object ServerProcessManager {
                     if (ctxFailed() &&
                         degradeCtxAndRestart(
                             modelPath, port, ctxSize, threads, ngl, lanEnabled, apiToken,
-                            cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost
+                            cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine
                         )
                     ) {
                         return@launch
@@ -256,7 +266,7 @@ object ServerProcessManager {
                     if (ngl > 0 && allocFailed() &&
                         degradeAndRestart(
                             modelPath, port, ctxSize, threads, ngl, lanEnabled, apiToken,
-                            cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost
+                            cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine
                         )
                     ) {
                         return@launch
@@ -290,7 +300,7 @@ object ServerProcessManager {
                         if (ngl > 0 && allocFailed() &&
                             degradeAndRestart(
                                 modelPath, port, ctxSize, threads, ngl, lanEnabled, apiToken,
-                                cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost
+                                cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine
                             )
                         ) {
                             return@launch

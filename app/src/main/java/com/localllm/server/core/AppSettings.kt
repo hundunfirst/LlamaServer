@@ -169,6 +169,15 @@ object AppSettings {
         get() = prefs.getBoolean("model_disclaimer_accepted", false)
         set(value) = prefs.edit().putBoolean("model_disclaimer_accepted", value).apply()
 
+    /**
+     * 是否用 PrismML fork 引擎（纯 CPU 模式下的"特别版"）：
+     * 支持 PQ2_0 / PTQ1_0 打包的 Bonsai 模型，且 PQ2_0 kernel 在 ARM 上是优化过的。
+     * ngl>0（GPU）时忽略此开关，仍用上游 opencl 引擎——该 fork 没有 OpenCL 后端。
+     */
+    var prismEngineEnabled: Boolean
+        get() = prefs.getBoolean("prism_engine", false)
+        set(value) = prefs.edit().putBoolean("prism_engine", value).apply()
+
     var specType: String
         get() = prefs.getString("spec_type", "none") ?: "none"
         set(value) = prefs.edit().putString("spec_type", value).apply()

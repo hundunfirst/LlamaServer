@@ -77,7 +77,8 @@ class ServerService : android.app.Service() {
                     specType = AppSettings.specType,
                     mmprojPath = AppSettings.effectiveMmproj(modelPath),
                     faMode = AppSettings.faMode,
-                    apiTokenEnabled = AppSettings.apiTokenEnabled
+                    apiTokenEnabled = AppSettings.apiTokenEnabled,
+                    prismEngine = AppSettings.prismEngineEnabled
                 )
             }
             ACTION_STOP -> {

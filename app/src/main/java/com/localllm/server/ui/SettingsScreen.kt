@@ -458,6 +458,28 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             options = listOf("0" to "纯CPU", "20" to "20层", "33" to "33层", "99" to "全量GPU"),
             current = settings.ngl
         ) { v -> vm.updateSettings { it.copy(ngl = v) } }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Bonsai 优化引擎（PrismML fork）", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    if (settings.ngl != "0" && settings.ngl.isNotBlank())
+                        "当前 ngl>0，会用原 opencl 引擎（该 fork 没有 GPU 后端），此开关暂时不生效。"
+                    else
+                        "纯 CPU 模式改用 PrismML fork 引擎：支持 PQ2_0/PTQ1_0 打包的 Bonsai 模型，" +
+                                "PQ2_0 的 kernel 在 ARM 上有优化（Bonsai 4B PQ2_0 实测 18.4 tok/s，原引擎 9.0）。" +
+                                "普通 GGUF 也兼容。保存后需重启服务生效。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = settings.prismEngineEnabled,
+                onCheckedChange = { v -> vm.updateSettings { it.copy(prismEngineEnabled = v) } }
+            )
+        }
         CompactField(
             value = settings.cacheTypeK,
             onValueChange = { v -> vm.updateSettings { it.copy(cacheTypeK = v) } },

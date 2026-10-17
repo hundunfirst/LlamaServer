@@ -35,6 +35,7 @@ data class SettingsUiState(
     val cacheTypeV: String = "",
     val specType: String = "none",
     val faMode: String = "",
+    val prismEngineEnabled: Boolean = false,
     val thinkEnabled: Boolean = true,
     val chatCloudEnabled: Boolean = false,
     val chatCloudUrl: String = "",
@@ -72,6 +73,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             cacheTypeV = AppSettings.cacheTypeV,
             specType = AppSettings.specType,
             faMode = AppSettings.faMode,
+            prismEngineEnabled = AppSettings.prismEngineEnabled,
             thinkEnabled = AppSettings.thinkEnabled,
             chatCloudEnabled = AppSettings.chatCloudEnabled,
             chatCloudUrl = AppSettings.chatCloudUrl,
@@ -569,7 +571,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val oldServerKey = listOf(
             AppSettings.port, AppSettings.ctxSize, AppSettings.threads, AppSettings.ngl,
             AppSettings.lanEnabled, AppSettings.apiToken, AppSettings.cacheTypeK,
-            AppSettings.cacheTypeV, AppSettings.specType, AppSettings.faMode
+            AppSettings.cacheTypeV, AppSettings.specType, AppSettings.faMode,
+            AppSettings.prismEngineEnabled
         ).joinToString("|")
         val oldThink = AppSettings.thinkEnabled
         val port = s.port.toIntOrNull()?.coerceIn(1024, 65535) ?: AppSettings.port
@@ -587,6 +590,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         AppSettings.cacheTypeV = s.cacheTypeV.trim().lowercase()
         AppSettings.specType = s.specType.trim().lowercase().ifEmpty { "none" }
         AppSettings.faMode = s.faMode.trim().lowercase()
+        AppSettings.prismEngineEnabled = s.prismEngineEnabled
         AppSettings.thinkEnabled = s.thinkEnabled
         AppSettings.chatCloudEnabled = s.chatCloudEnabled
         AppSettings.chatCloudUrl = s.chatCloudUrl.trim()
@@ -601,6 +605,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             cacheTypeV = AppSettings.cacheTypeV,
             specType = AppSettings.specType,
             faMode = AppSettings.faMode,
+            prismEngineEnabled = AppSettings.prismEngineEnabled,
             thinkEnabled = AppSettings.thinkEnabled,
             chatCloudEnabled = AppSettings.chatCloudEnabled,
             chatCloudUrl = AppSettings.chatCloudUrl,
@@ -612,7 +617,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val newServerKey = listOf(
                 AppSettings.port, AppSettings.ctxSize, AppSettings.threads, AppSettings.ngl,
                 AppSettings.lanEnabled, AppSettings.apiToken, AppSettings.cacheTypeK,
-                AppSettings.cacheTypeV, AppSettings.specType, AppSettings.faMode
+                AppSettings.cacheTypeV, AppSettings.specType, AppSettings.faMode,
+                AppSettings.prismEngineEnabled
             ).joinToString("|")
             _saveMessage.value = if (newServerKey != oldServerKey) {
                 "设置成功，重启服务生效"
