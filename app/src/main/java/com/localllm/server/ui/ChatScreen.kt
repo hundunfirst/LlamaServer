@@ -800,7 +800,10 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                         arrayOf(
                             "image/*", "text/*",
                             "application/json", "application/xml", "application/javascript",
-                            "application/x-yaml", "application/csv"
+                            "application/x-yaml", "application/csv",
+                            "application/pdf",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
                     )
                 },

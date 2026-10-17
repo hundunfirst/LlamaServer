@@ -10,6 +10,7 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         AppSettings.init(this)
+        com.tom_roush.pdfbox.android.PDFBoxResourceLoader.init(this)
         AppSettings.migrateMcpSingleToMulti()
         BinaryInstaller.init(this)
         ServerProcessManager.init(this)

@@ -112,4 +112,7 @@ dependencies {
 
     // OCR：ML Kit 中文文字识别（bundled 离线模型，无需 GMS 在线下载）
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+
+    // PDF 文本抽取（纯本地）；docx/xlsx 用系统 zip 自行解析，无需额外依赖
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
 }
