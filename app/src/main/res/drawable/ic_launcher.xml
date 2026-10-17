@@ -1,16 +1,104 @@
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
+    <!-- 星河底：深空紫 → 宇宙蓝的径向渐变 -->
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54"
+                android:centerY="46"
+                android:gradientRadius="86"
+                android:startColor="#FF2A1150"
+                android:centerColor="#FF140B2E"
+                android:endColor="#FF06030F" />
+        </aapt:attr>
+    </path>
+
+    <!-- 混沌星云弧线（两条，低透明度） -->
     <path
-        android:fillColor="#1B5E20"
-        android:pathData="M12,12h84v84h-84z" />
+        android:pathData="M14,74 C 34,96 74,96 94,74"
+        android:strokeColor="#339D6BFF"
+        android:strokeWidth="7"
+        android:strokeLineCap="round" />
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M30,38h48v8h-48zM30,50h48v8h-48zM30,62h48v8h-48z" />
+        android:pathData="M18,34 C 40,14 68,14 90,34"
+        android:strokeColor="#2A22D3EE"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+
+    <!-- 星点 -->
+    <path android:fillColor="#CCFFFFFF" android:pathData="M24,30a1.1,1.1 0,1 0,2.2 0a1.1,1.1 0,1 0,-2.2 0z" />
+    <path android:fillColor="#99FFFFFF" android:pathData="M84,26a0.9,0.9 0,1 0,1.8 0a0.9,0.9 0,1 0,-1.8 0z" />
+    <path android:fillColor="#88FFFFFF" android:pathData="M88,64a1.0,1.0 0,1 0,2.0 0a1.0,1.0 0,1 0,-2.0 0z" />
+    <path android:fillColor="#AAFFFFFF" android:pathData="M20,58a0.8,0.8 0,1 0,1.6 0a0.8,0.8 0,1 0,-1.6 0z" />
+    <path android:fillColor="#BBFFFFFF" android:pathData="M32,84a0.9,0.9 0,1 0,1.8 0a0.9,0.9 0,1 0,-1.8 0z" />
+    <path android:fillColor="#99FFFFFF" android:pathData="M74,86a0.8,0.8 0,1 0,1.6 0a0.8,0.8 0,1 0,-1.6 0z" />
+    <path android:fillColor="#77FFFFFF" android:pathData="M46,16a0.7,0.7 0,1 0,1.4 0a0.7,0.7 0,1 0,-1.4 0z" />
+    <path android:fillColor="#77FFFFFF" android:pathData="M64,94a0.7,0.7 0,1 0,1.4 0a0.7,0.7 0,1 0,-1.4 0z" />
+
+    <!-- 四角星芒（两处，带一点星爆感） -->
     <path
-        android:fillColor="#A5D6A7"
-        android:pathData="M78,34a4,4 0,1 0,0.1,0zM78,46a4,4 0,1 0,0.1,0zM78,58a4,4 0,1 0,0.1,0z" />
+        android:fillColor="#B39D6BFF"
+        android:pathData="M70,20 L71.6,25.4 L77,27 L71.6,28.6 L70,34 L68.4,28.6 L63,27 L68.4,25.4 Z" />
+    <path
+        android:fillColor="#8A22D3EE"
+        android:pathData="M22,80 L23.2,84 L27.2,85.2 L23.2,86.4 L22,90.4 L20.8,86.4 L16.8,85.2 L20.8,84 Z" />
+
+    <!-- 混沌能量环（外圈） -->
+    <path
+        android:pathData="M54,22 A32,32 0 1,1 53.9,22"
+        android:strokeColor="#668B5CF6"
+        android:strokeWidth="1.6" />
+    <path
+        android:pathData="M54,28 A26,26 0 1,0 54.1,28"
+        android:strokeColor="#3D22D3EE"
+        android:strokeWidth="1.0" />
+
+    <!-- 智脑核心：紫青渐变球体 + 光晕 -->
+    <path android:pathData="M54,34a20,20 0 1,0 0.1,0z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="48"
+                android:centerY="46"
+                android:gradientRadius="30"
+                android:startColor="#FFA855F7"
+                android:centerColor="#FF6D28D9"
+                android:endColor="#FF1E0B3A" />
+        </aapt:attr>
+    </path>
+
+    <!-- 左右半球分界 -->
+    <path
+        android:pathData="M54,36 L54,70"
+        android:strokeColor="#59F3E8FF"
+        android:strokeWidth="1.4"
+        android:strokeLineCap="round" />
+    <!-- 脑回褶皱（左右各三条，错位避免像五官） -->
+    <path android:pathData="M46,42 C 49,45 43,48 47,51" android:strokeColor="#CCF3E8FF" android:strokeWidth="1.6" android:strokeLineCap="round" />
+    <path android:pathData="M42,55 C 45,58 41,61 44,64" android:strokeColor="#99F3E8FF" android:strokeWidth="1.4" android:strokeLineCap="round" />
+    <path android:pathData="M50,60 C 52,63 49,66 51,68" android:strokeColor="#66F3E8FF" android:strokeWidth="1.2" android:strokeLineCap="round" />
+    <path android:pathData="M62,42 C 59,45 65,48 61,51" android:strokeColor="#CCF3E8FF" android:strokeWidth="1.6" android:strokeLineCap="round" />
+    <path android:pathData="M66,55 C 63,58 67,61 64,64" android:strokeColor="#99F3E8FF" android:strokeWidth="1.4" android:strokeLineCap="round" />
+    <path android:pathData="M58,60 C 56,63 59,66 57,68" android:strokeColor="#66F3E8FF" android:strokeWidth="1.2" android:strokeLineCap="round" />
+
+    <!-- 电路节点与连线（智脑外部延伸，象征规则层） -->
+    <path
+        android:pathData="M40,40 L30,32 M68,40 L78,32 M40,64 L30,72 M68,64 L78,72"
+        android:strokeColor="#AA22D3EE"
+        android:strokeWidth="1.2"
+        android:strokeLineCap="round" />
+    <path android:fillColor="#FF22D3EE" android:pathData="M28.6,30.6a2.4,2.4 0,1 0,4.8 0a2.4,2.4 0,1 0,-4.8 0z" />
+    <path android:fillColor="#FF22D3EE" android:pathData="M76.6,30.6a2.4,2.4 0,1 0,4.8 0a2.4,2.4 0,1 0,-4.8 0z" />
+    <path android:fillColor="#FFA855F7" android:pathData="M28.6,70.6a2.4,2.4 0,1 0,4.8 0a2.4,2.4 0,1 0,-4.8 0z" />
+    <path android:fillColor="#FFA855F7" android:pathData="M76.6,70.6a2.4,2.4 0,1 0,4.8 0a2.4,2.4 0,1 0,-4.8 0z" />
+
+    <!-- 核心亮点 -->
+    <path android:fillColor="#B3FFFFFF" android:pathData="M46,41a2,2 0,1 0,4 0a2,2 0,1 0,-4 0z" />
 </vector>
