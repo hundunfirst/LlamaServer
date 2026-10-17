@@ -458,6 +458,10 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     var deleteIndex by remember { mutableStateOf<Int?>(null) }
     var showCompressConfirm by remember { mutableStateOf(false) }
     var showSysPrompt by remember { mutableStateOf(false) }
+    var previewImageB64 by remember { mutableStateOf<String?>(null) }
+    var previewFileName by remember { mutableStateOf("") }
+    var previewFileText by remember { mutableStateOf("") }
+    var showFilePreview by remember { mutableStateOf(false) }
     var sysPromptText by remember { mutableStateOf("") }
     var editText by remember { mutableStateOf("") }
 
@@ -573,6 +577,51 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             },
             dismissButton = {
                 TextButton(onClick = { editingIndex = null }) { Text("取消") }
+            }
+        )
+    }
+
+    // 图片预览（发送前的附件图片）
+    previewImageB64?.let { b64 ->
+        androidx.compose.ui.window.Dialog(onDismissRequest = { previewImageB64 = null }) {
+            val bmp = remember(b64) {
+                runCatching {
+                    val bytes = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
+                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                }.getOrNull()
+            }
+            if (bmp != null) {
+                androidx.compose.foundation.Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = "预览",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { previewImageB64 = null }
+                )
+            }
+        }
+    }
+
+    // 文件预览（发送前的附件文本；PDF/Office 显示的是已抽取文本）
+    if (showFilePreview) {
+        AlertDialog(
+            onDismissRequest = { showFilePreview = false },
+            title = { Text(previewFileName, maxLines = 1) },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        previewFileText,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showFilePreview = false }) { Text("关闭") }
             }
         )
     }
@@ -934,8 +983,19 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                     "📄 已附带文件：${f.first}（${f.second.length} 字）",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable {
+                            previewFileName = f.first
+                            previewFileText = f.second
+                            showFilePreview = true
+                        }
                 )
+                TextButton(onClick = {
+                    previewFileName = f.first
+                    previewFileText = f.second
+                    showFilePreview = true
+                }) { Text("预览") }
                 TextButton(onClick = vm::clearPendingFile) { Text("移除") }
             }
         }
@@ -952,6 +1012,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.weight(1f)
                 )
+                TextButton(onClick = { previewImageB64 = pendingImage }) { Text("预览") }
                 TextButton(onClick = vm::clearPendingImage) { Text("移除") }
             }
         }
@@ -1506,11 +1567,15 @@ private fun CodeBlock(lang: String, code: String) {
                     },
                     modifier = Modifier.width(36.dp)
                 ) { Icon(Icons.Default.ContentCopy, contentDescription = "复制代码", modifier = Modifier.width(16.dp)) }
-                if (isHtml) {
-                    IconButton(
-                        onClick = { saveHtml(context, code) },
-                        modifier = Modifier.width(36.dp)
-                    ) { Icon(Icons.Default.Download, contentDescription = "保存文件", modifier = Modifier.width(16.dp)) }
+                IconButton(
+                    onClick = { saveSnippet(context, lang, code) },
+                    modifier = Modifier.width(36.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Download,
+                        contentDescription = "保存为文件",
+                        modifier = Modifier.width(16.dp)
+                    )
                 }
             }
         }
@@ -1529,16 +1594,39 @@ private fun CodeBlock(lang: String, code: String) {
     }
 }
 
-private fun saveHtml(context: android.content.Context, code: String) {
+/** 代码块语言 → (扩展名, MIME) */
+private fun langToFile(lang: String, code: String): Pair<String, String> = when (lang.lowercase()) {
+    "html", "htm" -> "html" to "text/html"
+    "xml" -> "xml" to "application/xml"
+    "svg" -> "svg" to "image/svg+xml"
+    "json" -> "json" to "application/json"
+    "csv" -> "csv" to "text/csv"
+    "md", "markdown" -> "md" to "text/markdown"
+    "py", "python" -> "py" to "text/x-python"
+    "js", "javascript" -> "js" to "application/javascript"
+    "ts", "typescript" -> "ts" to "application/javascript"
+    "kt", "kotlin" -> "kt" to "text/plain"
+    "java" -> "java" to "text/plain"
+    "sh", "bash", "shell" -> "sh" to "text/x-sh"
+    "sql" -> "sql" to "text/plain"
+    "yaml", "yml" -> "yml" to "text/yaml"
+    "css" -> "css" to "text/css"
+    else -> "txt" to "text/plain"
+}
+
+/** 把代码块按语言保存到系统下载目录（MediaStore，无需存储权限） */
+private fun saveSnippet(context: android.content.Context, lang: String, code: String) {
     try {
-        val name = "snippet_${System.currentTimeMillis()}.html"
+        // HTML 内容即使没标注语言也按 html 存
+        val effectiveLang = if (lang.isBlank() && code.contains("<html", ignoreCase = true)) "html" else lang
+        val (ext, mime) = langToFile(effectiveLang, code)
+        val name = "snippet_${System.currentTimeMillis()}.$ext"
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, name)
-            put(MediaStore.Downloads.MIME_TYPE, "text/html")
+            put(MediaStore.Downloads.MIME_TYPE, mime)
         }
-        val uri = context.contentResolver.insert(
-            MediaStore.Downloads.EXTERNAL_CONTENT_URI, values
-        ) ?: throw IllegalStateException("无法创建文件")
+        val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: throw IllegalStateException("无法创建文件")
         context.contentResolver.openOutputStream(uri)?.use {
             it.write(code.toByteArray(Charsets.UTF_8))
         }
