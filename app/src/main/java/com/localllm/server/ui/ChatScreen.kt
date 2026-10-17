@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -110,7 +111,22 @@ private fun parseSegments(content: String): List<Seg> {
         out.add(Seg.Code(m.groupValues[1].lowercase(), m.groupValues[2].trimEnd('\n')))
         last = m.range.last + 1
     }
-    if (last < content.length) parseBlocks(content.substring(last), out)
+    if (last < content.length) {
+        val tail = content.substring(last)
+        val openIdx = tail.indexOf("```")
+        if (openIdx >= 0) {
+            // 流式输出中代码块尚未闭合：先把前面普通内容解析，再把剩余部分当作"进行中的代码块"
+            if (openIdx > 0) parseBlocks(tail.substring(0, openIdx), out)
+            val after = tail.substring(openIdx + 3)
+            val nl = after.indexOf('\n')
+            val rawLang = if (nl >= 0) after.substring(0, nl) else ""
+            val lang = rawLang.trim().filter { it.isLetterOrDigit() || it == '_' || it == '+' || it == '-' }
+            val body = if (nl >= 0) after.substring(nl + 1) else after
+            out.add(Seg.Code(lang.lowercase(), body.trimEnd('\n')))
+        } else {
+            parseBlocks(tail, out)
+        }
+    }
     if (out.isEmpty()) out.add(Seg.Text(content))
     return out
 }
@@ -819,30 +835,47 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                         else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                IconButton(onClick = { showSkills = true }) {
-                    Icon(
-                        Icons.Default.AutoAwesome,
-                        contentDescription = "技能",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                IconButton(onClick = {
-                    sysPromptText = vm.currentSessionSystemPrompt()
-                        ?: com.localllm.server.core.AppSettings.activeSysPrompt()
-                    showSysPrompt = true
-                }) {
-                    Icon(
-                        Icons.Default.Psychology,
-                        contentDescription = "本会话助手指令",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                IconButton(onClick = { showCompressConfirm = true }) {
-                    Icon(
-                        Icons.Default.Compress,
-                        contentDescription = "压缩上下文",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                // 功能整合入口：技能 / 本会话指令 / 压缩上下文
+                var toolsMenuOpen by remember { mutableStateOf(false) }
+                Box {
+                    IconButton(onClick = { toolsMenuOpen = true }) {
+                        Icon(
+                            Icons.Default.MoreVert,
+                            contentDescription = "更多工具",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = toolsMenuOpen,
+                        onDismissRequest = { toolsMenuOpen = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("技能…") },
+                            leadingIcon = { Icon(Icons.Default.AutoAwesome, null) },
+                            onClick = {
+                                toolsMenuOpen = false
+                                showSkills = true
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("本会话助手指令…") },
+                            leadingIcon = { Icon(Icons.Default.Psychology, null) },
+                            onClick = {
+                                toolsMenuOpen = false
+                                sysPromptText = vm.currentSessionSystemPrompt()
+                                    ?: com.localllm.server.core.AppSettings.activeSysPrompt()
+                                showSysPrompt = true
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("压缩上下文…") },
+                            leadingIcon = { Icon(Icons.Default.Compress, null) },
+                            onClick = {
+                                toolsMenuOpen = false
+                                showCompressConfirm = true
+                            }
+                        )
+                    }
                 }
                 IconButton(onClick = { showSessions = true }) {
                     Icon(Icons.Default.List, contentDescription = "会话列表")
@@ -1115,7 +1148,10 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                     Icon(Icons.Default.Stop, contentDescription = "停止", tint = MaterialTheme.colorScheme.error)
                 }
             } else {
-                IconButton(onClick = vm::send, enabled = input.isNotBlank()) {
+                IconButton(
+                    onClick = vm::send,
+                    enabled = input.isNotBlank() || pendingImage != null || pendingFile != null
+                ) {
                     Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送")
                 }
             }

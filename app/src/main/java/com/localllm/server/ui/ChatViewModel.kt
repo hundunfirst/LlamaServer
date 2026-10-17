@@ -266,7 +266,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 助手指令：会话级覆盖优先，否则用全局预设
                 val sessionPrompt = _sessions.value.find { it.id == _activeId.value }?.systemPrompt
                 val basePrompt = sessionPrompt ?: AppSettings.activeSysPrompt()
-                val systemText = (if (basePrompt.isNotBlank()) basePrompt + " " else "") +
+                val systemText = (if (basePrompt.isNotBlank())
+                    "【本会话角色设定，优先遵守】" + basePrompt + " "
+                else "") +
                         (if (AppSettings.thinkEnabled) {
                     "用中文简洁回答。"
                 } else {
