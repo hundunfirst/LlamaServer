@@ -55,6 +55,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -483,6 +484,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     var previewImageB64 by remember { mutableStateOf<String?>(null) }
     var previewFileName by remember { mutableStateOf("") }
     var showSkills by remember { mutableStateOf(false) }
+    var readMsg by remember { mutableStateOf<com.localllm.server.core.ChatStore.Msg?>(null) }
     var previewGenFile by remember {
         mutableStateOf<com.localllm.server.core.ChatStore.GenFile?>(null)
     }
@@ -650,6 +652,74 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 TextButton(onClick = { showFilePreview = false }) { Text("关闭") }
             }
         )
+    }
+
+    // 阅读视图：独立页面内可拖选复制（不在懒加载列表里，避免渲染问题）
+    readMsg?.let { m ->
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { readMsg = null },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            androidx.compose.material3.Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.surface
+            ) {
+                Column(Modifier.fillMaxSize()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            if (m.role == "user") "用户消息" else "助手回复",
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = {
+                            clipboard.setText(AnnotatedString(m.content))
+                            Toast.makeText(context, "已复制全文", Toast.LENGTH_SHORT).show()
+                        }) { Text("复制全文") }
+                        TextButton(onClick = { readMsg = null }) { Text("关闭") }
+                    }
+                    androidx.compose.material3.HorizontalDivider()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            "长按并拖动可选取任意片段复制",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        androidx.compose.foundation.text.selection.SelectionContainer {
+                            Text(
+                                m.content,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                        if (!m.reasoning.isNullOrBlank()) {
+                            androidx.compose.material3.HorizontalDivider()
+                            Text(
+                                "🧠 思考过程",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            androidx.compose.foundation.text.selection.SelectionContainer {
+                                Text(
+                                    m.reasoning!!,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // 生成文件预览
@@ -1059,6 +1129,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                         deleteIndex = i
                     },
                     onOpenGenFile = { gf -> previewGenFile = gf },
+                    onReadText = { readMsg = msg },
                     onSpeak = {
                         val engine = tts
                         if (engine == null || !ttsReady) {
@@ -1228,7 +1299,8 @@ private fun MessageBubble(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onSpeak: () -> Unit = {},
-    onOpenGenFile: (com.localllm.server.core.ChatStore.GenFile) -> Unit = {}
+    onOpenGenFile: (com.localllm.server.core.ChatStore.GenFile) -> Unit = {},
+    onReadText: () -> Unit = {}
 ) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
@@ -1670,6 +1742,20 @@ private fun MessageBubble(
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("复制", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        TextButton(
+                            onClick = onReadText,
+                            modifier = Modifier.padding(top = 0.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.TextFields,
+                                contentDescription = "选取文本",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("选取", style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         TextButton(
