@@ -42,10 +42,13 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -79,6 +82,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -358,12 +362,38 @@ private fun latexToUnicode(src: String): String {
 private fun inlineMd(s: String): androidx.compose.ui.text.AnnotatedString =
     androidx.compose.ui.text.buildAnnotatedString {
         val text = latexToUnicode(s)
-        val re = Regex("""(\*\*[^*\n]+\*\*|`[^`\n]+`|\*[^*\n]+\*)""")
+        // 依次匹配：Markdown 链接 / 裸 URL / 加粗 / 行内代码 / 斜体
+        val linkRe = Regex("""\[([^\]\n]+)\]\((https?://[^)\s]+)\)|(https?://[^\s)\u3002\uff0c\uff1b]+)""")
+        val fmtRe = Regex("""(\*\*[^*\n]+\*\*|`[^`\n]+`|\*[^*\n]+\*)""")
+        val all = (linkRe.findAll(text).map { it.range.first to it } +
+                fmtRe.findAll(text).map { it.range.first to it })
+            .sortedWith(compareBy { it.first })
+            .fold(mutableListOf<Pair<Int, MatchResult>>()) { acc, cur ->
+                if (acc.isEmpty() || cur.first >= acc.last().second.range.last + 1) acc.add(cur)
+                acc
+            }
         var last = 0
-        for (m in re.findAll(text)) {
+        val linkStyles = androidx.compose.ui.text.TextLinkStyles(
+            style = androidx.compose.ui.text.SpanStyle(
+                color = androidx.compose.ui.graphics.Color(0xFF1976D2),
+                textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
+            )
+        )
+        for ((_, m) in all) {
+            if (m.range.first < last) continue
             append(text.substring(last, m.range.first))
             val t = m.value
-            when {
+            if (m.groups[1] != null && m.groups[2] != null) {
+                // [文本](url)
+                withLink(androidx.compose.ui.text.LinkAnnotation.Url(m.groups[2]!!.value, linkStyles)) {
+                    append(m.groups[1]!!.value)
+                }
+            } else if (m.groups[3] != null) {
+                // 裸 URL
+                withLink(androidx.compose.ui.text.LinkAnnotation.Url(m.groups[3]!!.value, linkStyles)) {
+                    append(m.groups[3]!!.value)
+                }
+            } else when {
                 t.startsWith("**") -> withStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold)) {
                     append(t.removeSurrounding("**"))
                 }
@@ -404,6 +434,8 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     var editingIndex by remember { mutableStateOf<Int?>(null) }
     var deleteIndex by remember { mutableStateOf<Int?>(null) }
     var showCompressConfirm by remember { mutableStateOf(false) }
+    var showSysPrompt by remember { mutableStateOf(false) }
+    var sysPromptText by remember { mutableStateOf("") }
     var editText by remember { mutableStateOf("") }
 
     // 附加文件：图片走多模态/OCR，文本类文件读成文本随消息发送（其余类型暂不支持）
@@ -411,6 +443,56 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
         if (uri != null) {
             val mime = context.contentResolver.getType(uri) ?: ""
             if (mime.startsWith("image/")) vm.attachImage(uri) else vm.attachFile(uri)
+        }
+    }
+
+    // ---- 语音输入（系统识别器，零依赖）----
+    val speechLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { res ->
+        val text = res.data
+            ?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+        if (!text.isNullOrBlank()) {
+            vm.onInput((input + text).trim())
+        }
+    }
+
+    fun startSpeech() {
+        val intent = android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .apply {
+                putExtra(
+                    android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                )
+                putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
+                putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "请说话…")
+            }
+        runCatching { speechLauncher.launch(intent) }.onFailure {
+            Toast.makeText(context, "语音识别不可用（系统未安装语音服务）", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val micPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) startSpeech()
+        else Toast.makeText(context, "需要麦克风权限", Toast.LENGTH_SHORT).show()
+    }
+
+    // ---- TTS 朗读 ----
+    var tts by remember { mutableStateOf<android.speech.tts.TextToSpeech?>(null) }
+    var ttsReady by remember { mutableStateOf(false) }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val engine = android.speech.tts.TextToSpeech(context) { st ->
+            ttsReady = st == android.speech.tts.TextToSpeech.SUCCESS
+        }
+        tts = engine
+        onDispose {
+            runCatching {
+                engine.stop()
+                engine.shutdown()
+            }
         }
     }
 
@@ -468,6 +550,42 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             },
             dismissButton = {
                 TextButton(onClick = { editingIndex = null }) { Text("取消") }
+            }
+        )
+    }
+
+    // 本会话助手指令
+    if (showSysPrompt) {
+        AlertDialog(
+            onDismissRequest = { showSysPrompt = false },
+            title = { Text("本会话助手指令") },
+            text = {
+                Column {
+                    Text(
+                        "留空则使用全局预设；这里的内容只影响本会话。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    CompactFieldMultiline(
+                        value = sysPromptText,
+                        onValueChange = { sysPromptText = it },
+                        label = "系统指令（system prompt）",
+                        minHeight = 140
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.setSessionSystemPrompt(sysPromptText)
+                    showSysPrompt = false
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    vm.setSessionSystemPrompt(null)
+                    showSysPrompt = false
+                }) { Text("清除覆盖") }
             }
         )
     }
@@ -614,6 +732,17 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                         else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                IconButton(onClick = {
+                    sysPromptText = vm.currentSessionSystemPrompt()
+                        ?: com.localllm.server.core.AppSettings.activeSysPrompt()
+                    showSysPrompt = true
+                }) {
+                    Icon(
+                        Icons.Default.Psychology,
+                        contentDescription = "本会话助手指令",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 IconButton(onClick = { showCompressConfirm = true }) {
                     Icon(
                         Icons.Default.Compress,
@@ -750,6 +879,22 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                     onDelete = {
                         menuIndex = null
                         deleteIndex = i
+                    },
+                    onSpeak = {
+                        val engine = tts
+                        if (engine == null || !ttsReady) {
+                            Toast.makeText(context, "朗读引擎未就绪", Toast.LENGTH_SHORT).show()
+                        } else if (engine.isSpeaking) {
+                            engine.stop()
+                        } else {
+                            engine.language = java.util.Locale.CHINA
+                            engine.speak(
+                                msg.content.take(4000),
+                                android.speech.tts.TextToSpeech.QUEUE_FLUSH,
+                                null,
+                                "msg_$i"
+                            )
+                        }
                     }
                 )
             }
@@ -794,6 +939,22 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            IconButton(
+                onClick = {
+                    val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                        context, android.Manifest.permission.RECORD_AUDIO
+                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                    if (granted) startSpeech()
+                    else micPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                },
+                enabled = !streaming
+            ) {
+                Icon(
+                    Icons.Default.Mic,
+                    contentDescription = "语音输入",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             IconButton(
                 onClick = {
                     pickImage.launch(
@@ -850,7 +1011,8 @@ private fun MessageBubble(
     onCopy: () -> Unit,
     onResend: () -> Unit,
     onEdit: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onSpeak: () -> Unit = {}
 ) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
@@ -1055,7 +1217,25 @@ private fun MessageBubble(
                                         modifier = Modifier.padding(vertical = 4.dp)
                                     ) {
                                         seg.lines.forEach { l ->
-                                            Text(inlineMd(l), style = MaterialTheme.typography.bodyMedium)
+                                            val trimmed = l.trimStart()
+                                            val isDone = trimmed.startsWith("- [x]") ||
+                                                    trimmed.startsWith("- [X]") ||
+                                                    trimmed.startsWith("* [x]") ||
+                                                    trimmed.startsWith("* [X]")
+                                            val isTodo = trimmed.startsWith("- [ ]") ||
+                                                    trimmed.startsWith("* [ ]")
+                                            val shown = when {
+                                                isDone -> "☑  " + trimmed.substringAfter("]").trim()
+                                                isTodo -> "☐  " + trimmed.substringAfter("]").trim()
+                                                else -> l
+                                            }
+                                            Text(
+                                                inlineMd(shown),
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                textDecoration = if (isDone)
+                                                    androidx.compose.ui.text.style.TextDecoration.LineThrough
+                                                else null
+                                            )
                                         }
                                     }
                                     is Seg.Quote -> Column(
@@ -1171,6 +1351,20 @@ private fun MessageBubble(
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("复制", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        TextButton(
+                            onClick = onSpeak,
+                            modifier = Modifier.padding(top = 0.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.VolumeUp,
+                                contentDescription = "朗读",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("朗读", style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         TextButton(
@@ -1298,7 +1492,13 @@ private fun CodeBlock(lang: String, code: String) {
             }
         }
         Text(
-            code,
+            highlightCode(
+                lang, code,
+                keywordColor = MaterialTheme.colorScheme.primary,
+                stringColor = androidx.compose.ui.graphics.Color(0xFF2E7D32),
+                commentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                numberColor = androidx.compose.ui.graphics.Color(0xFF6A1B9A)
+            ),
             fontFamily = FontFamily.Monospace,
             fontSize = 12.sp,
             modifier = Modifier.fillMaxWidth()
@@ -1347,5 +1547,76 @@ private fun SummaryCard(content: String) {
                 modifier = Modifier.padding(top = 4.dp)
             )
         }
+    }
+}
+
+/** 轻量语法高亮：注释/字符串/数字/关键字（无法识别语言时原样返回） */
+private fun highlightCode(
+    lang: String,
+    code: String,
+    keywordColor: androidx.compose.ui.graphics.Color,
+    stringColor: androidx.compose.ui.graphics.Color,
+    commentColor: androidx.compose.ui.graphics.Color,
+    numberColor: androidx.compose.ui.graphics.Color
+): androidx.compose.ui.text.AnnotatedString {
+    val keywords: Set<String> = when (lang.lowercase()) {
+        "kotlin", "kt", "kts" -> setOf(
+            "fun", "val", "var", "class", "object", "interface", "if", "else", "when", "for",
+            "while", "return", "import", "package", "suspend", "override", "data", "private",
+            "public", "internal", "null", "true", "false", "try", "catch", "finally", "throw",
+            "in", "is", "as", "by", "lateinit", "companion", "sealed", "enum"
+        )
+        "java" -> setOf(
+            "class", "interface", "extends", "implements", "public", "private", "protected",
+            "static", "final", "void", "int", "long", "double", "float", "boolean", "char",
+            "new", "return", "if", "else", "for", "while", "try", "catch", "finally", "throw",
+            "null", "true", "false", "import", "package"
+        )
+        "python", "py" -> setOf(
+            "def", "class", "if", "elif", "else", "for", "while", "return", "import", "from",
+            "as", "try", "except", "finally", "raise", "with", "lambda", "None", "True", "False",
+            "and", "or", "not", "in", "is", "yield", "async", "await"
+        )
+        "js", "javascript", "ts", "typescript", "jsx", "tsx" -> setOf(
+            "function", "const", "let", "var", "class", "extends", "if", "else", "for", "while",
+            "return", "import", "export", "default", "async", "await", "try", "catch", "finally",
+            "throw", "new", "null", "undefined", "true", "false", "interface", "type"
+        )
+        "json" -> setOf("true", "false", "null")
+        "bash", "sh", "shell", "zsh" -> setOf(
+            "if", "then", "else", "elif", "fi", "for", "in", "do", "done", "while", "case",
+            "esac", "function", "echo", "export", "cd", "sudo", "rm", "cp", "mv", "mkdir", "curl"
+        )
+        else -> emptySet()
+    }
+    if (keywords.isEmpty()) return androidx.compose.ui.text.AnnotatedString(code)
+    val re = Regex(
+        """(//[^\n]*|#[^\n]*|/\*[\s\S]*?\*/)|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')|\b(\d+(?:\.\d+)?)\b|\b([A-Za-z_]\w*)\b"""
+    )
+    return androidx.compose.ui.text.buildAnnotatedString {
+        var last = 0
+        for (m in re.findAll(code)) {
+            if (m.range.first > last) append(code.substring(last, m.range.first))
+            val g1 = m.groups[1]
+            val g2 = m.groups[2]
+            val g3 = m.groups[3]
+            val g4 = m.groups[4]
+            when {
+                g1 != null -> withStyle(androidx.compose.ui.text.SpanStyle(color = commentColor)) {
+                    append(g1.value)
+                }
+                g2 != null -> withStyle(androidx.compose.ui.text.SpanStyle(color = stringColor)) {
+                    append(g2.value)
+                }
+                g3 != null -> withStyle(androidx.compose.ui.text.SpanStyle(color = numberColor)) {
+                    append(g3.value)
+                }
+                g4 != null && g4.value in keywords ->
+                    withStyle(androidx.compose.ui.text.SpanStyle(color = keywordColor)) { append(g4.value) }
+                else -> append(m.value)
+            }
+            last = m.range.last + 1
+        }
+        if (last < code.length) append(code.substring(last))
     }
 }

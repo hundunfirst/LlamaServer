@@ -247,7 +247,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val today = java.text.SimpleDateFormat("yyyy年M月d日", java.util.Locale.CHINA)
                     .format(java.util.Date())
-                val systemText = (if (AppSettings.thinkEnabled) {
+                // 助手指令：会话级覆盖优先，否则用全局预设
+                val sessionPrompt = _sessions.value.find { it.id == _activeId.value }?.systemPrompt
+                val basePrompt = sessionPrompt ?: AppSettings.activeSysPrompt()
+                val systemText = (if (basePrompt.isNotBlank()) basePrompt + " " else "") +
+                        (if (AppSettings.thinkEnabled) {
                     "用中文简洁回答。"
                 } else {
                     "不要输出思考过程，直接用中文简洁回答。"
@@ -571,6 +575,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             _messages.value = list
                         }
                         ServerProcessManager.appLog("聊天：完成 · ${_lastStats.value ?: "（无统计）"}")
+                        // 首轮回答完成 → 自动生成会话标题
+                        val assistantCount = _messages.value.count {
+                            it.role == "assistant" && it.content.isNotBlank()
+                        }
+                        if (assistantCount == 1) {
+                            val lastUser = _messages.value.lastOrNull { it.role == "user" }?.content ?: ""
+                            maybeAutoTitle(lastUser, _messages.value.lastOrNull()?.content ?: "")
+                        }
                         break
                     }
 
@@ -797,6 +809,68 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (ch.code in 0x4E00..0x9FFF || ch.code in 0x3000..0x303F) cjk++ else other++
         }
         return cjk + other / 4 + 1
+    }
+
+    /** 设置/清除本会话的助手指令覆盖（null/空 = 回落到全局预设） */
+    fun setSessionSystemPrompt(text: String?) {
+        val id = _activeId.value
+        val v = text?.trim()?.takeIf { it.isNotBlank() }
+        _sessions.value = _sessions.value.map {
+            if (it.id == id) it.copy(systemPrompt = v, updatedAt = System.currentTimeMillis()) else it
+        }
+        saveStore()
+        ServerProcessManager.appLog(
+            if (v == null) "本会话指令已清除（使用全局预设）" else "本会话指令已更新（${v.length} 字）"
+        )
+    }
+
+    fun currentSessionSystemPrompt(): String? =
+        _sessions.value.find { it.id == _activeId.value }?.systemPrompt
+
+    /** 首轮回答后自动生成会话标题（仅当标题仍是默认时） */
+    private suspend fun maybeAutoTitle(userText: String, assistantText: String) {
+        val id = _activeId.value
+        val session = _sessions.value.find { it.id == id } ?: return
+        val isDefaultTitle = session.title == "新会话" ||
+                session.title == userText.take(24) ||
+                session.title.isBlank()
+        if (!isDefaultTitle) return
+        val buf = StringBuilder()
+        runCatching {
+            val cloud = AppSettings.chatCloudEnabled && AppSettings.chatCloudUrl.isNotBlank()
+            ChatClient.chatStream(
+                port = AppSettings.port,
+                messages = listOf(
+                    ChatClient.ChatMessage(
+                        "system",
+                        "为这段对话起一个简短标题：不超过 12 个字，不加标点与引号，直接输出标题本身。"
+                    ),
+                    ChatClient.ChatMessage(
+                        "user",
+                        "用户：" + userText.take(300) + "\n助手：" + assistantText.take(300)
+                    )
+                ),
+                apiToken = if (cloud) AppSettings.chatCloudKey.ifBlank { null }
+                           else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
+                baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
+                model = if (cloud) AppSettings.chatCloudModel.ifBlank { "default" } else "local",
+                thinking = if (cloud) null else false,
+                maxTokens = 60,
+                tools = null,
+                onDelta = { d -> buf.append(d) },
+                onReasoning = {},
+                onFinal = { _, _, _ -> }
+            )
+        }.onFailure { ServerProcessManager.appLog("自动标题失败：${it.message}") }
+        val title = buf.toString().trim().trim('"', '“', '”', '。', ' ')
+            .replace(Regex("\\s+"), "")
+        if (title.isNotBlank()) {
+            _sessions.value = _sessions.value.map {
+                if (it.id == id) it.copy(title = title.take(20)) else it
+            }
+            saveStore()
+            ServerProcessManager.appLog("已自动生成会话标题：$title")
+        }
     }
 
     fun clearError() { _error.value = null }

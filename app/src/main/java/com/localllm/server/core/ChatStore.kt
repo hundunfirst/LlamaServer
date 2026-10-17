@@ -35,7 +35,9 @@ object ChatStore {
         val id: String,
         val title: String,
         val updatedAt: Long,
-        val messages: List<Msg>
+        val messages: List<Msg>,
+        /** 本会话的助手指令覆盖；null = 使用全局预设 */
+        val systemPrompt: String? = null
     )
 
     data class Store(val activeId: String, val sessions: List<Session>)
@@ -81,7 +83,13 @@ object ChatStore {
                         sources = parseSources(m.optJSONArray("sources"))
                     )
                 }
-                Session(o.optString("id"), o.optString("title"), o.optLong("updatedAt"), msgs)
+                Session(
+                    o.optString("id"),
+                    o.optString("title"),
+                    o.optLong("updatedAt"),
+                    msgs,
+                    o.optString("systemPrompt").takeIf { it.isNotEmpty() }
+                )
             }.ifEmpty {
                 listOf(Session("1", "新会话", System.currentTimeMillis(), emptyList()))
             }
@@ -142,11 +150,13 @@ object ChatStore {
                 mArr.put(o)
             }
             arr.put(
-                JSONObject()
+                (JSONObject()
                     .put("id", s.id)
                     .put("title", s.title)
                     .put("updatedAt", s.updatedAt)
                     .put("messages", mArr)
+                    as JSONObject)
+                    .apply { s.systemPrompt?.let { put("systemPrompt", it) } }
             )
         }
         root.put("sessions", arr)

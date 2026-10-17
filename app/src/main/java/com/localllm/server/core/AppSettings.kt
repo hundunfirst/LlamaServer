@@ -297,6 +297,52 @@ object AppSettings {
         get() = prefs.getInt("search_max_calls", 3)
         set(value) = prefs.edit().putInt("search_max_calls", value).apply()
 
+    /** 助手指令（system prompt）预设：{id,name,text} 列表 */
+    var sysPresetsJson: String
+        get() = prefs.getString("sys_prompt_presets", "") ?: ""
+        set(value) = prefs.edit().putString("sys_prompt_presets", value).apply()
+
+    /** 当前全局启用的预设 id（空 = 使用默认预设） */
+    var activeSysPresetId: String
+        get() = prefs.getString("sys_prompt_active", "") ?: ""
+        set(value) = prefs.edit().putString("sys_prompt_active", value).apply()
+
+    fun loadSysPresets(): List<SysPreset> {
+        val raw = sysPresetsJson
+        val parsed = runCatching {
+            val arr = org.json.JSONArray(raw)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val id = o.optString("id").ifBlank { java.util.UUID.randomUUID().toString() }
+                SysPreset(id, o.optString("name").ifBlank { "预设" }, o.optString("text"))
+            }
+        }.getOrDefault(emptyList())
+        return parsed.ifEmpty { defaultSysPresets() }
+    }
+
+    fun saveSysPresets(list: List<SysPreset>) {
+        val arr = org.json.JSONArray()
+        list.forEach { p ->
+            arr.put(org.json.JSONObject().put("id", p.id).put("name", p.name).put("text", p.text))
+        }
+        sysPresetsJson = arr.toString()
+    }
+
+    /** 当前生效的全局系统提示词（空串 = 不加任何指令） */
+    fun activeSysPrompt(): String {
+        val list = loadSysPresets()
+        val id = activeSysPresetId
+        return (list.find { it.id == id } ?: list.firstOrNull())?.text.orEmpty()
+    }
+
+    private fun defaultSysPresets(): List<SysPreset> = listOf(
+        SysPreset("default", "默认（不额外指令）", ""),
+        SysPreset("concise", "简洁直接", "回答尽量简短直接，先说结论，必要时才展开。"),
+        SysPreset("rigorous", "严谨求证", "严谨作答：不确定的内容要明确标注不确定，避免编造；必要时说明依据。"),
+        SysPreset("translate", "翻译助手", "你是翻译助手：默认把用户输入翻译成中文（若输入是中文则翻译成英文），只输出译文，不加解释。"),
+        SysPreset("coding", "编程助手", "你是编程助手：给可运行的代码与必要的说明，代码用 Markdown 代码块并标注语言；优先指出潜在 bug 与边界条件。")
+    )
+
     /** 搜索时是否抓取结果页正文（提升回答质量，代价是每次搜索多 1~3 秒） */
     var searchFetchFullText: Boolean
         get() = prefs.getBoolean("search_fetch_full", true)
@@ -434,3 +480,6 @@ data class LocalModelParam(
     /** 投影文件绝对路径；空串=跟全局；"none"=明确不用 */
     val mmproj: String? = null
 )
+
+/** 助手指令预设 */
+data class SysPreset(val id: String, val name: String, val text: String)
