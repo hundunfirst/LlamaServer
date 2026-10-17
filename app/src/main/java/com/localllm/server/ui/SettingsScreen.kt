@@ -124,6 +124,57 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             })
         }
 
+        // ---- 文件工具（授权目录）----
+        val fileCtx = androidx.compose.ui.platform.LocalContext.current
+        var fileOn by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.fileToolsEnabled)
+        }
+        var workDirName by remember {
+            mutableStateOf(com.localllm.server.core.FileTools.rootName(fileCtx) ?: "")
+        }
+        val treeLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree()
+        ) { uri ->
+            if (uri != null) {
+                runCatching {
+                    fileCtx.contentResolver.takePersistableUriPermission(
+                        uri,
+                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    )
+                }
+                com.localllm.server.core.AppSettings.workDirTreeUri = uri.toString()
+                workDirName = com.localllm.server.core.FileTools.rootName(fileCtx)
+                    ?: (uri.lastPathSegment ?: "")
+                fileOn = true
+                com.localllm.server.core.AppSettings.fileToolsEnabled = true
+                com.localllm.server.core.ServerProcessManager.appLog("已授权工作目录：$workDirName")
+            }
+        }
+        SectionHeader(
+            title = "文件工具（授权目录）",
+            help = "授权一个文件夹后，模型可用 file_list / file_read / file_write / file_grep 在该目录内读写检索；" +
+                    "写入自动建子目录。仅能访问你授权的目录，其他位置不可见。适合让它生成 HTML/代码/表格文件并直接落盘。",
+            titleStyle = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (workDirName.isBlank()) "未授权目录" else "当前目录：$workDirName",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            OutlinedButton(onClick = { treeLauncher.launch(null) }) { Text("选择目录") }
+        }
+        QuickChips(
+            options = listOf("true" to "开启", "false" to "关闭"),
+            current = fileOn.toString()
+        ) { v ->
+            fileOn = v.toBoolean()
+            com.localllm.server.core.AppSettings.fileToolsEnabled = fileOn
+        }
+
         // ---- 任务清单工具 ----
         var todoOn by remember {
             mutableStateOf(com.localllm.server.core.AppSettings.todoToolEnabled)

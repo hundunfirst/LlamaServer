@@ -415,6 +415,15 @@ object AppSettings {
         get() = prefs.getBoolean("todo_tool_enabled", true)
         set(value) = prefs.edit().putBoolean("todo_tool_enabled", value).apply()
 
+    /** 文件工具开关与授权的根目录（SAF tree uri） */
+    var fileToolsEnabled: Boolean
+        get() = prefs.getBoolean("file_tools_enabled", false)
+        set(value) = prefs.edit().putBoolean("file_tools_enabled", value).apply()
+
+    var workDirTreeUri: String
+        get() = prefs.getString("work_dir_tree", "") ?: ""
+        set(value) = prefs.edit().putString("work_dir_tree", value).apply()
+
     /** 已弹窗提示过的更新版本（避免每次启动重复提示） */
     var lastPromptedUpdateVersion: String
         get() = prefs.getString("last_prompted_update", "") ?: ""

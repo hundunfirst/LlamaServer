@@ -7,6 +7,7 @@ import com.localllm.server.core.AppSettings
 import com.localllm.server.core.ChatClient
 import com.localllm.server.core.ChatStore
 import com.localllm.server.core.DocExtract
+import com.localllm.server.core.FileTools
 import com.localllm.server.core.McpHttpClient
 import com.localllm.server.core.OcrEngine
 import com.localllm.server.core.ServerProcessManager
@@ -284,6 +285,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // LaTeX 已有客户端转换器兜底，不再要求模型禁用。
                 val searchOn = AppSettings.webSearchEnabled
                 val todoOn = AppSettings.todoToolEnabled
+                val fileOn = AppSettings.fileToolsEnabled && AppSettings.workDirTreeUri.isNotBlank()
                 // 隐私护栏：本轮用户消息含图片（可能是身份证/证件等敏感件）→ 不注入任何联网搜索工具，
                 // 并把模型幻觉出的 web_search 调用靠白名单挡掉（OCR 文字不会流向搜索引擎）。
                 val turnHasImage = _messages.value.dropLast(1).lastOrNull()?.imageB64 != null
@@ -299,13 +301,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 助手指令：会话级覆盖优先，否则用全局预设
                 val sessionPrompt = _sessions.value.find { it.id == _activeId.value }?.systemPrompt
                 val basePrompt = sessionPrompt ?: AppSettings.activeSysPrompt()
+                val fileHint = if (fileOn) {
+                    "如需生成文件（如 HTML/代码/表格），请用 file_write 直接写入工作目录，并在回答里告知文件名；" +
+                            "需要查看已有文件时用 file_list / file_read / file_grep。"
+                } else ""
                 val todoHint = if (todoOn) {
                     "多步任务可先用 todo_write 列出计划（同一消息最多 3 次），随后必须在正文中直接给出实际产出（代码/文件内容），" +
                             "绝不能用「已完成…」之类的进度描述代替真正的内容。"
                 } else ""
                 val systemText = (if (basePrompt.isNotBlank())
                     "【本会话角色设定，优先遵守】" + basePrompt + " "
-                else "") + todoHint +
+                else "") + todoHint + fileHint +
                         (if (AppSettings.thinkEnabled) {
                     "用中文简洁回答。"
                 } else {
@@ -436,6 +442,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val toolsJson = org.json.JSONArray().also { arr ->
                     if (searchAvailable) arr.put(WebSearch.toolJson())
                     if (todoOn) arr.put(TodoTool.toolJson())
+                    if (fileOn) FileTools.toolsJson().let { fa ->
+                        for (i in 0 until fa.length()) arr.put(fa.getJSONObject(i))
+                    }
                     for (i in 0 until mcpAgg.length()) arr.put(mcpAgg.getJSONObject(i))
                 }.takeIf { it.length() > 0 }
                 // 搜索配额用尽后本轮请求不带 web_search：模型无工具可调，只能产出文本回答
@@ -448,7 +457,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             (if (cloud) "云端 ${AppSettings.chatCloudModel.ifBlank { "default" }}" else "本地") +
                             " · 历史 ${payloadMsgs.size - 1} 条" +
                             (toolsJson?.let { " · 工具 ${it.length()} 个" } ?: "") +
-                            (if (searchAvailable) " · 搜索开" else "") + "）"
+                            (if (searchAvailable) " · 搜索开" else "") +
+                            (if (fileOn) " · 文件工具" else "") + "）"
                 )
 
                 // 真实注入过的工具名白名单：模型幻觉出来的工具调用一律不执行（直接结束本轮）
@@ -710,6 +720,26 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                         "任务清单已更新（${done}/${todos.size} 完成）。请继续在正文中产出实际内容，完成后再次调用 ${TodoTool.NAME} 更新状态。"
                                     }
                                 }
+                            } else if (fileOn && tc.name in FileTools.NAMES) {
+                                val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                ServerProcessManager.appLog("文件工具：${tc.name}")
+                                val r = FileTools.execute(
+                                    getApplication(),
+                                    tc.name,
+                                    args
+                                )
+                                val detail = when (tc.name) {
+                                    FileTools.TOOL_WRITE ->
+                                        "写入 " + args.optString("path") + "（" + r.length + "）"
+                                    FileTools.TOOL_READ ->
+                                        "读取 " + args.optString("path")
+                                    FileTools.TOOL_LIST -> "列出目录"
+                                    else -> "搜索「" + args.optString("pattern") + "」"
+                                }
+                                steps.add(ChatStore.Step("tool", "文件：${tc.name}", detail.take(120)))
+                                syncSteps()
+                                ServerProcessManager.appLog("文件工具完成：$detail")
+                                r
                             } else if (tc.name == "web_search") {
                                 val query = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                                     .optString("query")
