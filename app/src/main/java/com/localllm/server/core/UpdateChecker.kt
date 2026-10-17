@@ -17,6 +17,20 @@ object UpdateChecker {
         val notes: String
     )
 
+    /** 语义化版本比较：remote > current 返回 true（按 x.y.z 数值比较） */
+    internal fun isNewer(remote: String, current: String): Boolean {
+        fun parts(v: String): List<Int> =
+            v.split('.', '-', '+').mapNotNull { it.toIntOrNull() }.ifEmpty { listOf(0) }
+        val a = parts(remote)
+        val b = parts(current)
+        for (i in 0 until maxOf(a.size, b.size)) {
+            val x = a.getOrElse(i) { 0 }
+            val y = b.getOrElse(i) { 0 }
+            if (x != y) return x > y
+        }
+        return false
+    }
+
     suspend fun check(currentVersion: String): Info? = withContext(Dispatchers.IO) {
         runCatching {
             val conn = URL("https://api.github.com/repos/hundunfirst/LlamaServer/releases/latest")
@@ -33,7 +47,8 @@ object UpdateChecker {
             }
             val o = JSONObject(body)
             val tag = o.optString("tag_name").removePrefix("v").trim()
-            if (tag.isBlank() || tag == currentVersion) return@runCatching null
+            // 只有远程版本更高才算更新（避免开发版比线上新时误报"可降级"）
+            if (tag.isBlank() || !isNewer(tag, currentVersion)) return@runCatching null
             val assets = o.optJSONArray("assets")
             val apkUrl = (0 until (assets?.length() ?: 0))
                 .mapNotNull { assets!!.optJSONObject(it) }
