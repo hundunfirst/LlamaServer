@@ -1,9 +1,9 @@
-# 本地推理服务（LlamaServer）
+# 混沌智核（HunDun AI · LlamaServer）
 
 Android 手机上的本地 LLM 推理服务 APP：导入 GGUF 模型 → 后台拉起 llama-server →
 在 `127.0.0.1:8080/v1` 暴露 OpenAI 兼容接口，供 Rikkahub 等 AI 客户端 / MCP 生态调用。
 
-- 包名：`com.localllm.server`，中文名「本地推理服务」
+- 包名：`com.localllm.server`，中文名「混沌智核」，英文副名 HunDun AI
 - 协议：MIT（llama.cpp 及其依赖均为 MIT / 公有领域）
 - 目标设备：arm64-v8a，Android 12+（minSdk 31，targetSdk 28——原因见架构文档）
 
