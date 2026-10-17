@@ -25,8 +25,8 @@ android {
         // untrusted_app_28 仍允许，Termux（targetSdk=28）在 Android 17 上同样依赖该域。
         // 若未来改用 JNI/fork 进程内方案，可再提升 targetSdk。
         targetSdk = 28
-        versionCode = 6
-        versionName = "0.3.3"
+        versionCode = 7
+        versionName = "0.3.4"
         ndk {
             abiFilters += "arm64-v8a"
         }

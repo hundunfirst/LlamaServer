@@ -490,6 +490,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         refreshModels()
     }
 
+    /** 启动自动检查到的新版本（非空时 Root 弹窗提示） */
+    private val _autoUpdate = MutableStateFlow<com.localllm.server.core.UpdateChecker.Info?>(null)
+    val autoUpdate: StateFlow<com.localllm.server.core.UpdateChecker.Info?> = _autoUpdate.asStateFlow()
+
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val app = getApplication<Application>()
+                val ver = app.packageManager.getPackageInfo(app.packageName, 0).versionName ?: ""
+                val info = com.localllm.server.core.UpdateChecker.check(ver)
+                if (info != null && info.version != AppSettings.lastPromptedUpdateVersion) {
+                    _autoUpdate.value = info
+                    ServerProcessManager.appLog("发现新版本 v${info.version}（自动检查）")
+                }
+            }
+        }
+    }
+
+    fun dismissAutoUpdate(neverAgainForThisVersion: Boolean) {
+        if (neverAgainForThisVersion) {
+            _autoUpdate.value?.let { AppSettings.lastPromptedUpdateVersion = it.version }
+        }
+        _autoUpdate.value = null
+    }
+
     fun startServer() {
         val modelPath = _selectedModel.value
         if (modelPath == null) {

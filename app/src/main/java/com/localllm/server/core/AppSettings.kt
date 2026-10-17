@@ -343,6 +343,11 @@ object AppSettings {
         SysPreset("coding", "编程助手", "你是编程助手：给可运行的代码与必要的说明，代码用 Markdown 代码块并标注语言；优先指出潜在 bug 与边界条件。")
     )
 
+    /** 已弹窗提示过的更新版本（避免每次启动重复提示） */
+    var lastPromptedUpdateVersion: String
+        get() = prefs.getString("last_prompted_update", "") ?: ""
+        set(value) = prefs.edit().putString("last_prompted_update", value).apply()
+
     /** 搜索时是否抓取结果页正文（提升回答质量，代价是每次搜索多 1~3 秒） */
     var searchFetchFullText: Boolean
         get() = prefs.getBoolean("search_fetch_full", true)

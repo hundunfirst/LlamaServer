@@ -227,71 +227,6 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         // ---- MCP 服务器（实验，stdio 型，llama-server 内置客户端） ----
         McpSection()
 
-        // ---- 版本与更新 ----
-        val appCtx = androidx.compose.ui.platform.LocalContext.current
-        val appVer = remember {
-            runCatching {
-                appCtx.packageManager.getPackageInfo(appCtx.packageName, 0).versionName
-            }.getOrNull() ?: "?"
-        }
-        var updateInfo by remember {
-            mutableStateOf<com.localllm.server.core.UpdateChecker.Info?>(null)
-        }
-        var checking by remember { mutableStateOf(false) }
-        val updateScope = androidx.compose.runtime.rememberCoroutineScope()
-        SectionHeader(
-            title = "版本与更新",
-            help = "从 GitHub Releases 检查新版本。发现新版会显示更新说明，点「下载」用浏览器下载 APK，安装由系统确认。",
-            titleStyle = MaterialTheme.typography.bodyLarge,
-            modifier = Modifier.padding(top = 8.dp)
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("当前版本：v$appVer", style = MaterialTheme.typography.bodyMedium)
-            Spacer(modifier = Modifier.width(12.dp))
-            OutlinedButton(
-                onClick = {
-                    checking = true
-                    updateScope.launch {
-                        val info = com.localllm.server.core.UpdateChecker.check(appVer)
-                        checking = false
-                        if (info == null) {
-                            android.widget.Toast.makeText(
-                                appCtx, "已是最新版本", android.widget.Toast.LENGTH_SHORT
-                            ).show()
-                        } else {
-                            updateInfo = info
-                        }
-                    }
-                },
-                enabled = !checking
-            ) { Text(if (checking) "检查中…" else "检查更新") }
-        }
-        updateInfo?.let { info ->
-            AlertDialog(
-                onDismissRequest = { updateInfo = null },
-                title = { Text("发现新版本 v${info.version}") },
-                text = {
-                    Column(Modifier.verticalScroll(rememberScrollState())) {
-                        Text(info.notes.take(600), style = MaterialTheme.typography.bodySmall)
-                    }
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        runCatching {
-                            appCtx.startActivity(
-                                android.content.Intent(
-                                    android.content.Intent.ACTION_VIEW,
-                                    android.net.Uri.parse(info.apkUrl)
-                                )
-                            )
-                        }
-                        updateInfo = null
-                    }) { Text("下载") }
-                },
-                dismissButton = { TextButton(onClick = { updateInfo = null }) { Text("稍后") } }
-            )
-        }
-
         // 上下文长度：只读下拉（点箭头/字段只出选项，不弹输入法）+ 自定义值
         var ctxExpanded by remember { mutableStateOf(false) }
         var customCtxOpen by remember { mutableStateOf(false) }
@@ -484,6 +419,72 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 TextButton(onClick = { vm.generateToken() }) { Text("生成随机令牌") }
             }
         }
+
+        // ---- 版本与更新 ----
+        val appCtx = androidx.compose.ui.platform.LocalContext.current
+        val appVer = remember {
+            runCatching {
+                appCtx.packageManager.getPackageInfo(appCtx.packageName, 0).versionName
+            }.getOrNull() ?: "?"
+        }
+        var updateInfo by remember {
+            mutableStateOf<com.localllm.server.core.UpdateChecker.Info?>(null)
+        }
+        var checking by remember { mutableStateOf(false) }
+        val updateScope = androidx.compose.runtime.rememberCoroutineScope()
+        SectionHeader(
+            title = "版本与更新",
+            help = "从 GitHub Releases 检查新版本。发现新版会显示更新说明，点「下载」用浏览器下载 APK，安装由系统确认。",
+            titleStyle = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("当前版本：v$appVer", style = MaterialTheme.typography.bodyMedium)
+            Spacer(modifier = Modifier.width(12.dp))
+            OutlinedButton(
+                onClick = {
+                    checking = true
+                    updateScope.launch {
+                        val info = com.localllm.server.core.UpdateChecker.check(appVer)
+                        checking = false
+                        if (info == null) {
+                            android.widget.Toast.makeText(
+                                appCtx, "已是最新版本", android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            updateInfo = info
+                        }
+                    }
+                },
+                enabled = !checking
+            ) { Text(if (checking) "检查中…" else "检查更新") }
+        }
+        updateInfo?.let { info ->
+            AlertDialog(
+                onDismissRequest = { updateInfo = null },
+                title = { Text("发现新版本 v${info.version}") },
+                text = {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        Text(info.notes.take(600), style = MaterialTheme.typography.bodySmall)
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        runCatching {
+                            appCtx.startActivity(
+                                android.content.Intent(
+                                    android.content.Intent.ACTION_VIEW,
+                                    android.net.Uri.parse(info.apkUrl)
+                                )
+                            )
+                        }
+                        updateInfo = null
+                    }) { Text("下载") }
+                },
+                dismissButton = { TextButton(onClick = { updateInfo = null }) { Text("稍后") } }
+            )
+        }
+
 
         Spacer(modifier = Modifier.height(80.dp))
         }

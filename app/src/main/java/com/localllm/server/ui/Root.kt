@@ -1,6 +1,8 @@
 package com.localllm.server.ui
 
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Download
@@ -55,6 +57,44 @@ fun Root(vm: MainViewModel) {
             snackbarHostState.showSnackbar(saveMsg!!)
             vm.clearSaveMessage()
         }
+    }
+
+    // 启动自动检查到新版本 → 弹窗（同一版本只提示一次）
+    val autoUpdate by vm.autoUpdate.collectAsStateWithLifecycle()
+    autoUpdate?.let { info ->
+        val upCtx = androidx.compose.ui.platform.LocalContext.current
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { vm.dismissAutoUpdate(true) },
+            title = { androidx.compose.material3.Text("发现新版本 v${info.version}") },
+            text = {
+                androidx.compose.foundation.layout.Column(
+                    modifier = androidx.compose.ui.Modifier.verticalScroll(rememberScrollState())
+                ) {
+                    androidx.compose.material3.Text(
+                        info.notes.take(600),
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall
+                    )
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    runCatching {
+                        upCtx.startActivity(
+                            android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse(info.apkUrl)
+                            )
+                        )
+                    }
+                    vm.dismissAutoUpdate(true)
+                }) { androidx.compose.material3.Text("下载更新") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { vm.dismissAutoUpdate(true) }) {
+                    androidx.compose.material3.Text("稍后")
+                }
+            }
+        )
     }
 
     Scaffold(
