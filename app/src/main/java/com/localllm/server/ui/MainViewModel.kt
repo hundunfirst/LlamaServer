@@ -7,6 +7,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.localllm.server.App
 import com.localllm.server.core.AppSettings
+import com.localllm.server.core.GgufInfo
+import com.localllm.server.core.GgufInspector
+import com.localllm.server.core.GgufKind
 import com.localllm.server.core.HfMirrorClient
 import com.localllm.server.core.ModelFile
 import com.localllm.server.core.ServerProcessManager
@@ -53,6 +56,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _projectors = MutableStateFlow<List<ModelFile>>(emptyList())
     val projectors: StateFlow<List<ModelFile>> = _projectors.asStateFlow()
+
+    /** 每个 gguf 文件的头部判定结果（主模型 / 投影器 / 草稿…），按路径索引 */
+    private val _ggufInfo = MutableStateFlow<Map<String, GgufInfo>>(emptyMap())
+    val ggufInfo: StateFlow<Map<String, GgufInfo>> = _ggufInfo.asStateFlow()
 
     private val _selectedModel = MutableStateFlow<String?>(AppSettings.selectedModelPath)
     val selectedModel: StateFlow<String?> = _selectedModel.asStateFlow()
@@ -124,7 +131,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val paused: Boolean = false,
         val repoId: String = "",
         val filePath: String = "",
-        val asProjector: Boolean = false
+        val asProjector: Boolean = false,
+        /** 完成时按 GGUF 头判定的提示（如"这是草稿模型"） */
+        val note: String? = null
     )
 
     private val _downloads = MutableStateFlow<List<DownloadState>>(emptyList())
@@ -288,12 +297,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }.onSuccess {
                 poller.cancel(); pollerJobs.remove(id); targetFiles.remove(id)
+                // 按 GGUF 头核对下载类型：选错类别（草稿当主模型 / 主模型当投影器）时别自动选中
+                val info = GgufInspector.inspect(target)
+                val note = when {
+                    !asProjector && !info.isLoadableAsModel -> info.warning
+                    asProjector && info.kind == GgufKind.MAIN -> "这其实是主模型，不是投影器；已放到投影目录"
+                    else -> null
+                }
+                val autoSelect = note == null || asProjector || info.isLoadableAsModel
                 _downloads.value = _downloads.value.map {
-                    if (it.id == id) it.copy(finished = true, speedBps = 0) else it
+                    if (it.id == id) it.copy(finished = true, speedBps = 0, note = note) else it
                 }
                 refreshModels()
                 val model = ModelFile(target.name, file = target, sizeBytes = target.length())
-                if (asProjector) selectMmproj(model) else selectModel(model)
+                if (asProjector) selectMmproj(model) else if (autoSelect) selectModel(model)
                 persistDownloads()
             }.onFailure { e ->
                 poller.cancel(); pollerJobs.remove(id); targetFiles.remove(id)
@@ -454,6 +471,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (mmproj != null && _projectors.value.none { it.file.absolutePath == mmproj }) {
             AppSettings.selectedMmprojPath = null
             _selectedMmproj.value = null
+        }
+        // 逐个读 GGUF 头，标出"草稿/投影器"这类不能当主模型的文件（IO 线程，带缓存）
+        viewModelScope.launch {
+            val all = list + _projectors.value
+            _ggufInfo.value = all.associate { it.file.absolutePath to GgufInspector.inspect(it.file) }
         }
     }
 

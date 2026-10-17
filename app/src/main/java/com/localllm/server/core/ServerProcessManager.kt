@@ -202,6 +202,16 @@ object ServerProcessManager {
                 _state.value = ServerUiState(status = ServerUiState.Status.ERROR, message = "模型文件不存在: $modelPath")
                 return
             }
+            // 主模型校验：草稿/投影器/适配器当主模型加载必定失败，这里直接拦下说清楚原因
+            val gi = GgufInspector.inspectBlocking(File(modelPath))
+            if (!gi.isLoadableAsModel) {
+                appendLog("错误：${gi.warning}")
+                _state.value = ServerUiState(
+                    status = ServerUiState.Status.ERROR,
+                    message = gi.warning ?: "这个文件不能作为主模型加载"
+                )
+                return
+            }
 
             // 绑定地址：局域网模式必须 0.0.0.0（否则手机本机客户端连不上回环）
             val bindHost = if (lanEnabled) "0.0.0.0" else "127.0.0.1"

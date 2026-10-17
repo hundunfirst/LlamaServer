@@ -358,7 +358,19 @@ private fun DownloadCard(
                 state.error != null ->
                     Text("失败：${state.error}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 state.finished ->
-                    Text("✅ 完成，已自动选中（可在模型页调整）", color = MaterialTheme.colorScheme.primary)
+                    Column {
+                        Text(
+                            if (state.note == null) "✅ 完成，已自动选中（可在模型页调整）" else "✅ 已下载",
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        state.note?.let {
+                            Text(
+                                "⚠ $it",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
                 else -> {
                     if (state.totalBytes > 0) {
                         LinearProgressIndicator(

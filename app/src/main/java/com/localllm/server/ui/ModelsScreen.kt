@@ -44,6 +44,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.localllm.server.core.GgufInfo
+import com.localllm.server.core.GgufKind
 import com.localllm.server.core.ModelFile
 import com.localllm.server.core.AppSettings
 import com.localllm.server.core.LocalModelParam
@@ -52,6 +54,7 @@ import com.localllm.server.core.LocalModelParam
 fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val models by vm.models.collectAsStateWithLifecycle()
     val projectors by vm.projectors.collectAsStateWithLifecycle()
+    val ggufInfo by vm.ggufInfo.collectAsStateWithLifecycle()
     val selected by vm.selectedModel.collectAsStateWithLifecycle()
     val selectedMmproj by vm.selectedMmproj.collectAsStateWithLifecycle()
     val importing by vm.importing.collectAsStateWithLifecycle()
@@ -159,7 +162,8 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     onSelect = { vm.selectModel(model) },
                     onDelete = { vm.deleteModel(model) },
                     onRename = { mm -> renameText = AppSettings.aliasFor(mm.file.absolutePath) ?: mm.name; renamingModel = mm },
-                    onParams = { paramModel = it }
+                    onParams = { paramModel = it },
+                    info = ggufInfo[model.file.absolutePath]
                 )
             }
 
@@ -191,7 +195,9 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     onSelect = { vm.selectMmproj(proj) },
                     onDelete = { vm.deleteModel(proj) },
                     onRename = { mm -> renameText = AppSettings.aliasFor(mm.file.absolutePath) ?: mm.name; renamingModel = mm },
-                    onParams = { paramModel = it }
+                    onParams = { paramModel = it },
+                    info = ggufInfo[proj.file.absolutePath],
+                    expected = GgufKind.MMPROJ
                 )
             }
             if (projectors.isEmpty()) {
@@ -209,7 +215,16 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
 
 @Composable
 private fun ModelCard(model: ModelFile, selected: Boolean, onSelect: () -> Unit, onDelete: () -> Unit,
-                      onRename: (ModelFile) -> Unit = {}, onParams: (ModelFile) -> Unit = {}) {
+                      onRename: (ModelFile) -> Unit = {}, onParams: (ModelFile) -> Unit = {},
+                      info: GgufInfo? = null, expected: GgufKind = GgufKind.MAIN) {
+    // 只在"放错类别"时提示：对话区里出现草稿/投影器，或投影区里出现主模型
+    val mismatch: String? = when {
+        info == null -> null
+        info.kind == expected -> null
+        info.kind == GgufKind.UNKNOWN -> null
+        expected == GgufKind.MMPROJ && info.kind == GgufKind.MAIN -> "这个文件其实是主模型，不是投影器"
+        else -> info.warning
+    }
     val alias = AppSettings.aliasFor(model.file.absolutePath)
     val custom = AppSettings.localModelParam(model.file.absolutePath) != null
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -227,6 +242,14 @@ private fun ModelCard(model: ModelFile, selected: Boolean, onSelect: () -> Unit,
                     color = if (custom) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                // 头部判定：放错类别时提示（对话区里出现草稿/投影器，或投影区里出现主模型）
+                mismatch?.let {
+                    Text(
+                        "⚠ $it",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
             }
             IconButton(onClick = { onParams(model) }) {
                 Icon(
