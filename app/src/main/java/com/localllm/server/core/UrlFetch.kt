@@ -101,5 +101,5 @@ object UrlFetch {
 
     /** 从用户文本中提取第一个 http(s) 链接 */
     fun firstUrl(text: String): String? =
-        Regex("""https?://[^\s，。；、）)】"'<>]+""").find(text)?.value
+        Regex("""https?://[^\s，。；、）)】"'<>\u4e00-\u9fff\u3000-\u303f]+""").find(text)?.value
 }

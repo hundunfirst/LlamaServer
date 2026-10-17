@@ -262,14 +262,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }) + if (searchAvailable) {
                     "今天是${today}。涉及最新信息时，先用 web_search 工具联网查询再回答，不要臆造日期。"
                 } else ""
-                // 用户最后一条消息里若含链接 → 抓取内容注入上下文（GitHub 走 README 特判）
-                val linkContext: List<ChatClient.ChatMessage> = run {
+                // 用户最后一条消息里若含链接 → 抓取内容（GitHub 走 README 特判）
+                // 注意：内容必须并入首条 system 文案——部分模板（Qwen）要求 system 只能在开头
+                val linkText: String? = run {
                     val lastUserText = _messages.value.dropLast(1)
-                        .lastOrNull { it.role == "user" }?.content ?: return@run emptyList()
-                    val url = UrlFetch.firstUrl(lastUserText) ?: return@run emptyList()
+                        .lastOrNull { it.role == "user" }?.content ?: return@run null
+                    val url = UrlFetch.firstUrl(lastUserText) ?: return@run null
                     val cached = linkCache[url]
                     val now = System.currentTimeMillis()
-                    val text = if (cached != null && now - cached.first < 10 * 60_000L) {
+                    if (cached != null && now - cached.first < 10 * 60_000L) {
                         cached.second
                     } else {
                         val fetched = UrlFetch.fetch(url)
@@ -285,13 +286,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             null
                         }
                     }
-                    if (text == null) emptyList()
-                    else listOf(
-                        ChatClient.ChatMessage(
-                            "system",
-                            "以下是用户消息中链接的内容（供回答参考，可能不完整）：\n" + text
-                        )
-                    )
                 }
 
                 val history = _messages.value.dropLast(1)
@@ -305,8 +299,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     else -> !visionReady
                 }
                 var ocrLogged = false
-                val payloadMsgs = listOf(ChatClient.ChatMessage("system", systemText)) +
-                        linkContext +
+                val systemTextFull = if (linkText == null) systemText
+                else systemText + "\n\n【用户消息中链接的内容（供回答参考，可能不完整）】\n" + linkText
+                val payloadMsgs = listOf(ChatClient.ChatMessage("system", systemTextFull)) +
                         history.map { m ->
                             if (m.imageB64 != null) {
                                 if (useOcr) {
