@@ -124,6 +124,69 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             })
         }
 
+        // ---- 长期记忆 ----
+        val memCtx = androidx.compose.ui.platform.LocalContext.current
+        var memOn by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.memoryEnabled)
+        }
+        var memText by remember { mutableStateOf("") }
+        var showMem by remember { mutableStateOf(false) }
+        SectionHeader(
+            title = "长期记忆",
+            help = "把关于你的长期信息（偏好/背景/称呼）保存在本地 memory.md，每次对话自动注入；" +
+                    "模型在你说「记住…」时会用 memory_write 工具追加。仅存本机，不上传。可随时清空。",
+            titleStyle = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                com.localllm.server.core.MemoryStore.load(memCtx).size.let { "$it 条记忆" },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            OutlinedButton(onClick = {
+                memText = com.localllm.server.core.MemoryStore.load(memCtx).joinToString("\n")
+                showMem = true
+            }) { Text("查看/编辑") }
+        }
+        QuickChips(
+            options = listOf("true" to "开启", "false" to "关闭"),
+            current = memOn.toString()
+        ) { v ->
+            memOn = v.toBoolean()
+            com.localllm.server.core.AppSettings.memoryEnabled = memOn
+        }
+        if (showMem) {
+            AlertDialog(
+                onDismissRequest = { showMem = false },
+                title = { Text("长期记忆") },
+                text = {
+                    CompactFieldMultiline(
+                        value = memText,
+                        onValueChange = { memText = it },
+                        label = "每行一条（可直接编辑）",
+                        minHeight = 220
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        runCatching {
+                            java.io.File(memCtx.filesDir, "memory.md").writeText(memText)
+                        }
+                        showMem = false
+                    }) { Text("保存") }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        com.localllm.server.core.MemoryStore.clear(memCtx)
+                        memText = ""
+                        showMem = false
+                    }) { Text("清空", color = MaterialTheme.colorScheme.error) }
+                }
+            )
+        }
+
         // ---- 文件工具（授权目录）----
         val fileCtx = androidx.compose.ui.platform.LocalContext.current
         var fileOn by remember {

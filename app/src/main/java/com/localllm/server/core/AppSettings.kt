@@ -415,6 +415,11 @@ object AppSettings {
         get() = prefs.getBoolean("todo_tool_enabled", true)
         set(value) = prefs.edit().putBoolean("todo_tool_enabled", value).apply()
 
+    /** 长期记忆开关（注入 + memory_write 工具） */
+    var memoryEnabled: Boolean
+        get() = prefs.getBoolean("memory_enabled", true)
+        set(value) = prefs.edit().putBoolean("memory_enabled", value).apply()
+
     /** 文件工具开关与授权的根目录（SAF tree uri） */
     var fileToolsEnabled: Boolean
         get() = prefs.getBoolean("file_tools_enabled", false)

@@ -9,6 +9,7 @@ import com.localllm.server.core.ChatStore
 import com.localllm.server.core.DocExtract
 import com.localllm.server.core.FileTools
 import com.localllm.server.core.McpHttpClient
+import com.localllm.server.core.MemoryStore
 import com.localllm.server.core.OcrEngine
 import com.localllm.server.core.ServerProcessManager
 import com.localllm.server.core.ServerUiState
@@ -286,6 +287,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val searchOn = AppSettings.webSearchEnabled
                 val todoOn = AppSettings.todoToolEnabled
                 val fileOn = AppSettings.fileToolsEnabled && AppSettings.workDirTreeUri.isNotBlank()
+                val memoryOn = AppSettings.memoryEnabled
                 // 隐私护栏：本轮用户消息含图片（可能是身份证/证件等敏感件）→ 不注入任何联网搜索工具，
                 // 并把模型幻觉出的 web_search 调用靠白名单挡掉（OCR 文字不会流向搜索引擎）。
                 val turnHasImage = _messages.value.dropLast(1).lastOrNull()?.imageB64 != null
@@ -301,6 +303,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 助手指令：会话级覆盖优先，否则用全局预设
                 val sessionPrompt = _sessions.value.find { it.id == _activeId.value }?.systemPrompt
                 val basePrompt = sessionPrompt ?: AppSettings.activeSysPrompt()
+                val memoryText = if (memoryOn) MemoryStore.injectText(getApplication()) else ""
+                val memoryHint = if (memoryText.isNotBlank()) {
+                    "\n\n【长期记忆（用户偏好/背景，供参考）】\n" + memoryText
+                } else ""
                 val fileHint = if (fileOn) {
                     "如需生成文件（如 HTML/代码/表格），请用 file_write 直接写入工作目录，并在回答里告知文件名；" +
                             "需要查看已有文件时用 file_list / file_read / file_grep。"
@@ -311,7 +317,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 } else ""
                 val systemText = (if (basePrompt.isNotBlank())
                     "【本会话角色设定，优先遵守】" + basePrompt + " "
-                else "") + todoHint + fileHint +
+                else "") + todoHint + fileHint + memoryHint +
                         (if (AppSettings.thinkEnabled) {
                     "用中文简洁回答。"
                 } else {
@@ -445,6 +451,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (fileOn) FileTools.toolsJson().let { fa ->
                         for (i in 0 until fa.length()) arr.put(fa.getJSONObject(i))
                     }
+                    if (memoryOn) arr.put(MemoryStore.toolJson())
                     for (i in 0 until mcpAgg.length()) arr.put(mcpAgg.getJSONObject(i))
                 }.takeIf { it.length() > 0 }
                 // 搜索配额用尽后本轮请求不带 web_search：模型无工具可调，只能产出文本回答
@@ -719,6 +726,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                         ServerProcessManager.appLog("任务清单更新：$done/${todos.size} 已完成")
                                         "任务清单已更新（${done}/${todos.size} 完成）。请继续在正文中产出实际内容，完成后再次调用 ${TodoTool.NAME} 更新状态。"
                                     }
+                                }
+                            } else if (memoryOn && tc.name == MemoryStore.TOOL_NAME) {
+                                val content = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                    .optString("content")
+                                if (content.isBlank()) {
+                                    "参数无效：content 不能为空"
+                                } else {
+                                    val count = MemoryStore.append(getApplication(), content)
+                                    ServerProcessManager.appLog("长期记忆已写入：${content.take(40)}（共 $count 条）")
+                                    steps.add(ChatStore.Step("tool", "记住：${content.take(30)}", "共 $count 条记忆"))
+                                    syncSteps()
+                                    "已写入长期记忆（当前共 $count 条）。"
                                 }
                             } else if (fileOn && tc.name in FileTools.NAMES) {
                                 val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
