@@ -154,7 +154,9 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         SectionHeader(
             title = "文件工具（授权目录）",
             help = "授权一个文件夹后，模型可用 file_list / file_read / file_write / file_grep 在该目录内读写检索；" +
-                    "写入自动建子目录。仅能访问你授权的目录，其他位置不可见。适合让它生成 HTML/代码/表格文件并直接落盘。",
+                    "写入自动建子目录。仅能访问你授权的目录，其他位置不可见。适合让它生成 HTML/代码/表格文件并直接落盘。\n\n" +
+                    "提示：Android 不允许授权「内部存储根 / Download / Android/data」本身。" +
+                    "请在内部存储根下新建专用文件夹（如 LlamaWork）并选中它，或选择 Download 下的子目录。",
             titleStyle = MaterialTheme.typography.bodyLarge,
             modifier = Modifier.padding(top = 8.dp)
         )
