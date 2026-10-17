@@ -343,6 +343,72 @@ object AppSettings {
         SysPreset("coding", "编程助手", "你是编程助手：给可运行的代码与必要的说明，代码用 Markdown 代码块并标注语言；优先指出潜在 bug 与边界条件。")
     )
 
+    /** 技能模板：{id,name,desc,prompt} 列表（null = 内置默认） */
+    var skillsJson: String
+        get() = prefs.getString("skills", "") ?: ""
+        set(value) = prefs.edit().putString("skills", value).apply()
+
+    fun loadSkills(): List<Skill> {
+        val raw = skillsJson
+        val parsed = runCatching {
+            val arr = org.json.JSONArray(raw)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                Skill(
+                    id = o.optString("id").ifBlank { java.util.UUID.randomUUID().toString() },
+                    name = o.optString("name").ifBlank { "技能" },
+                    desc = o.optString("desc"),
+                    prompt = o.optString("prompt")
+                )
+            }
+        }.getOrDefault(emptyList())
+        return parsed.ifEmpty { defaultSkills() }
+    }
+
+    fun saveSkills(list: List<Skill>) {
+        val arr = org.json.JSONArray()
+        list.forEach { s ->
+            arr.put(
+                org.json.JSONObject()
+                    .put("id", s.id).put("name", s.name)
+                    .put("desc", s.desc).put("prompt", s.prompt)
+            )
+        }
+        skillsJson = arr.toString()
+    }
+
+    private fun defaultSkills(): List<Skill> = listOf(
+        Skill(
+            "sk_summary", "摘要总结", "长文/链接 → 结论+要点",
+            "阅读用户提供的内容并总结：先给一句话结论，再列 3~5 条要点，最后列出关键数据；" +
+                    "不要复述原文，不要加客套。"
+        ),
+        Skill(
+            "sk_translate", "翻译", "中英互译，只出译文",
+            "你是翻译助手：把用户输入翻译成中文（若输入是中文则翻译成英文），只输出译文，不加解释。"
+        ),
+        Skill(
+            "sk_extract", "信息提取", "从文本/图片里抽字段成表格",
+            "从用户提供的内容中提取关键实体与字段，输出 Markdown 表格；" +
+                    "字段缺失时留空并标注「未提及」，不要编造。"
+        ),
+        Skill(
+            "sk_review", "代码审查", "按严重/建议分级列问题",
+            "审查用户提供的代码：按「严重问题 / 改进建议」分级列出，每条给出原因与修复示例；" +
+                    "特别指出边界条件与潜在异常。"
+        ),
+        Skill(
+            "sk_csv", "表格生成", "需求 → CSV 代码块",
+            "把用户需求整理成表格：输出一个 ```csv 代码块（第一行表头，其后数据行），" +
+                    "不要额外解释；如需多表分别输出。"
+        ),
+        Skill(
+            "sk_todo", "任务拆解", "把目标拆成可执行清单",
+            "把用户的目标拆解为可执行步骤清单：每条不超过 20 字，标注优先级（高/中/低）与依赖关系，" +
+                    "输出 Markdown 任务列表（- [ ] 形式）。"
+        )
+    )
+
     /** 已弹窗提示过的更新版本（避免每次启动重复提示） */
     var lastPromptedUpdateVersion: String
         get() = prefs.getString("last_prompted_update", "") ?: ""
@@ -488,3 +554,6 @@ data class LocalModelParam(
 
 /** 助手指令预设 */
 data class SysPreset(val id: String, val name: String, val text: String)
+
+/** 技能模板：一段可复用的助手指令 */
+data class Skill(val id: String, val name: String, val desc: String, val prompt: String)

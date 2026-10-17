@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.List
@@ -60,6 +61,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
@@ -460,6 +462,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     var showSysPrompt by remember { mutableStateOf(false) }
     var previewImageB64 by remember { mutableStateOf<String?>(null) }
     var previewFileName by remember { mutableStateOf("") }
+    var showSkills by remember { mutableStateOf(false) }
     var previewFileText by remember { mutableStateOf("") }
     var showFilePreview by remember { mutableStateOf(false) }
     var sysPromptText by remember { mutableStateOf("") }
@@ -623,6 +626,18 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             confirmButton = {
                 TextButton(onClick = { showFilePreview = false }) { Text("关闭") }
             }
+        )
+    }
+
+    // 技能选择 / 管理
+    if (showSkills) {
+        SkillDialog(
+            onDismiss = { showSkills = false },
+            onApply = { skill ->
+                vm.setSessionSystemPrompt(skill.prompt)
+                showSkills = false
+            },
+            onClear = { vm.setSessionSystemPrompt(null) }
         )
     }
 
@@ -804,6 +819,13 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                         else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                IconButton(onClick = { showSkills = true }) {
+                    Icon(
+                        Icons.Default.AutoAwesome,
+                        contentDescription = "技能",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 IconButton(onClick = {
                     sysPromptText = vm.currentSessionSystemPrompt()
                         ?: com.localllm.server.core.AppSettings.activeSysPrompt()
@@ -972,6 +994,27 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             }
         }
 
+        // 当前生效的技能（会话指令与某技能 prompt 完全一致时显示）
+        val activeSkill = remember(sessions, activeId) {
+            val cur = vm.currentSessionSystemPrompt() ?: return@remember null
+            com.localllm.server.core.AppSettings.loadSkills().firstOrNull { it.prompt == cur }
+        }
+        activeSkill?.let { sk ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "⚡ 技能：${sk.name}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = { vm.setSessionSystemPrompt(null) }) { Text("取消技能") }
+            }
+        }
         pendingFile?.let { f ->
             Row(
                 modifier = Modifier
@@ -1729,5 +1772,128 @@ private fun highlightCode(
             last = m.range.last + 1
         }
         if (last < code.length) append(code.substring(last))
+    }
+}
+
+/** 技能选择/管理弹窗：点技能即写入本会话助手指令 */
+@Composable
+private fun SkillDialog(
+    onDismiss: () -> Unit,
+    onApply: (com.localllm.server.core.Skill) -> Unit,
+    onClear: () -> Unit
+) {
+    var list by remember { mutableStateOf(com.localllm.server.core.AppSettings.loadSkills()) }
+    var editing by remember { mutableStateOf<com.localllm.server.core.Skill?>(null) }
+    var isNew by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("技能") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    "选一个技能会作为本会话的助手指令生效；可随时取消。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                list.forEach { sk ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(
+                            Modifier
+                                .weight(1f)
+                                .clickable { onApply(sk) }
+                                .padding(vertical = 6.dp)
+                        ) {
+                            Text(sk.name, style = MaterialTheme.typography.bodyMedium)
+                            if (sk.desc.isNotBlank()) {
+                                Text(
+                                    sk.desc,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                        TextButton(onClick = {
+                            editing = sk
+                            isNew = false
+                        }) { Text("编辑") }
+                    }
+                }
+                OutlinedButton(onClick = {
+                    editing = com.localllm.server.core.Skill(
+                        java.util.UUID.randomUUID().toString(), "新技能", "", ""
+                    )
+                    isNew = true
+                }) { Text("新增技能") }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                onClear()
+                onDismiss()
+            }) { Text("清除技能") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+
+    editing?.let { sk ->
+        var name by remember(sk.id) { mutableStateOf(sk.name) }
+        var desc by remember(sk.id) { mutableStateOf(sk.desc) }
+        var prompt by remember(sk.id) { mutableStateOf(sk.prompt) }
+        AlertDialog(
+            onDismissRequest = { editing = null },
+            title = { Text(if (isNew) "新增技能" else "编辑技能") },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CompactField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = "名称",
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    CompactField(
+                        value = desc,
+                        onValueChange = { desc = it },
+                        label = "简短说明（列表中显示）",
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    CompactFieldMultiline(
+                        value = prompt,
+                        onValueChange = { prompt = it },
+                        label = "助手指令内容",
+                        minHeight = 140
+                    )
+                    TextButton(onClick = {
+                        if (list.size > 1) {
+                            list = list.filter { it.id != sk.id }
+                            com.localllm.server.core.AppSettings.saveSkills(list)
+                            editing = null
+                        }
+                    }) { Text("删除此技能", color = MaterialTheme.colorScheme.error) }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val updated = sk.copy(
+                        name = name.trim().ifBlank { "技能" },
+                        desc = desc.trim(),
+                        prompt = prompt.trim()
+                    )
+                    val newList = if (isNew) list + updated else list.map { if (it.id == sk.id) updated else it }
+                    list = newList
+                    com.localllm.server.core.AppSettings.saveSkills(newList)
+                    editing = null
+                }) { Text("保存") }
+            },
+            dismissButton = { TextButton(onClick = { editing = null }) { Text("取消") } }
+        )
     }
 }
