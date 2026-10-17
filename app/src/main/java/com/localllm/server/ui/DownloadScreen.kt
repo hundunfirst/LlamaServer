@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,6 +43,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.localllm.server.core.AppSettings
 
 @Composable
 fun DownloadScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
@@ -54,6 +56,7 @@ fun DownloadScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
 
     var query by remember { mutableStateOf("") }
     var pendingFile by remember { mutableStateOf<Pair<String, String>?>(null) } // repo to path
+    var pendingStart by remember { mutableStateOf<(() -> Unit)?>(null) }        // 待免责声明确认的下载动作
     var dlExpanded by remember { mutableStateOf(false) }
     var searchFocused by remember { mutableStateOf(false) }
 
@@ -65,6 +68,11 @@ fun DownloadScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         if (browsingRepo != null) dlExpanded = false
     }
 
+    /** 首次下载前确认免责声明；已确认过则直接开下 */
+    fun startOrConfirm(action: () -> Unit) {
+        if (AppSettings.modelDisclaimerAccepted) action() else pendingStart = action
+    }
+
     pendingFile?.let { (repo, path) ->
         AlertDialog(
             onDismissRequest = { pendingFile = null },
@@ -73,7 +81,7 @@ fun DownloadScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             confirmButton = {
                 TextButton(onClick = {
                     pendingFile = null
-                    vm.startDownload(repo, path, asProjector = false)
+                    startOrConfirm { vm.startDownload(repo, path, asProjector = false) }
                 }) { Text("对话模型") }
             },
             dismissButton = {
@@ -81,15 +89,53 @@ fun DownloadScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     TextButton(onClick = { pendingFile = null }) { Text("取消") }
                     TextButton(onClick = {
                         pendingFile = null
-                        vm.startDownload(repo, path, asProjector = true)
+                        startOrConfirm { vm.startDownload(repo, path, asProjector = true) }
                     }) { Text("多模态投影") }
                 }
             }
         )
     }
 
+    pendingStart?.let { action ->
+        AlertDialog(
+            onDismissRequest = { pendingStart = null },
+            title = { Text("下载前须知") },
+            text = { Text(MODEL_DISCLAIMER) },
+            confirmButton = {
+                TextButton(onClick = {
+                    AppSettings.modelDisclaimerAccepted = true
+                    pendingStart = null
+                    action()
+                }) { Text("我已了解，开始下载") }
+            },
+            dismissButton = { TextButton(onClick = { pendingStart = null }) { Text("取消") } }
+        )
+    }
+
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
         Text("在线下载（hf-mirror.com）", style = MaterialTheme.typography.headlineSmall)
+
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Text(
+                    "免责声明",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    "模型由第三方（HuggingFace / hf-mirror.com）提供，本应用不托管、不审查、不对模型内容及生成结果负责。" +
+                            "请自行确认来源可信与许可证（Apache-2.0 / MIT / 自定义）是否符合你的用途；" +
+                            "部分模型可能包含受限或不适内容，使用与传播风险自负。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
 
         // 下载任务区：折叠摘要条（默认收起，带总网速与进度）
         if (downloads.isNotEmpty()) {
@@ -340,3 +386,12 @@ private fun formatSpeed(bytesPerSec: Long): String {
         String.format("%d KB", bytesPerSec / 1024)
     }
 }
+
+/** 模型下载免责声明（下载页常驻展示 + 首次下载前确认弹窗共用） */
+private const val MODEL_DISCLAIMER =
+    "本应用的模型下载只是一个指向第三方（HuggingFace 镜像 hf-mirror.com）的通用下载工具，并不自己托管模型文件。" +
+            "我们不审查、不背书、也不对模型的内容、许可证、合法性或生成结果负责。\n\n" +
+            "下载前请自行确认：① 模型来源与发布者可信；② 许可证（Apache-2.0 / MIT / 自定义 / 需授权）允许你的使用方式；" +
+            "③ 模型体积与所需内存适合你的设备，蜂窝网络下注意流量。\n\n" +
+            "部分模型可能包含受限、偏见或不适内容，使用、分享与由此产生的后果由你自行承担。"
+

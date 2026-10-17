@@ -164,6 +164,11 @@ object AppSettings {
         get() = prefs.getString("cache_v", "") ?: ""
         set(value) = prefs.edit().putString("cache_v", value).apply()
 
+    /** 模型下载免责声明是否已确认：确认过就不再弹窗（下载页仍常驻展示该声明） */
+    var modelDisclaimerAccepted: Boolean
+        get() = prefs.getBoolean("model_disclaimer_accepted", false)
+        set(value) = prefs.edit().putBoolean("model_disclaimer_accepted", value).apply()
+
     var specType: String
         get() = prefs.getString("spec_type", "none") ?: "none"
         set(value) = prefs.edit().putString("spec_type", value).apply()
