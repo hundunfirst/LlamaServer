@@ -10,6 +10,7 @@ import com.localllm.server.core.DocExtract
 import com.localllm.server.core.McpHttpClient
 import com.localllm.server.core.OcrEngine
 import com.localllm.server.core.ServerProcessManager
+import com.localllm.server.core.UrlFetch
 import com.localllm.server.core.WebSearch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,6 +47,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val _searchApproval = MutableStateFlow<String?>(null)
     val searchApproval: StateFlow<String?> = _searchApproval.asStateFlow()
     private var approvalDeferred: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+
+    /** 链接抓取缓存：url → (抓取时间, 内容)，10 分钟内复用（避免重发时重复抓取） */
+    private val linkCache = mutableMapOf<String, Pair<Long, String>>()
 
     /** 用户对「图片轮联网搜索」的确认结果 */
     fun approveSearch(allow: Boolean) {
@@ -258,6 +262,38 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }) + if (searchAvailable) {
                     "今天是${today}。涉及最新信息时，先用 web_search 工具联网查询再回答，不要臆造日期。"
                 } else ""
+                // 用户最后一条消息里若含链接 → 抓取内容注入上下文（GitHub 走 README 特判）
+                val linkContext: List<ChatClient.ChatMessage> = run {
+                    val lastUserText = _messages.value.dropLast(1)
+                        .lastOrNull { it.role == "user" }?.content ?: return@run emptyList()
+                    val url = UrlFetch.firstUrl(lastUserText) ?: return@run emptyList()
+                    val cached = linkCache[url]
+                    val now = System.currentTimeMillis()
+                    val text = if (cached != null && now - cached.first < 10 * 60_000L) {
+                        cached.second
+                    } else {
+                        val fetched = UrlFetch.fetch(url)
+                        if (fetched != null) {
+                            linkCache[url] = now to fetched
+                            ServerProcessManager.appLog(
+                                "链接预取：${url.take(60)} → ${fetched.length} 字" +
+                                        if (url.contains("github.com")) "（GitHub 特判）" else ""
+                            )
+                            fetched
+                        } else {
+                            ServerProcessManager.appLog("链接预取失败：${url.take(60)}")
+                            null
+                        }
+                    }
+                    if (text == null) emptyList()
+                    else listOf(
+                        ChatClient.ChatMessage(
+                            "system",
+                            "以下是用户消息中链接的内容（供回答参考，可能不完整）：\n" + text
+                        )
+                    )
+                }
+
                 val history = _messages.value.dropLast(1)
                 // 图片路径二选一（不叠加、不改提示词）：
                 //  视觉模型直读 或 本地 OCR 抽文字（省掉整张图的 token 与视觉前向）
@@ -270,6 +306,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 var ocrLogged = false
                 val payloadMsgs = listOf(ChatClient.ChatMessage("system", systemText)) +
+                        linkContext +
                         history.map { m ->
                             if (m.imageB64 != null) {
                                 if (useOcr) {
