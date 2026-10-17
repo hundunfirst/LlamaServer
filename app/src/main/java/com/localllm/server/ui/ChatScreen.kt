@@ -14,9 +14,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -60,6 +62,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -694,6 +697,11 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             onDismiss = { showSkills = false },
             onApply = { skill ->
                 vm.setSessionSystemPrompt(skill.prompt)
+                showSkills = false
+            },
+            onApplyChain = { chain ->
+                val prompt = com.localllm.server.core.AppSettings.chainPrompt(chain)
+                if (prompt.isNotBlank()) vm.setSessionSystemPrompt(prompt)
                 showSkills = false
             },
             onClear = { vm.setSessionSystemPrompt(null) }
@@ -1962,16 +1970,19 @@ private fun highlightCode(
     }
 }
 
-/** 技能选择/管理弹窗：点技能即写入本会话助手指令 */
+/** 技能选择/管理弹窗：技能、技能链，点选即写入本会话助手指令 */
 @Composable
 private fun SkillDialog(
     onDismiss: () -> Unit,
     onApply: (com.localllm.server.core.Skill) -> Unit,
+    onApplyChain: (com.localllm.server.core.SkillChain) -> Unit,
     onClear: () -> Unit
 ) {
     var list by remember { mutableStateOf(com.localllm.server.core.AppSettings.loadSkills()) }
+    var chains by remember { mutableStateOf(com.localllm.server.core.AppSettings.loadSkillChains()) }
     var editing by remember { mutableStateOf<com.localllm.server.core.Skill?>(null) }
     var isNew by remember { mutableStateOf(false) }
+    var showChainBuilder by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1982,11 +1993,49 @@ private fun SkillDialog(
                 verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 Text(
-                    "选一个技能会作为本会话的助手指令生效；可随时取消。",
+                    "选技能/技能链会作为本会话助手指令生效，可随时取消。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(6.dp))
+
+                if (chains.isNotEmpty()) {
+                    Text(
+                        "技能链",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    chains.forEach { c ->
+                        val names = list.filter { it.id in c.skillIds }.map { it.name }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(
+                                Modifier
+                                    .weight(1f)
+                                    .clickable { onApplyChain(c) }
+                                    .padding(vertical = 6.dp)
+                            ) {
+                                Text("⛓ ${c.name}", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    names.joinToString(" → "),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1
+                                )
+                            }
+                            TextButton(onClick = {
+                                chains = chains.filter { it.id != c.id }
+                                com.localllm.server.core.AppSettings.saveSkillChains(chains)
+                            }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                }
+
+                Text(
+                    "单个技能",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
                 list.forEach { sk ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(
@@ -2011,12 +2060,16 @@ private fun SkillDialog(
                         }) { Text("编辑") }
                     }
                 }
-                OutlinedButton(onClick = {
-                    editing = com.localllm.server.core.Skill(
-                        java.util.UUID.randomUUID().toString(), "新技能", "", ""
-                    )
-                    isNew = true
-                }) { Text("新增技能") }
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { showChainBuilder = true }) { Text("新建技能链…") }
+                    OutlinedButton(onClick = {
+                        editing = com.localllm.server.core.Skill(
+                            java.util.UUID.randomUUID().toString(), "新技能", "", ""
+                        )
+                        isNew = true
+                    }) { Text("新增技能") }
+                }
             }
         },
         confirmButton = {
@@ -2027,6 +2080,18 @@ private fun SkillDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
     )
+
+    if (showChainBuilder) {
+        ChainBuilderDialog(
+            skills = list,
+            onDismiss = { showChainBuilder = false },
+            onSave = { chain ->
+                chains = chains + chain
+                com.localllm.server.core.AppSettings.saveSkillChains(chains)
+                showChainBuilder = false
+            }
+        )
+    }
 
     editing?.let { sk ->
         var name by remember(sk.id) { mutableStateOf(sk.name) }
@@ -2074,7 +2139,8 @@ private fun SkillDialog(
                         desc = desc.trim(),
                         prompt = prompt.trim()
                     )
-                    val newList = if (isNew) list + updated else list.map { if (it.id == sk.id) updated else it }
+                    val newList = if (isNew) list + updated
+                                  else list.map { if (it.id == sk.id) updated else it }
                     list = newList
                     com.localllm.server.core.AppSettings.saveSkills(newList)
                     editing = null
@@ -2083,4 +2149,80 @@ private fun SkillDialog(
             dismissButton = { TextButton(onClick = { editing = null }) { Text("取消") } }
         )
     }
+}
+
+/** 新建技能链：按点击顺序加入技能（至少 2 个） */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ChainBuilderDialog(
+    skills: List<com.localllm.server.core.Skill>,
+    onDismiss: () -> Unit,
+    onSave: (com.localllm.server.core.SkillChain) -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    var picked by remember { mutableStateOf(listOf<String>()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("新建技能链") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                CompactField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = "技能链名称（如 摘要→表格）",
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    "按顺序点击技能加入（点一次加入，再点移除）：",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    skills.forEach { sk ->
+                        val idx = picked.indexOf(sk.id)
+                        FilterChip(
+                            selected = idx >= 0,
+                            onClick = {
+                                picked = if (idx >= 0) picked - sk.id else picked + sk.id
+                            },
+                            label = {
+                                Text(
+                                    if (idx >= 0) "${idx + 1}. ${sk.name}" else sk.name,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        )
+                    }
+                }
+                if (picked.size < 2) {
+                    Text(
+                        "至少选择 2 个技能",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (picked.size >= 2) {
+                        onSave(
+                            com.localllm.server.core.SkillChain(
+                                java.util.UUID.randomUUID().toString(),
+                                name.trim().ifBlank { "技能链" },
+                                picked
+                            )
+                        )
+                    }
+                },
+                enabled = picked.size >= 2
+            ) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }

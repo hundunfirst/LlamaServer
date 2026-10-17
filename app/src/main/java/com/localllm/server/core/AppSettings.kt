@@ -377,6 +377,58 @@ object AppSettings {
         skillsJson = arr.toString()
     }
 
+    // ---- 技能链（按顺序组合多个技能）----
+    var skillChainsJson: String
+        get() = prefs.getString("skill_chains", "") ?: ""
+        set(value) = prefs.edit().putString("skill_chains", value).apply()
+
+    fun loadSkillChains(): List<SkillChain> {
+        val raw = skillChainsJson
+        if (raw.isBlank()) return emptyList()
+        return runCatching {
+            val arr = org.json.JSONArray(raw)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val stepsArr = o.optJSONArray("steps") ?: return@mapNotNull null
+                val steps = (0 until stepsArr.length()).map { stepsArr.optString(it) }
+                    .filter { it.isNotBlank() }
+                if (steps.isEmpty()) return@mapNotNull null
+                SkillChain(
+                    o.optString("id").ifBlank { java.util.UUID.randomUUID().toString() },
+                    o.optString("name").ifBlank { "技能链" },
+                    steps
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveSkillChains(list: List<SkillChain>) {
+        val arr = org.json.JSONArray()
+        list.forEach { c ->
+            val steps = org.json.JSONArray()
+            c.skillIds.forEach { steps.put(it) }
+            arr.put(
+                org.json.JSONObject()
+                    .put("id", c.id).put("name", c.name).put("steps", steps)
+            )
+        }
+        skillChainsJson = arr.toString()
+    }
+
+    /** 把技能链拼成一段可执行的 system 指令 */
+    fun chainPrompt(chain: SkillChain): String {
+        val skills = loadSkills().associateBy { it.id }
+        val steps = chain.skillIds.mapNotNull { skills[it] }
+        if (steps.isEmpty()) return ""
+        val sb = StringBuilder()
+        sb.append("【技能链：").append(steps.joinToString(" → ") { it.name }).append("】\n")
+        sb.append("请按顺序完成以下步骤，最终只输出最后一步的成果（中间步骤的结论作为下一步输入）：\n")
+        steps.forEachIndexed { i, sk ->
+            sb.append("第 ${i + 1} 步（").append(sk.name).append("）：").append(sk.prompt).append('\n')
+        }
+        return sb.toString().trim()
+    }
+
     private fun defaultSkills(): List<Skill> = listOf(
         Skill(
             "sk_summary", "摘要总结", "长文/链接 → 结论+要点",
@@ -577,3 +629,6 @@ data class SysPreset(val id: String, val name: String, val text: String)
 
 /** 技能模板：一段可复用的助手指令 */
 data class Skill(val id: String, val name: String, val desc: String, val prompt: String)
+
+/** 技能链：按顺序执行多个技能 */
+data class SkillChain(val id: String, val name: String, val skillIds: List<String>)
