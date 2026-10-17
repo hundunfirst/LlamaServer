@@ -409,6 +409,11 @@ object AppSettings {
         )
     )
 
+    /** 任务清单工具（todo_write）开关：多步任务可先列计划再逐步执行 */
+    var todoToolEnabled: Boolean
+        get() = prefs.getBoolean("todo_tool_enabled", true)
+        set(value) = prefs.edit().putBoolean("todo_tool_enabled", value).apply()
+
     /** 已弹窗提示过的更新版本（避免每次启动重复提示） */
     var lastPromptedUpdateVersion: String
         get() = prefs.getString("last_prompted_update", "") ?: ""

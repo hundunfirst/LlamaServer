@@ -124,6 +124,25 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             })
         }
 
+        // ---- 任务清单工具 ----
+        var todoOn by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.todoToolEnabled)
+        }
+        SectionHeader(
+            title = "任务清单工具",
+            help = "开启后模型可用 todo_write 工具：多步任务先列计划、逐步执行并随时更新状态，" +
+                    "聊天里会显示 📋 任务清单卡片。关闭则只做一次性回答。立即生效。",
+            titleStyle = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        QuickChips(
+            options = listOf("true" to "开启", "false" to "关闭"),
+            current = todoOn.toString()
+        ) { v ->
+            todoOn = v.toBoolean()
+            com.localllm.server.core.AppSettings.todoToolEnabled = todoOn
+        }
+
         // ---- 图片处理方式（多模态直读 vs 本地 OCR）----
         var imgMode by remember {
             mutableStateOf(com.localllm.server.core.AppSettings.imageInputMode)

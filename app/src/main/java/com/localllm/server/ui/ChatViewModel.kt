@@ -11,6 +11,7 @@ import com.localllm.server.core.McpHttpClient
 import com.localllm.server.core.OcrEngine
 import com.localllm.server.core.ServerProcessManager
 import com.localllm.server.core.ServerUiState
+import com.localllm.server.core.TodoTool
 import com.localllm.server.core.UrlFetch
 import com.localllm.server.core.WebSearch
 import kotlinx.coroutines.Dispatchers
@@ -282,6 +283,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 提示词保持最小化：过多硬性约束会让小模型在思考里反复“检查规则”而失控。
                 // LaTeX 已有客户端转换器兜底，不再要求模型禁用。
                 val searchOn = AppSettings.webSearchEnabled
+                val todoOn = AppSettings.todoToolEnabled
                 // 隐私护栏：本轮用户消息含图片（可能是身份证/证件等敏感件）→ 不注入任何联网搜索工具，
                 // 并把模型幻觉出的 web_search 调用靠白名单挡掉（OCR 文字不会流向搜索引擎）。
                 val turnHasImage = _messages.value.dropLast(1).lastOrNull()?.imageB64 != null
@@ -297,9 +299,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 助手指令：会话级覆盖优先，否则用全局预设
                 val sessionPrompt = _sessions.value.find { it.id == _activeId.value }?.systemPrompt
                 val basePrompt = sessionPrompt ?: AppSettings.activeSysPrompt()
+                val todoHint = if (todoOn) {
+                    "多步任务请先用 todo_write 列出计划，之后每完成一步更新任务状态。"
+                } else ""
                 val systemText = (if (basePrompt.isNotBlank())
                     "【本会话角色设定，优先遵守】" + basePrompt + " "
-                else "") +
+                else "") + todoHint +
                         (if (AppSettings.thinkEnabled) {
                     "用中文简洁回答。"
                 } else {
@@ -429,6 +434,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 工具合并：内置 web_search + 全部 MCP 服务器工具
                 val toolsJson = org.json.JSONArray().also { arr ->
                     if (searchAvailable) arr.put(WebSearch.toolJson())
+                    if (todoOn) arr.put(TodoTool.toolJson())
                     for (i in 0 until mcpAgg.length()) arr.put(mcpAgg.getJSONObject(i))
                 }.takeIf { it.length() > 0 }
                 // 搜索配额用尽后本轮请求不带 web_search：模型无工具可调，只能产出文本回答
@@ -483,7 +489,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 最多 5 轮工具调用，防止模型死循环
                 // 注意：必须用 for + break——repeat 里的 return@repeat 是 continue 语义，
                 // 会导致「回答完成」后仍继续下一轮（历史 bug：同一问题最多被连答 5 遍）。
-                for (round in 0 until 5) {
+                for (round in 0 until 8) { // 多步任务（todo）需要更多轮
                     ensureActive() // 停止/切换后不再进入下一轮
                     // 提前强制：已搜过但走到第4轮仍无正文 → 立即移除搜索工具，逼模型作答
                     val forceNoTools = searchAvailable && round >= 3 &&
@@ -683,7 +689,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     newMsgs.add(ChatClient.ChatMessage("assistant", null, toolCalls = asstCalls))
                         validCalls.forEach { tc ->
                         val result = runCatching {
-                            if (tc.name == "web_search") {
+                            if (tc.name == TodoTool.NAME) {
+                                val todos = TodoTool.parse(tc.arguments.ifBlank { "{}" })
+                                if (todos.isEmpty()) {
+                                    "参数无效：未能解析任务清单，请按 tasks[{title,status}] 格式重新提交。"
+                                } else {
+                                    val list = _messages.value.toMutableList()
+                                    if (list.isNotEmpty()) {
+                                        list[list.lastIndex] = list.last().copy(todos = todos)
+                                        _messages.value = list
+                                    }
+                                    val done = todos.count { it.status == "completed" }
+                                    ServerProcessManager.appLog("任务清单更新：$done/${todos.size} 已完成")
+                                    "任务清单已更新（${done}/${todos.size} 完成）。继续执行下一步，完成后再次调用 ${
+                                        TodoTool.NAME
+                                    } 更新状态。"
+                                }
+                            } else if (tc.name == "web_search") {
                                 val query = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                                     .optString("query")
                                 val norm = query.trim().lowercase()
@@ -764,7 +786,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (_streaming.value && !autoStopped &&
                     _messages.value.lastOrNull()?.content.isNullOrEmpty() == true
                 ) {
-                    ServerProcessManager.appLog("已达最大轮数（5）仍无正文，改用无工具模式强制回答…")
+                    ServerProcessManager.appLog("已达最大轮数（8）仍无正文，改用无工具模式强制回答…")
                     var forcedStats: String? = null
                     runCatching {
                         ChatClient.chatStream(

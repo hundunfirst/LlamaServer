@@ -22,13 +22,17 @@ object ChatStore {
     /** 搜索来源（可点击跳转） */
     data class Source(val title: String, val url: String)
 
+    /** 任务清单项（status: pending / in_progress / completed） */
+    data class Todo(val title: String, val status: String)
+
     data class Msg(
         val role: String,
         val content: String,
         val imageB64: String? = null,
         val reasoning: String? = null,
         val steps: List<Step> = emptyList(),
-        val sources: List<Source> = emptyList()
+        val sources: List<Source> = emptyList(),
+        val todos: List<Todo> = emptyList()
     )
 
     data class Session(
@@ -80,7 +84,8 @@ object ChatStore {
                         m.optString("image").takeIf { it.isNotEmpty() },
                         m.optString("reasoning").takeIf { it.isNotEmpty() },
                         steps = parseSteps(m.optJSONArray("steps")),
-                        sources = parseSources(m.optJSONArray("sources"))
+                        sources = parseSources(m.optJSONArray("sources")),
+                        todos = parseTodos(m.optJSONArray("todos"))
                     )
                 }
                 Session(
@@ -95,6 +100,16 @@ object ChatStore {
             }
             Store(if (sessions.any { it.id == active }) active else sessions.first().id, sessions)
         }.getOrDefault(Store("1", listOf(Session("1", "新会话", System.currentTimeMillis(), emptyList()))))
+    }
+
+    private fun parseTodos(arr: JSONArray?): List<Todo> {
+        if (arr == null) return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val title = o.optString("title")
+            if (title.isBlank()) return@mapNotNull null
+            Todo(title, o.optString("status").ifBlank { "pending" })
+        }
     }
 
     private fun parseSources(arr: JSONArray?): List<Source> {
@@ -139,6 +154,13 @@ object ChatStore {
                         )
                     }
                     o.put("steps", sArr)
+                }
+                if (m.todos.isNotEmpty()) {
+                    val tArr = JSONArray()
+                    m.todos.forEach { td ->
+                        tArr.put(JSONObject().put("title", td.title).put("status", td.status))
+                    }
+                    o.put("todos", tArr)
                 }
                 if (m.sources.isNotEmpty()) {
                     val uArr = JSONArray()
