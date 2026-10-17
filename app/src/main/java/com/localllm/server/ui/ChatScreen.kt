@@ -57,9 +57,12 @@ import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -467,6 +470,9 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     val messages by vm.messages.collectAsStateWithLifecycle()
     val input by vm.input.collectAsStateWithLifecycle()
     val streaming by vm.streaming.collectAsStateWithLifecycle()
+    val generating by vm.generating.collectAsStateWithLifecycle()
+    val progressBySession by vm.progress.collectAsStateWithLifecycle()
+    val toastMsg by vm.toast.collectAsStateWithLifecycle()
     val error by vm.error.collectAsStateWithLifecycle()
     val lastStats by vm.lastStats.collectAsStateWithLifecycle()
     val pendingImage by vm.pendingImageB64.collectAsStateWithLifecycle()
@@ -477,6 +483,14 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
+
+    // 后台会话生成完成/失败时给一次提示
+    LaunchedEffect(toastMsg) {
+        toastMsg?.let {
+            Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+            vm.clearToast()
+        }
+    }
 
     var menuIndex by remember { mutableStateOf<Int?>(null) }
     var editingIndex by remember { mutableStateOf<Int?>(null) }
@@ -1009,11 +1023,67 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                         )
                     }
                 }
-                IconButton(onClick = { showSessions = true }) {
-                    Icon(Icons.Default.List, contentDescription = "会话列表")
+                BadgedBox(
+                    badge = {
+                        if (generating.isNotEmpty()) {
+                            Badge(containerColor = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                ) {
+                    IconButton(onClick = { showSessions = true }) {
+                        Icon(Icons.Default.List, contentDescription = "会话列表")
+                    }
                 }
-                IconButton(onClick = vm::newChat, enabled = !streaming) {
+                IconButton(onClick = vm::newChat, enabled = generating.isEmpty()) {
                     Icon(Icons.Default.DeleteSweep, contentDescription = "新会话")
+                }
+            }
+        }
+
+        // 全局运行中指示：别的会话在生成时，常驻一条可点击的提示（点一下切过去）
+        val bgSession = generating.firstOrNull { it != activeId }
+        if (bgSession != null) {
+            val bgTitle = sessions.find { it.id == bgSession }?.title ?: "另一条会话"
+            val bgProgress = progressBySession[bgSession].orEmpty()
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .clickable { vm.switchSession(bgSession) }
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "「$bgTitle」正在生成",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            maxLines = 1
+                        )
+                        if (bgProgress.isNotBlank()) {
+                            Text(
+                                bgProgress,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.75f)
+                            )
+                        }
+                    }
+                    Text(
+                        "切过去 ›",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
                 }
             }
         }
@@ -1040,11 +1110,32 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                                     showSessions = false
                                 })
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(s.title, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (s.id in generating) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(12.dp),
+                                                strokeWidth = 2.dp
+                                            )
+                                            Spacer(Modifier.width(6.dp))
+                                        }
+                                        Text(
+                                            s.title,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            maxLines = 1,
+                                            modifier = Modifier.weight(1f, fill = false)
+                                        )
+                                    }
                                     Text(
-                                        "${s.messages.size} 条 · ${java.text.SimpleDateFormat("MM-dd HH:mm").format(java.util.Date(s.updatedAt))}",
+                                        if (s.id in generating)
+                                            "生成中… · ${progressBySession[s.id].orEmpty().ifBlank { "${s.messages.size} 条" }}"
+                                        else "${s.messages.size} 条 · " +
+                                                java.text.SimpleDateFormat("MM-dd HH:mm")
+                                                    .format(java.util.Date(s.updatedAt)),
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        color = if (s.id in generating) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontWeight = if (s.id in generating) FontWeight.Medium
+                                        else FontWeight.Normal
                                     )
                                 }
                                 IconButton(onClick = { vm.deleteSession(s.id) }) {

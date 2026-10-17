@@ -21,8 +21,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
@@ -42,8 +45,37 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val _input = MutableStateFlow("")
     val input: StateFlow<String> = _input.asStateFlow()
 
-    private val _streaming = MutableStateFlow(false)
-    val streaming: StateFlow<Boolean> = _streaming.asStateFlow()
+    /**
+     * 正在生成回答的会话 id。生成归属于发起它的会话：切走不会中断，
+     * 增量与收尾都写回那个会话，而不是「当前正在看的会话」。
+     * 同一时间只允许一个生成（单模型手机上并发只会互相拖慢）。
+     */
+    private val _generating = MutableStateFlow<Set<String>>(emptySet())
+    val generating: StateFlow<Set<String>> = _generating.asStateFlow()
+
+    /** 当前会话是否在生成：界面据此显示「停止」还是「发送」 */
+    val streaming: StateFlow<Boolean> =
+        combine(_activeId, _generating) { id, gen -> id in gen }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** 一次性提示（生成完成等），界面消费后清空 */
+    private val _toast = MutableStateFlow<String?>(null)
+    val toast: StateFlow<String?> = _toast.asStateFlow()
+
+    /** 各会话的生成进度（“342 token · 28.1 tok/s”），用于全局运行中指示 */
+    private val _progress = MutableStateFlow<Map<String, String>>(emptyMap())
+    val progress: StateFlow<Map<String, String>> = _progress.asStateFlow()
+
+    private fun setProgress(sid: String, text: String?) {
+        _progress.value =
+            if (text == null) _progress.value - sid else _progress.value + (sid to text)
+    }
+
+    fun clearToast() {
+        _toast.value = null
+    }
+
+    private fun isGenerating(sid: String) = sid in _generating.value
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
@@ -217,7 +249,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val text = _input.value.trim()
         val image = _pendingImageB64.value
         val file = _pendingFile.value
-        if ((text.isEmpty() && image == null && file == null) || _streaming.value) return
+        if ((text.isEmpty() && image == null && file == null) || blockIfBusy()) return
         _input.value = ""
         _pendingImageB64.value = null
         _pendingFile.value = null
@@ -253,8 +285,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         doStream()
     }
 
+    /**
+     * 单请求模型：已经有会话在生成时，别处不让发新请求。
+     * 返回 true 表示被挡住（并在状态行说明是哪条会话在跑）。
+     */
+    private fun blockIfBusy(): Boolean {
+        val sid = _generating.value.firstOrNull() ?: return false
+        if (sid == _activeId.value) return true
+        val title = _sessions.value.find { it.id == sid }?.title ?: "另一条会话"
+        val hint = "「$title」正在生成，切过去可停止，或等它跑完"
+        _lastStats.value = hint
+        _toast.value = hint
+        return true
+    }
+
     fun resendAt(index: Int) {
-        if (_streaming.value) return
+        if (blockIfBusy()) return
         val list = _messages.value.toMutableList()
         if (index !in list.indices || list[index].role != "user") return
         _messages.value = list.subList(0, index + 1).toMutableList()
@@ -264,7 +310,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun editAndResend(index: Int, newText: String) {
         val text = newText.trim()
-        if (text.isEmpty() || _streaming.value) return
+        if (text.isEmpty() || blockIfBusy()) return
         val list = _messages.value.toMutableList()
         if (index !in list.indices || list[index].role != "user") return
         list[index] = list[index].copy(content = text, reasoning = null)
@@ -274,8 +320,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun doStream() {
+        // 生成归属于发起它的会话：后续所有增量/收尾都按 sid 找会话，不再看当前在哪个会话
+        val sid = _activeId.value
         streamJob = viewModelScope.launch {
-            _streaming.value = true
+            _generating.value = _generating.value + sid
             _error.value = null
             _lastStats.value = null
             // 模型“答完又想再答”（单次生成内二次思考）时自动截断本轮
@@ -488,10 +536,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val steps = mutableListOf<ChatStore.Step>()
                 var thinkStartedAt = 0L
                 fun syncSteps() {
-                    val list = _messages.value.toMutableList()
-                    if (list.isEmpty()) return
-                    list[list.lastIndex] = list.last().copy(steps = steps.toList())
-                    _messages.value = list
+                    appendToLastInline(sid) { it.copy(steps = steps.toList()) }
                 }
                 fun settleThink() {
                     if (thinkStartedAt > 0) {
@@ -560,7 +605,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         },
                         onDelta = { delta ->
                             // 停止后一律不再上屏（abort 断连前的在途分片也丢弃）
-                            if (_streaming.value) {
+                            if (isGenerating(sid)) {
                                 if (!contentStarted && thinkStartedAt > 0) {
                                     val secs = (System.currentTimeMillis() - thinkStartedAt) / 1000.0
                                     steps.add(
@@ -581,19 +626,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 val elapsed = (System.currentTimeMillis() - firstDeltaMs) / 1000.0
                                 if (elapsed > 0.3) {
                                     val tps = deltaCount / elapsed
-                                    _lastStats.value =
-                                        "生成中 · $deltaCount token · ${String.format("%.1f", tps)} tok/s" +
-                                                " · ${String.format("%.0f", elapsed)}s"
+                                    val stats = "$deltaCount token · ${String.format("%.1f", tps)} tok/s" +
+                                            " · ${String.format("%.0f", elapsed)}s"
+                                    setProgress(sid, stats)
+                                    if (_activeId.value == sid) _lastStats.value = "生成中 · $stats"
                                 }
-                                val list = _messages.value.toMutableList()
-                                val last = list.removeLast()
-                                list.add(last.copy(content = last.content + delta))
-                                _messages.value = list
+                                appendToLastInline(sid) { it.copy(content = it.content + delta) }
                             }
                         },
                         onReasoning = { r ->
                             when {
-                                !AppSettings.thinkEnabled || !_streaming.value -> Unit
+                                !AppSettings.thinkEnabled || !isGenerating(sid) -> Unit
                                 // 正文已开始却再次思考 = 模型要“换条路再答一遍”（实测同一次生成内
                                 // 想→答→再想→再答）。罗马只走一次：截断本轮，保住已生成的回答。
                                 contentStarted -> {
@@ -607,10 +650,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 }
                                 else -> {
                                     if (thinkStartedAt == 0L) thinkStartedAt = System.currentTimeMillis()
-                                    val list = _messages.value.toMutableList()
-                                    val last = list.removeLast()
-                                    list.add(last.copy(reasoning = (last.reasoning ?: "") + r))
-                                    _messages.value = list
+                                    appendToLastInline(sid) {
+                                        it.copy(reasoning = (it.reasoning ?: "") + r)
+                                    }
                                 }
                             }
                         },
@@ -870,10 +912,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 // 兜底：无正文，或只列了清单就报"已完成"（产出过短）→ 强制无工具直接产出
-                val lastContentNow = _messages.value.lastOrNull()?.content.orEmpty()
+                val lastContentNow = messagesOf(sid).lastOrNull()?.content.orEmpty()
                 val needsRealOutput = lastContentNow.isBlank() ||
                         (lastContentNow.length < 120 && todoCalls > 0)
-                if (_streaming.value && !autoStopped && needsRealOutput) {
+                if (isGenerating(sid) && !autoStopped && needsRealOutput) {
                     ServerProcessManager.appLog(
                         if (lastContentNow.isBlank()) "无正文输出，改用无工具模式强制回答…"
                         else "疑似只报进度未产出内容（${lastContentNow.length} 字），强制直接产出…"
@@ -899,19 +941,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             maxTokens = if (cloud) null else AppSettings.effectiveOut(AppSettings.selectedModelPath),
                             tools = null,
                             onDelta = { d ->
-                                if (_streaming.value) {
-                                    val list = _messages.value.toMutableList()
-                                    val m = list.removeLast()
-                                    list.add(m.copy(content = m.content + d))
-                                    _messages.value = list
+                                if (isGenerating(sid)) {
+                                    appendToLastInline(sid) { it.copy(content = it.content + d) }
                                 }
                             },
                             onReasoning = { r ->
-                                if (AppSettings.thinkEnabled && _streaming.value) {
-                                    val list = _messages.value.toMutableList()
-                                    val m = list.removeLast()
-                                    list.add(m.copy(reasoning = (m.reasoning ?: "") + r))
-                                    _messages.value = list
+                                if (AppSettings.thinkEnabled && isGenerating(sid)) {
+                                    appendToLastInline(sid) {
+                                        it.copy(reasoning = (it.reasoning ?: "") + r)
+                                    }
                                 }
                             },
                             onFinal = { tokens, tps, prompt ->
@@ -939,31 +977,42 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     _error.value = friendlyError(e)
                 }
             } finally {
-                if (_messages.value.lastOrNull()?.content.isNullOrEmpty()) {
-                    _messages.value = _messages.value.dropLast(1)
+                val msgs = messagesOf(sid)
+                if (msgs.lastOrNull()?.content.isNullOrEmpty()) {
+                    writeMessages(sid, msgs.dropLast(1))
                     if (_error.value == null) {
                         _error.value = "无回复（服务未运行？请先在状态页启动）"
                     }
                 }
-                persist()
-                _streaming.value = false
+                persistSession(sid)
+                _generating.value = _generating.value - sid
+                setProgress(sid, null)
+                // 在别的会话里完成时给个提示，否则用户不知道后台跑完了
+                if (_activeId.value != sid) {
+                    val title = _sessions.value.find { it.id == sid }?.title ?: "另一条会话"
+                    val ok = _error.value == null
+                    _toast.value = if (ok) "「$title」已生成完成" else "「$title」生成失败：${_error.value}"
+                }
             }
         }
     }
 
     /** 停止：先关门（回调失效）→ 立即断连（思考流也停）→ 取消协程 → 落盘已生成部分 */
     fun stop() {
+        val sid = _generating.value.firstOrNull() ?: _activeId.value
         ServerProcessManager.appLog("用户手动停止生成")
-        _streaming.value = false
+        // 立刻复位按钮状态，不等协程真正感知取消（阻塞读可能要等到下一行 SSE）
+        _generating.value = _generating.value - sid
+        setProgress(sid, null)
         ChatClient.abort()
         streamJob?.cancel()
         streamJob = null
-        persist()
+        persistSession(sid)
     }
 
     /** 新建会话并切换（保留当前会话内容） */
     fun newChat() {
-        streamJob?.cancel()
+        if (blockIfBusy()) return
         persist()
         val id = System.nanoTime().toString()
         val s = ChatStore.Session(id, "新会话", System.currentTimeMillis(), emptyList())
@@ -974,9 +1023,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         saveStore()
     }
 
+    /**
+     * 切换会话：不中断正在跑的生成。生成结果的增量与收尾都按发起时会话写回，
+     * 切回来就能看到它继续出字（或已经写完）。
+     */
     fun switchSession(id: String) {
         if (id == _activeId.value) return
-        streamJob?.cancel()
         persist()
         _activeId.value = id
         _messages.value = _sessions.value.find { it.id == id }?.messages ?: emptyList()
@@ -985,6 +1037,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deleteSession(id: String) {
+        if (isGenerating(id)) stop()
         val remaining = _sessions.value.filterNot { it.id == id }.ifEmpty {
             listOf(ChatStore.Session("1", "新会话", System.currentTimeMillis(), emptyList()))
         }
@@ -1088,11 +1141,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteAt(index: Int) {
         val list = _messages.value
         if (index !in list.indices) return
-        if (index == list.lastIndex && _streaming.value) {
-            _streaming.value = false
-            ChatClient.abort()
-            streamJob?.cancel()
-            streamJob = null
+        if (index == list.lastIndex && isGenerating(_activeId.value)) {
+            stop()
         }
         val m = list[index]
         _messages.value = list.toMutableList().also { it.removeAt(index) }
@@ -1100,6 +1150,41 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             "已删除一条${if (m.role == "user") "用户" else "助手"}消息（${m.content.length} 字）"
         )
         persist()
+    }
+
+    /** 读某会话的消息：当前会话走 _messages（实时），其它会话从 _sessions 取 */
+    private fun messagesOf(sid: String): List<ChatStore.Msg> =
+        if (_activeId.value == sid) _messages.value
+        else _sessions.value.find { it.id == sid }?.messages ?: emptyList()
+
+    /** 写某会话的消息（只动内存：流式期间高频调用，不落盘） */
+    private fun writeMessages(sid: String, list: List<ChatStore.Msg>) {
+        if (_activeId.value == sid) _messages.value = list
+        else _sessions.value = _sessions.value.map {
+            if (it.id == sid) it.copy(messages = list) else it
+        }
+    }
+
+    /** 就地改写某会话最后一条消息（没有消息时忽略） */
+    private fun appendToLastInline(sid: String, transform: (ChatStore.Msg) -> ChatStore.Msg) {
+        val list = messagesOf(sid).toMutableList()
+        if (list.isEmpty()) return
+        list[list.lastIndex] = transform(list.last())
+        writeMessages(sid, list)
+    }
+
+    /** 把某会话的内存状态落盘（含「首条用户消息 → 标题」） */
+    private fun persistSession(sid: String) {
+        val msgs = messagesOf(sid)
+        _sessions.value = _sessions.value.map {
+            if (it.id != sid) it else it.copy(
+                messages = msgs,
+                title = it.title.takeIf { t -> t != "新会话" }
+                    ?: (msgs.firstOrNull { m -> m.role == "user" }?.content?.take(24) ?: "新会话"),
+                updatedAt = System.currentTimeMillis()
+            )
+        }
+        saveStore()
     }
 
     private fun append(msg: ChatStore.Msg) {
@@ -1135,7 +1220,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      * 触发后上下文占用大幅下降，早期的关键信息以摘要形式保留。
      */
     fun compressContext(keepRecent: Int = 4) {
-        if (_streaming.value) {
+        if (blockIfBusy()) {
             _lastStats.value = "正在生成中，稍后再压缩"
             return
         }
@@ -1146,8 +1231,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             _lastStats.value = "消息太少，无需压缩"
             return
         }
+        val sid = _activeId.value
         streamJob = viewModelScope.launch {
-            _streaming.value = true
+            _generating.value = _generating.value + sid
             _error.value = null
             _lastStats.value = "正在压缩上下文…"
             ServerProcessManager.appLog("上下文压缩：将前 ${old.size} 条消息总结为摘要…")
@@ -1180,7 +1266,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     thinking = if (cloud) null else false,
                     maxTokens = if (cloud) null else 1024,
                     tools = null,
-                    onDelta = { d -> if (_streaming.value) summary.append(d) },
+                    onDelta = { d -> if (isGenerating(sid)) summary.append(d) },
                     onReasoning = {},
                     onFinal = { _, _, _ -> }
                 )
@@ -1205,7 +1291,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 _error.value = "压缩失败：${e.message}"
                 ServerProcessManager.appLog("上下文压缩失败：${e.message}")
             } finally {
-                _streaming.value = false
+                _generating.value = _generating.value - sid
+                setProgress(sid, null)
             }
         }
     }
