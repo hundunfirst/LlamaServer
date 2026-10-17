@@ -362,53 +362,76 @@ private fun latexToUnicode(src: String): String {
 private fun inlineMd(s: String): androidx.compose.ui.text.AnnotatedString =
     androidx.compose.ui.text.buildAnnotatedString {
         val text = latexToUnicode(s)
-        // 依次匹配：Markdown 链接 / 裸 URL / 加粗 / 行内代码 / 斜体
-        val linkRe = Regex("""\[([^\]\n]+)\]\((https?://[^)\s]+)\)|(https?://[^\s)\u3002\uff0c\uff1b]+)""")
+        // 链接与格式分开匹配，避免跨正则取不存在的分组
+        data class Hit(
+            val start: Int,
+            val end: Int,
+            val kind: Int, // 1=Markdown链接 2=裸链接 3=加粗 4=行内代码 5=斜体
+            val a: String,
+            val b: String? = null
+        )
+
+        val linkRe = Regex(
+            """\[([^\]\n]+)\]\((https?://[^)\s]+)\)|(https?://[^\s)\u3002\uff0c\uff1b]+)"""
+        )
         val fmtRe = Regex("""(\*\*[^*\n]+\*\*|`[^`\n]+`|\*[^*\n]+\*)""")
-        val all = (linkRe.findAll(text).map { it.range.first to it } +
-                fmtRe.findAll(text).map { it.range.first to it })
-            .sortedWith(compareBy { it.first })
-            .fold(mutableListOf<Pair<Int, MatchResult>>()) { acc, cur ->
-                if (acc.isEmpty() || cur.first >= acc.last().second.range.last + 1) acc.add(cur)
-                acc
+
+        val hits = mutableListOf<Hit>()
+        for (m in linkRe.findAll(text)) {
+            val g1 = m.groups[1]
+            val g2 = m.groups[2]
+            val g3 = m.groups[3]
+            if (g1 != null && g2 != null) {
+                hits.add(Hit(m.range.first, m.range.last, 1, g1.value, g2.value))
+            } else if (g3 != null) {
+                hits.add(Hit(m.range.first, m.range.last, 2, g3.value))
             }
-        var last = 0
+        }
+        for (m in fmtRe.findAll(text)) {
+            val v = m.value
+            val kind = when {
+                v.startsWith("**") -> 3
+                v.startsWith("`") -> 4
+                else -> 5
+            }
+            hits.add(Hit(m.range.first, m.range.last, kind, v))
+        }
+        hits.sortBy { it.start }
+
         val linkStyles = androidx.compose.ui.text.TextLinkStyles(
             style = androidx.compose.ui.text.SpanStyle(
                 color = androidx.compose.ui.graphics.Color(0xFF1976D2),
                 textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
             )
         )
-        for ((_, m) in all) {
-            if (m.range.first < last) continue
-            append(text.substring(last, m.range.first))
-            val t = m.value
-            if (m.groups[1] != null && m.groups[2] != null) {
-                // [文本](url)
-                withLink(androidx.compose.ui.text.LinkAnnotation.Url(m.groups[2]!!.value, linkStyles)) {
-                    append(m.groups[1]!!.value)
+
+        var last = 0
+        for (h in hits) {
+            if (h.start < last) continue
+            append(text.substring(last, h.start))
+            when (h.kind) {
+                1 -> withLink(androidx.compose.ui.text.LinkAnnotation.Url(h.b!!, linkStyles)) {
+                    append(h.a)
                 }
-            } else if (m.groups[3] != null) {
-                // 裸 URL
-                withLink(androidx.compose.ui.text.LinkAnnotation.Url(m.groups[3]!!.value, linkStyles)) {
-                    append(m.groups[3]!!.value)
+                2 -> withLink(androidx.compose.ui.text.LinkAnnotation.Url(h.a, linkStyles)) {
+                    append(h.a)
                 }
-            } else when {
-                t.startsWith("**") -> withStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold)) {
-                    append(t.removeSurrounding("**"))
+                3 -> withStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold)) {
+                    append(h.a.removeSurrounding("**"))
                 }
-                t.startsWith("`") -> withStyle(
+                4 -> withStyle(
                     androidx.compose.ui.text.SpanStyle(
                         fontFamily = FontFamily.Monospace,
-                        color = androidx.compose.ui.graphics.Color(0xFFB71C1C).takeIf { false }
-                            ?: androidx.compose.ui.graphics.Color(0xFFC62828)
+                        color = androidx.compose.ui.graphics.Color(0xFFC62828)
                     )
-                ) { append(t.removeSurrounding("`")) }
-                else -> withStyle(androidx.compose.ui.text.SpanStyle(fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)) {
-                    append(t.trim('*'))
-                }
+                ) { append(h.a.removeSurrounding("`")) }
+                else -> withStyle(
+                    androidx.compose.ui.text.SpanStyle(
+                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+                    )
+                ) { append(h.a.trim('*')) }
             }
-            last = m.range.last + 1
+            last = h.end + 1
         }
         if (last < text.length) append(text.substring(last))
     }
