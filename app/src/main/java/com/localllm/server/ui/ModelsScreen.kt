@@ -3,6 +3,7 @@ package com.localllm.server.ui
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,6 +24,8 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -70,6 +73,17 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     var paramModel by remember { mutableStateOf<ModelFile?>(null) }
     var pendingDelete by remember { mutableStateOf<ModelFile?>(null) }
     var emptyTrashAsk by remember { mutableStateOf(false) }
+    var trashOpen by remember { mutableStateOf(false) }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+
+    // 回收站在列表最底部，展开后条目会落在屏幕外：自动滚到底，让用户看到刚展开的内容
+    androidx.compose.runtime.LaunchedEffect(trashOpen) {
+        if (trashOpen) {
+            kotlinx.coroutines.delay(120)
+            val last = listState.layoutInfo.totalItemsCount - 1
+            if (last >= 0) listState.animateScrollToItem(last)
+        }
+    }
     var renameText by remember { mutableStateOf("") }
     val context = androidx.compose.ui.platform.LocalContext.current
 
@@ -202,7 +216,7 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         paramModel?.let { m ->
             LocalModelParamsDialog(model = m, projectors = projectors, onDismiss = { paramModel = null })
         }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (models.isEmpty()) {
                 item { Text("还没有对话模型，点右上角「导入 GGUF」。", style = MaterialTheme.typography.bodyMedium) }
             }
@@ -261,22 +275,34 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 }
             }
 
+            // 回收站默认收起：占地方又容易误碰，点标题才展开
             item {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 4.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 16.dp, bottom = 4.dp)
+                        .clickable { trashOpen = !trashOpen },
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        "回收站（${trash.size}）",
-                        style = MaterialTheme.typography.titleSmall
-                    )
-                    if (trash.isNotEmpty()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "回收站（${trash.size}）",
+                            style = MaterialTheme.typography.titleSmall
+                        )
+                        Icon(
+                            if (trashOpen) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = if (trashOpen) "收起" else "展开",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 4.dp)
+                        )
+                    }
+                    if (trashOpen && trash.isNotEmpty()) {
                         TextButton(onClick = { emptyTrashAsk = true }) { Text("清空") }
                     }
                 }
             }
-            if (trash.isEmpty()) {
+            if (trashOpen && trash.isEmpty()) {
                 item {
                     Text(
                         "（空。删除的模型会先放这里，${ModelRepository.TRASH_KEEP_DAYS} 天内可恢复）",
@@ -285,7 +311,7 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     )
                 }
             }
-            items(trash, key = { "trash:" + it.file.absolutePath }) { t ->
+            if (trashOpen) items(trash, key = { "trash:" + it.file.absolutePath }) { t ->
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Row(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
