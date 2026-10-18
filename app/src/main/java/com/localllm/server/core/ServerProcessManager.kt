@@ -523,6 +523,14 @@ object ServerProcessManager {
         if (mmprojPath != null && File(mmprojPath).exists()) {
             cmd += listOf("--mmproj", mmprojPath)
         }
+        // LoRA 适配器：模型级绑定（设置里按模型挂），强度用 --lora-scaled 一次定死。
+        // 适配器文件不存在就不带，避免引擎直接报 failed to load lora adapter 起不来。
+        val loraPath = AppSettings.effectiveLora(modelPath)
+        if (loraPath != null) {
+            val scale = AppSettings.effectiveLoraScale(modelPath)
+            cmd += listOf("--lora-scaled", "$loraPath:$scale")
+            appendLog("LoRA 适配器：${File(loraPath).name}（强度 $scale）")
+        }
         // 量化 V 缓存必须开 FA（引擎硬性要求：quantized V cache requires flash_attn），
         // 用户设了 off/自动时强制 on 并留日志，避免启动失败。
         var fa = faMode

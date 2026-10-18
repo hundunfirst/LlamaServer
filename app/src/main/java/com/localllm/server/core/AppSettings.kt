@@ -505,8 +505,8 @@ object AppSettings {
         get() = prefs.getBoolean("search_fetch_full", true)
         set(value) = prefs.edit().putBoolean("search_fetch_full", value).apply()
 
-    // ---- 本地模型的按模型参数覆盖（精简版：上下文 / 输出上限 / mmproj 绑定）----
-    /** {模型绝对路径: {"ctx":Int?, "out":Int?, "mmproj":String?}}；字段缺省=跟随全局 */
+    // ---- 本地模型的按模型参数覆盖（精简版：上下文 / 输出上限 / mmproj / LoRA 绑定）----
+    /** {模型绝对路径: {"ctx":Int?, "out":Int?, "mmproj":String?, "lora":String?, "loraScale":Float?}} */
     var localModelParamsJson: String
         get() = prefs.getString("local_model_params", "{}") ?: "{}"
         set(value) = prefs.edit().putString("local_model_params", value).apply()
@@ -519,7 +519,9 @@ object AppSettings {
             LocalModelParam(
                 ctx = if (o.has("ctx")) o.optInt("ctx") else null,
                 out = if (o.has("out")) o.optInt("out") else null,
-                mmproj = if (o.has("mmproj")) o.optString("mmproj") else null
+                mmproj = if (o.has("mmproj")) o.optString("mmproj") else null,
+                lora = if (o.has("lora")) o.optString("lora") else null,
+                loraScale = if (o.has("loraScale")) o.optDouble("loraScale").toFloat() else null
             )
         }.getOrNull()
     }
@@ -528,13 +530,16 @@ object AppSettings {
     fun setLocalModelParam(path: String, p: LocalModelParam?) {
         val root = runCatching { org.json.JSONObject(localModelParamsJson) }
             .getOrDefault(org.json.JSONObject())
-        if (p == null || (p.ctx == null && p.out == null && p.mmproj == null)) {
+        if (p == null || (p.ctx == null && p.out == null && p.mmproj == null &&
+                    p.lora == null && p.loraScale == null)) {
             root.remove(path)
         } else {
             val o = org.json.JSONObject()
             p.ctx?.let { o.put("ctx", it) }
             p.out?.let { o.put("out", it) }
             p.mmproj?.let { o.put("mmproj", it) }
+            p.lora?.let { o.put("lora", it) }
+            p.loraScale?.let { o.put("loraScale", it) }
             root.put(path, o)
         }
         localModelParamsJson = root.toString()
@@ -557,6 +562,22 @@ object AppSettings {
     /** 模型级是否覆盖了 mmproj（用于 UI 标注来源） */
     fun isMmprojOverridden(modelPath: String?): Boolean =
         localModelParam(modelPath)?.mmproj != null
+
+    /** 生效的 LoRA 适配器路径（模型级绑定，不存在就返回 null）；scale 用 [effectiveLoraScale] */
+    fun effectiveLora(modelPath: String?): String? =
+        localModelParam(modelPath)?.lora?.takeIf { it.isNotBlank() && java.io.File(it).exists() }
+
+    /** LoRA 强度，默认 1.0；0 = 等效关闭 */
+    fun effectiveLoraScale(modelPath: String?): Float =
+        localModelParam(modelPath)?.loraScale ?: 1.0f
+
+    /** 适配器文件被删/移走后清掉绑定，避免一直拿旧路径去启动 */
+    fun dropLoraIfMissing(modelPath: String?) {
+        val p = localModelParam(modelPath) ?: return
+        if (p.lora != null && !java.io.File(p.lora).exists()) {
+            setLocalModelParam(modelPath ?: return, p.copy(lora = null, loraScale = null))
+        }
+    }
 
     /** 聊天云端渠道 */
     var chatCloudEnabled: Boolean
@@ -635,7 +656,11 @@ data class LocalModelParam(
     val ctx: Int? = null,
     val out: Int? = null,
     /** 投影文件绝对路径；空串=跟全局；"none"=明确不用 */
-    val mmproj: String? = null
+    val mmproj: String? = null,
+    /** LoRA 适配器绝对路径；null/空 = 不使用 */
+    val lora: String? = null,
+    /** LoRA 强度，默认 1.0（0 = 等效关闭） */
+    val loraScale: Float? = null
 )
 
 /** 助手指令预设 */

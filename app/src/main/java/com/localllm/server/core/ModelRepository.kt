@@ -14,12 +14,15 @@ data class ModelFile(
     val sizeBytes: Long
 )
 
-/** 回收站条目：原文件名、删除时间、原来在哪个目录（models / projectors） */
+/** 导入/存放的目标类别：决定落到哪个目录（与文件名无关） */
+enum class ImportKind { MODEL, PROJECTOR, ADAPTER }
+
+/** 回收站条目：原文件名、删除时间、原来属于哪一类 */
 data class TrashedFile(
     val file: File,
     val originalName: String,
     val deletedAt: Long,
-    val wasProjector: Boolean
+    val kind: ImportKind
 ) {
     val sizeBytes: Long get() = file.length()
 }
@@ -28,10 +31,12 @@ data class TrashedFile(
  * 模型存储按目录区分类型（与文件名无关）：
  * - files/models/      对话主模型（必选）
  * - files/projectors/  多模态投影 mmproj（可选，由用户在导入时指定类型、启动前手动选配）
+ * - files/adapters/    LoRA 适配器（可选，模型级绑定，启动时以 --lora 生效）
  */
 class ModelRepository(private val context: Context) {
     val modelsDir: File = File(context.filesDir, "models").apply { mkdirs() }
     val projectorsDir: File = File(context.filesDir, "projectors").apply { mkdirs() }
+    val adaptersDir: File = File(context.filesDir, "adapters").apply { mkdirs() }
 
     /** 回收站：删除只是同盘改名移动（GB 级文件瞬间完成），保留 [TRASH_KEEP_DAYS] 天后自动清 */
     private val trashDir: File = File(context.filesDir, "trash").apply { mkdirs() }
@@ -58,6 +63,8 @@ class ModelRepository(private val context: Context) {
 
     fun listProjectors(): List<ModelFile> = listDir(projectorsDir)
 
+    fun listAdapters(): List<ModelFile> = listDir(adaptersDir)
+
     private fun listDir(dir: File): List<ModelFile> {
         return dir.listFiles { f -> f.isFile && f.name.endsWith(".gguf", ignoreCase = true) }
             ?.sortedByDescending { it.lastModified() }
@@ -65,10 +72,23 @@ class ModelRepository(private val context: Context) {
             ?: emptyList()
     }
 
-    suspend fun importFromUri(uri: Uri, asProjector: Boolean): Result<ModelFile> =
+    private fun dirFor(kind: ImportKind): File = when (kind) {
+        ImportKind.MODEL -> modelsDir
+        ImportKind.PROJECTOR -> projectorsDir
+        ImportKind.ADAPTER -> adaptersDir
+    }
+
+    /** 文件所在类别（回收站要记住原路返回） */
+    fun kindOf(file: File): ImportKind = when (file.parentFile?.absolutePath) {
+        projectorsDir.absolutePath -> ImportKind.PROJECTOR
+        adaptersDir.absolutePath -> ImportKind.ADAPTER
+        else -> ImportKind.MODEL
+    }
+
+    suspend fun importFromUri(uri: Uri, kind: ImportKind): Result<ModelFile> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val dir = if (asProjector) projectorsDir else modelsDir
+                val dir = dirFor(kind)
                 val displayName = queryDisplayName(uri) ?: "model.gguf"
                 val safeName = sanitizeFileName(displayName).let {
                     if (it.endsWith(".gguf", ignoreCase = true)) it else "$it.gguf"
@@ -109,29 +129,37 @@ class ModelRepository(private val context: Context) {
         if (!src.isFile) return false
         clearSelectionFor(src)
         trashDir.mkdirs()
-        val wasProjector = src.parentFile?.absolutePath == projectorsDir.absolutePath
-        val target = File(trashDir, "${System.currentTimeMillis()}-${if (wasProjector) "p" else "m"}-${src.name}")
+        val flag = when (kindOf(src)) {
+            ImportKind.PROJECTOR -> "p"
+            ImportKind.ADAPTER -> "a"
+            ImportKind.MODEL -> "m"
+        }
+        val target = File(trashDir, "${System.currentTimeMillis()}-$flag-${src.name}")
         return src.renameTo(target)
     }
 
     fun listTrash(): List<TrashedFile> {
         val now = System.currentTimeMillis()
         return trashDir.listFiles { f -> f.isFile }?.mapNotNull { f ->
-            // 名字格式：<删除时间戳>-<p|m>-<原文件名>
+            // 名字格式：<删除时间戳>-<m|p|a>-<原文件名>
             val first = f.name.indexOf('-')
             val second = if (first > 0) f.name.indexOf('-', first + 1) else -1
             if (second < 0) {
-                TrashedFile(f, f.name, f.lastModified(), wasProjector = false)
+                TrashedFile(f, f.name, f.lastModified(), ImportKind.MODEL)
             } else {
                 val ts = f.name.take(first).toLongOrNull() ?: now
-                val flag = f.name.substring(first + 1, second)
-                TrashedFile(f, f.name.substring(second + 1), ts, wasProjector = flag == "p")
+                val kind = when (f.name.substring(first + 1, second)) {
+                    "p" -> ImportKind.PROJECTOR
+                    "a" -> ImportKind.ADAPTER
+                    else -> ImportKind.MODEL
+                }
+                TrashedFile(f, f.name.substring(second + 1), ts, kind)
             }
         }?.sortedByDescending { it.deletedAt } ?: emptyList()
     }
 
     fun restore(t: TrashedFile): Boolean {
-        val dir = if (t.wasProjector) projectorsDir else modelsDir
+        val dir = dirFor(t.kind)
         var target = File(dir, t.originalName)
         if (target.exists()) {
             val base = t.originalName.removeSuffix(".gguf").removeSuffix(".GGUF")

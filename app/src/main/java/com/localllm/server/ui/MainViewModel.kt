@@ -11,6 +11,7 @@ import com.localllm.server.core.GgufInfo
 import com.localllm.server.core.GgufInspector
 import com.localllm.server.core.GgufKind
 import com.localllm.server.core.HfMirrorClient
+import com.localllm.server.core.ImportKind
 import com.localllm.server.core.ModelFile
 import com.localllm.server.core.TrashedFile
 import com.localllm.server.core.ServerProcessManager
@@ -57,6 +58,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _projectors = MutableStateFlow<List<ModelFile>>(emptyList())
     val projectors: StateFlow<List<ModelFile>> = _projectors.asStateFlow()
+
+    private val _adapters = MutableStateFlow<List<ModelFile>>(emptyList())
+    val adapters: StateFlow<List<ModelFile>> = _adapters.asStateFlow()
 
     /** 每个 gguf 文件的头部判定结果（主模型 / 投影器 / 草稿…），按路径索引 */
     private val _ggufInfo = MutableStateFlow<Map<String, GgufInfo>>(emptyMap())
@@ -464,6 +468,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val list = App.modelRepository.listChatModels()
         _models.value = list
         _projectors.value = App.modelRepository.listProjectors()
+        _adapters.value = App.modelRepository.listAdapters()
+        // 适配器被删/挪走后清掉绑定，避免下次启动拿着失效路径
+        list.forEach { AppSettings.dropLoraIfMissing(it.file.absolutePath) }
         val selected = AppSettings.selectedModelPath
         if (selected == null || list.none { it.file.absolutePath == selected }) {
             _selectedModel.value = null
@@ -475,7 +482,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         // 逐个读 GGUF 头，标出"草稿/投影器"这类不能当主模型的文件（IO 线程，带缓存）
         viewModelScope.launch {
-            val all = list + _projectors.value
+            val all = list + _projectors.value + _adapters.value
             _ggufInfo.value = all.associate { it.file.absolutePath to GgufInspector.inspect(it.file) }
         }
     }
@@ -491,18 +498,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _selectedMmproj.value = path
     }
 
-    fun importModel(uri: Uri, asProjector: Boolean) {
+    fun importModel(uri: Uri, kind: ImportKind) {
         if (_importing.value) return
         _importing.value = true
         viewModelScope.launch {
-            val result = App.modelRepository.importFromUri(uri, asProjector)
+            val result = App.modelRepository.importFromUri(uri, kind)
             _importing.value = false
             result.onSuccess { model ->
                 refreshModels()
-                if (asProjector) {
-                    selectMmproj(model)
-                } else {
-                    selectModel(model)
+                when (kind) {
+                    ImportKind.PROJECTOR -> selectMmproj(model)
+                    ImportKind.ADAPTER -> Unit    // 适配器不自动绑，等用户在模型参数里挂
+                    ImportKind.MODEL -> selectModel(model)
                 }
             }.onFailure { e ->
                 _actionError.value = "导入失败：${e.message}"

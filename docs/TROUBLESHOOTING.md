@@ -259,8 +259,12 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
 - **注意**：作者只在 **PTQ1_0** 包上测过（2B/4B/9B 官方包就是 PTQ1_0）；我们手上的 **PQ2_0 / MTP**
   包作者未测。上面只证明「机制通、速度无损失」，**PQ2_0 上的效果（拒答率）没有量过**。
   作者自述该适配器是 research-grade（2B 方向残留约 1e-4）。
-- **App 现状**：`core/GgufInfo.kt` 会把这类文件判成 `ADAPTER` 并提示"需要配主模型使用"，
-  但**没有挂载入口**——要支持就得加「适配器目录 + 模型级绑定 + `--lora`」，规模与 mmproj 绑定相当。
+- **App 已支持（0.3.6）**：导入时选「LoRA 适配器」类型落到 `files/adapters/`；在模型页该模型的「参数」
+  弹窗里选适配器 + 强度（默认 1，0 = 等效关闭），启动时自动追加
+  `--lora-scaled <路径>:<强度>`（适配器文件不存在就不带，避免起不来）。
+  适配器被删/移走时绑定自动清理（`AppSettings.dropLoraIfMissing`）。真机验收：2B PQ2_0 + 该适配器，
+  日志出现 `LoRA 适配器：…（强度 1.0）`，`GET /lora-adapters` 返回 `id 0 / scale 1.0`，decode 36 tok/s。
+  适配器同样进回收站、可恢复。
 - 复测：`scripts/dev/mtp_bench.py --extra "--lora <设备路径> --lora-init-without-apply" --lora-scale 1`
 
 ### #26 OCR 数字/小数识别误差 [APP]

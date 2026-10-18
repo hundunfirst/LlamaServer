@@ -52,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.localllm.server.core.GgufInfo
 import com.localllm.server.core.GgufKind
+import com.localllm.server.core.ImportKind
 import com.localllm.server.core.ModelFile
 import com.localllm.server.core.AppSettings
 import com.localllm.server.core.LocalModelParam
@@ -61,6 +62,7 @@ import com.localllm.server.core.ModelRepository
 fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val models by vm.models.collectAsStateWithLifecycle()
     val projectors by vm.projectors.collectAsStateWithLifecycle()
+    val adapters by vm.adapters.collectAsStateWithLifecycle()
     val ggufInfo by vm.ggufInfo.collectAsStateWithLifecycle()
     val selected by vm.selectedModel.collectAsStateWithLifecycle()
     val selectedMmproj by vm.selectedMmproj.collectAsStateWithLifecycle()
@@ -122,12 +124,12 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     pendingUri?.let { uri ->
         AlertDialog(
             onDismissRequest = { pendingUri = null },
-            title = { Text("选择模型类型") },
+            title = { Text("选择文件类型") },
             text = { Text("这个 GGUF 文件属于哪一类？\n（仅用于存放分类，与文件名无关）") },
             confirmButton = {
                 TextButton(onClick = {
                     pendingUri = null
-                    vm.importModel(uri, asProjector = false)
+                    vm.importModel(uri, ImportKind.MODEL)
                 }) { Text("对话模型") }
             },
             dismissButton = {
@@ -135,7 +137,11 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     TextButton(onClick = { pendingUri = null }) { Text("取消") }
                     TextButton(onClick = {
                         pendingUri = null
-                        vm.importModel(uri, asProjector = true)
+                        vm.importModel(uri, ImportKind.ADAPTER)
+                    }) { Text("LoRA 适配器") }
+                    TextButton(onClick = {
+                        pendingUri = null
+                        vm.importModel(uri, ImportKind.PROJECTOR)
                     }) { Text("多模态投影") }
                 }
             }
@@ -214,7 +220,12 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         )
 
         paramModel?.let { m ->
-            LocalModelParamsDialog(model = m, projectors = projectors, onDismiss = { paramModel = null })
+            LocalModelParamsDialog(
+                model = m,
+                projectors = projectors,
+                adapters = adapters,
+                onDismiss = { paramModel = null }
+            )
         }
         LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (models.isEmpty()) {
@@ -275,6 +286,35 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 }
             }
 
+            item {
+                Text(
+                    "LoRA 适配器（在模型参数里按模型绑定）",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)
+                )
+            }
+            if (adapters.isEmpty()) {
+                item {
+                    Text(
+                        "（还没有适配器，导入时选「LoRA 适配器」类型）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            items(adapters, key = { "adapter:" + it.file.absolutePath }) { ad ->
+                ModelCard(
+                    model = ad,
+                    selected = false,
+                    onSelect = {},
+                    onDelete = { pendingDelete = ad },
+                    onParams = {},
+                    info = ggufInfo[ad.file.absolutePath],
+                    expected = GgufKind.ADAPTER,
+                    selectable = false
+                )
+            }
+
             // 回收站默认收起：占地方又容易误碰，点标题才展开
             item {
                 Row(
@@ -325,7 +365,11 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                             )
                             Text(
                                 formatSize(t.sizeBytes) + " · 删除于 " + formatTrashTime(t.deletedAt) +
-                                        (if (t.wasProjector) " · 投影" else ""),
+                                        when (t.kind) {
+                                            ImportKind.PROJECTOR -> " · 投影"
+                                            ImportKind.ADAPTER -> " · 适配器"
+                                            ImportKind.MODEL -> ""
+                                        },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -347,7 +391,8 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
 @Composable
 private fun ModelCard(model: ModelFile, selected: Boolean, onSelect: () -> Unit, onDelete: () -> Unit,
                       onRename: (ModelFile) -> Unit = {}, onParams: (ModelFile) -> Unit = {},
-                      info: GgufInfo? = null, expected: GgufKind = GgufKind.MAIN) {
+                      info: GgufInfo? = null, expected: GgufKind = GgufKind.MAIN,
+                      selectable: Boolean = true) {
     // 只在"放错类别"时提示：对话区里出现草稿/投影器，或投影区里出现主模型
     val mismatch: String? = when {
         info == null -> null
@@ -364,7 +409,11 @@ private fun ModelCard(model: ModelFile, selected: Boolean, onSelect: () -> Unit,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            RadioButton(selected = selected, onClick = onSelect)
+            if (selectable) {
+                RadioButton(selected = selected, onClick = onSelect)
+            } else {
+                Spacer(modifier = Modifier.width(12.dp))
+            }
             Column(modifier = Modifier.weight(1f)) {
                 Text(alias ?: model.name, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodyMedium)
                 Text(
@@ -374,6 +423,17 @@ private fun ModelCard(model: ModelFile, selected: Boolean, onSelect: () -> Unit,
                     color = if (custom) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                // 已绑定的 LoRA 适配器，卡片上直接标出来
+                if (expected == GgufKind.MAIN) {
+                    AppSettings.localModelParam(model.file.absolutePath)?.lora?.let { lp ->
+                        Text(
+                            "LoRA：" + (java.io.File(lp).name) +
+                                    " · 强度 " + AppSettings.effectiveLoraScale(model.file.absolutePath),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
                 // 头部判定：放错类别时提示（对话区里出现草稿/投影器，或投影区里出现主模型）
                 mismatch?.let {
                     Text(
@@ -415,12 +475,13 @@ private fun ModelCard(model: ModelFile, selected: Boolean, onSelect: () -> Unit,
     }
 }
 
-/** 本地模型参数弹窗（精简版：上下文 / 输出上限 / mmproj 绑定；留空=跟随全局） */
+/** 本地模型参数弹窗（精简版：上下文 / 输出上限 / mmproj / LoRA 绑定；留空=跟随全局） */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun LocalModelParamsDialog(
     model: ModelFile,
     projectors: List<ModelFile>,
+    adapters: List<ModelFile>,
     onDismiss: () -> Unit
 ) {
     val path = model.file.absolutePath
@@ -429,6 +490,11 @@ private fun LocalModelParamsDialog(
     var out by remember { mutableStateOf(existing?.out?.toString() ?: "") }
     // ""=跟全局, "none"=明确不用, 其它=投影文件绝对路径
     var mm by remember { mutableStateOf(existing?.mmproj ?: "") }
+    // ""=不挂适配器，其它=适配器绝对路径
+    var lora by remember { mutableStateOf(existing?.lora ?: "") }
+    var loraScale by remember {
+        mutableStateOf((existing?.loraScale ?: 1.0f).toString().removeSuffix(".0"))
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -503,6 +569,37 @@ private fun LocalModelParamsDialog(
                         )
                     }
                 }
+                Text("LoRA 适配器", style = MaterialTheme.typography.labelLarge)
+                if (adapters.isEmpty()) {
+                    Text(
+                        "（还没有适配器。模型页右上「导入 GGUF」时选「LoRA 适配器」）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(
+                            selected = lora.isEmpty(),
+                            onClick = { lora = "" },
+                            label = { Text("不使用", style = MaterialTheme.typography.labelSmall) }
+                        )
+                        adapters.forEach { a ->
+                            FilterChip(
+                                selected = lora == a.file.absolutePath,
+                                onClick = { lora = a.file.absolutePath },
+                                label = { Text(a.name, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+                    if (lora.isNotEmpty()) {
+                        CompactField(
+                            value = loraScale,
+                            onValueChange = { loraScale = it.filter { c -> c.isDigit() || c == '.' } },
+                            label = "LoRA 强度（0=等效关闭，默认 1；改完需重启服务）",
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
             }
         },
         confirmButton = {
@@ -512,7 +609,9 @@ private fun LocalModelParamsDialog(
                     LocalModelParam(
                         ctx = ctx.toIntOrNull(),
                         out = out.toIntOrNull(),
-                        mmproj = mm.ifBlank { null }
+                        mmproj = mm.ifBlank { null },
+                        lora = lora.ifBlank { null },
+                        loraScale = if (lora.isBlank()) null else (loraScale.toFloatOrNull() ?: 1.0f)
                     )
                 )
                 onDismiss()
