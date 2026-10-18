@@ -72,12 +72,12 @@ class ModelRepository(private val context: Context) {
             ?: emptyList()
     }
 
-    private fun dirFor(kind: ImportKind): File = when (kind) {
+    /** 某一类文件该落在哪个目录（下载与导入共用） */
+    fun dirFor(kind: ImportKind): File = when (kind) {
         ImportKind.MODEL -> modelsDir
         ImportKind.PROJECTOR -> projectorsDir
         ImportKind.ADAPTER -> adaptersDir
     }
-
     /** 文件所在类别（回收站要记住原路返回） */
     fun kindOf(file: File): ImportKind = when (file.parentFile?.absolutePath) {
         projectorsDir.absolutePath -> ImportKind.PROJECTOR

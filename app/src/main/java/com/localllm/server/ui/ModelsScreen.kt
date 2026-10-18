@@ -50,7 +50,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.material3.Surface
 import com.localllm.server.core.GgufInfo
+import com.localllm.server.core.GgufInspector
+import com.localllm.server.core.ModelTags
 import com.localllm.server.core.GgufKind
 import com.localllm.server.core.ImportKind
 import com.localllm.server.core.ModelFile
@@ -64,6 +67,7 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val projectors by vm.projectors.collectAsStateWithLifecycle()
     val adapters by vm.adapters.collectAsStateWithLifecycle()
     val ggufInfo by vm.ggufInfo.collectAsStateWithLifecycle()
+    val deepInfo by vm.deepInfo.collectAsStateWithLifecycle()
     val selected by vm.selectedModel.collectAsStateWithLifecycle()
     val selectedMmproj by vm.selectedMmproj.collectAsStateWithLifecycle()
     val importing by vm.importing.collectAsStateWithLifecycle()
@@ -239,7 +243,8 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     onDelete = { pendingDelete = model },
                     onRename = { mm -> renameText = AppSettings.aliasFor(mm.file.absolutePath) ?: mm.name; renamingModel = mm },
                     onParams = { paramModel = it },
-                    info = ggufInfo[model.file.absolutePath]
+                    info = ggufInfo[model.file.absolutePath],
+                    deep = deepInfo[model.file.absolutePath]
                 )
             }
 
@@ -273,7 +278,8 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     onRename = { mm -> renameText = AppSettings.aliasFor(mm.file.absolutePath) ?: mm.name; renamingModel = mm },
                     onParams = { paramModel = it },
                     info = ggufInfo[proj.file.absolutePath],
-                    expected = GgufKind.MMPROJ
+                    expected = GgufKind.MMPROJ,
+                    deep = deepInfo[proj.file.absolutePath]
                 )
             }
             if (projectors.isEmpty()) {
@@ -392,7 +398,8 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
 private fun ModelCard(model: ModelFile, selected: Boolean, onSelect: () -> Unit, onDelete: () -> Unit,
                       onRename: (ModelFile) -> Unit = {}, onParams: (ModelFile) -> Unit = {},
                       info: GgufInfo? = null, expected: GgufKind = GgufKind.MAIN,
-                      selectable: Boolean = true) {
+                      selectable: Boolean = true,
+                      deep: GgufInspector.GgufDeep? = null) {
     // 只在"放错类别"时提示：对话区里出现草稿/投影器，或投影区里出现主模型
     val mismatch: String? = when {
         info == null -> null
@@ -414,15 +421,55 @@ private fun ModelCard(model: ModelFile, selected: Boolean, onSelect: () -> Unit,
             } else {
                 Spacer(modifier = Modifier.width(12.dp))
             }
+            val tags = ModelTags.of(info, deep)
+            var tagsOpen by remember(model.file.absolutePath) { mutableStateOf(false) }
             Column(modifier = Modifier.weight(1f)) {
                 Text(alias ?: model.name, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    (if (alias != null) model.name + " · " else "") + formatSize(model.sizeBytes) +
-                            (if (custom) " · 参数已定制" else ""),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (custom) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                if (tagsOpen) {
+                    AlertDialog(
+                        onDismissRequest = { tagsOpen = false },
+                        title = { Text("模型标签 · " + (alias ?: model.name), maxLines = 2) },
+                        text = {
+                            Column(
+                                modifier = Modifier.verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    "全部来自 GGUF 元数据，与文件名无关；来源写在每条下面。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                tags.forEach { tg ->
+                                    Text(tg.label, style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        tg.detail,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                if (tags.isEmpty()) {
+                                    Text("（这个文件里没读到可用元数据）", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            TextButton(onClick = { tagsOpen = false }) { Text("关闭") }
+                        }
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        (if (alias != null) model.name + " · " else "") + formatSize(model.sizeBytes) +
+                                (if (custom) " · 参数已定制" else ""),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (custom) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    ModelTags.headline(info, deep)?.let { t ->
+                        TagChip(t.label) { tagsOpen = true }
+                    }
+                }
                 // 已绑定的 LoRA 适配器，卡片上直接标出来
                 if (expected == GgufKind.MAIN) {
                     AppSettings.localModelParam(model.file.absolutePath)?.lora?.let { lp ->
@@ -619,6 +666,23 @@ private fun LocalModelParamsDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
+}
+
+/** 卡片上的小标签（只有一个，点开看全部） */
+@Composable
+private fun TagChip(text: String, onClick: () -> Unit) {
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        modifier = Modifier.padding(start = 6.dp).clickable(onClick = onClick)
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+        )
+    }
 }
 
 private fun formatSize(bytes: Long): String {

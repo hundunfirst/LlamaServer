@@ -42,6 +42,7 @@ data class SettingsUiState(
     val faMode: String = "",
     val prismEngineEnabled: Boolean = false,
     val thinkEnabled: Boolean = true,
+    val reasoningEffort: String = "",
     val chatCloudEnabled: Boolean = false,
     val chatCloudUrl: String = "",
     val chatCloudKey: String = "",
@@ -66,6 +67,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _ggufInfo = MutableStateFlow<Map<String, GgufInfo>>(emptyMap())
     val ggufInfo: StateFlow<Map<String, GgufInfo>> = _ggufInfo.asStateFlow()
 
+    /** 深扫结果（MTP / 量化 / 模板能力），异步逐个补齐，UI 边到边显示 */
+    private val _deepInfo = MutableStateFlow<Map<String, GgufInspector.GgufDeep>>(emptyMap())
+    val deepInfo: StateFlow<Map<String, GgufInspector.GgufDeep>> = _deepInfo.asStateFlow()
+
     private val _selectedModel = MutableStateFlow<String?>(AppSettings.selectedModelPath)
     val selectedModel: StateFlow<String?> = _selectedModel.asStateFlow()
 
@@ -87,6 +92,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             faMode = AppSettings.faMode,
             prismEngineEnabled = AppSettings.prismEngineEnabled,
             thinkEnabled = AppSettings.thinkEnabled,
+            reasoningEffort = AppSettings.reasoningEffort,
             chatCloudEnabled = AppSettings.chatCloudEnabled,
             chatCloudUrl = AppSettings.chatCloudUrl,
             chatCloudKey = AppSettings.chatCloudKey,
@@ -136,7 +142,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val paused: Boolean = false,
         val repoId: String = "",
         val filePath: String = "",
-        val asProjector: Boolean = false,
+        val kind: ImportKind = ImportKind.MODEL,
         /** 完成时按 GGUF 头判定的提示（如"这是草稿模型"） */
         val note: String? = null
     )
@@ -190,7 +196,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _repoFiles.value = emptyList()
     }
 
-    fun startDownload(repoId: String, filePath: String, asProjector: Boolean, allowDuringRestore: Boolean = false) {
+    fun startDownload(repoId: String, filePath: String, kind: ImportKind, allowDuringRestore: Boolean = false) {
         // 已有同文件任务：暂停态→继续；进行中→忽略；恢复场景→跳过
         val existing = _downloads.value.find {
             it.repoId == repoId && it.filePath == filePath && !it.finished && it.error == null
@@ -206,35 +212,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         val id = (repoId + "|" + filePath).hashCode().toLong()
         val fileName = filePath.substringAfterLast('/')
-        val dir = if (asProjector) App.modelRepository.projectorsDir else App.modelRepository.modelsDir
+        val dir = App.modelRepository.dirFor(kind)
         val target = resolveTarget(dir, fileName)
         val url = HfMirrorClient.resolveUrl(repoId, filePath)
-        writeMeta(target, repoId, filePath, asProjector)
+        writeMeta(target, repoId, filePath, kind)
         val startBytes = maxOf(
             File(dir, target.name + ".part").length(),
             File(dir, target.name + ".part.new").length()
         )
         _downloads.value = _downloads.value + DownloadState(
             id, fileName, startBytes, -1,
-            repoId = repoId, filePath = filePath, asProjector = asProjector
+            repoId = repoId, filePath = filePath, kind = kind
         )
         persistDownloads()
-        downloadJobs[id] = beginDownload(id, target, url, asProjector)
+        downloadJobs[id] = beginDownload(id, target, url, kind)
     }
 
     /** 继续已暂停的任务（从 .part 断点恢复） */
     fun resumeDownload(id: Long) {
         val d = _downloads.value.find { it.id == id } ?: return
         if (!d.paused || _streamingActive(id)) return
-        val dir = if (d.asProjector) App.modelRepository.projectorsDir else App.modelRepository.modelsDir
+        val dir = App.modelRepository.dirFor(d.kind)
         val target = resolveTarget(dir, d.name)
-        writeMeta(target, d.repoId, d.filePath, d.asProjector)
+        writeMeta(target, d.repoId, d.filePath, d.kind)
         val startBytes = File(dir, target.name + ".part").length()
         _downloads.value = _downloads.value.map {
             if (it.id == id) it.copy(paused = false, speedBps = 0, readBytes = startBytes) else it
         }
         persistDownloads()
-        downloadJobs[id] = beginDownload(id, target, HfMirrorClient.resolveUrl(d.repoId, d.filePath), d.asProjector)
+        downloadJobs[id] = beginDownload(id, target, HfMirrorClient.resolveUrl(d.repoId, d.filePath), d.kind)
     }
 
     private fun _streamingActive(id: Long) = downloadJobs[id]?.isActive == true
@@ -252,19 +258,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return target
     }
 
-    private fun writeMeta(target: File, repoId: String, filePath: String, asProjector: Boolean) {
+    private fun writeMeta(target: File, repoId: String, filePath: String, kind: ImportKind) {
         runCatching {
             File(target.parentFile, target.name + ".part.meta").writeText(
                 org.json.JSONObject()
                     .put("repo", repoId)
                     .put("file", filePath)
-                    .put("proj", asProjector)
+                    .put("kind", kind.name.lowercase())
+                    .put("proj", kind == ImportKind.PROJECTOR)
                     .toString()
             )
         }
     }
 
-    private fun beginDownload(id: Long, target: File, url: String, asProjector: Boolean): Job {
+    private fun beginDownload(id: Long, target: File, url: String, kind: ImportKind): Job {
         targetFiles[id] = target
         // 进度轮询器：直接读磁盘 .part 大小 —— 唯一进度事实源（对齐 DownloadManager 模式）
         val poller = viewModelScope.launch {
@@ -302,20 +309,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }.onSuccess {
                 poller.cancel(); pollerJobs.remove(id); targetFiles.remove(id)
-                // 按 GGUF 头核对下载类型：选错类别（草稿当主模型 / 主模型当投影器）时别自动选中
+                // 按 GGUF 头核对下载类型：选错类别（草稿当主模型 / 主模型当投影器 / 适配器当模型）时别自动选中
                 val info = GgufInspector.inspect(target)
                 val note = when {
-                    !asProjector && !info.isLoadableAsModel -> info.warning
-                    asProjector && info.kind == GgufKind.MAIN -> "这其实是主模型，不是投影器；已放到投影目录"
+                    kind == ImportKind.MODEL && !info.isLoadableAsModel -> info.warning
+                    kind == ImportKind.PROJECTOR && info.kind == GgufKind.MAIN ->
+                        "这其实是主模型，不是投影器；已放到投影目录"
+                    kind == ImportKind.ADAPTER && info.kind != GgufKind.ADAPTER ->
+                        "这个文件的元数据不是 LoRA 适配器（${info.kind.name.lowercase()}），引擎可能加载不了"
                     else -> null
                 }
-                val autoSelect = note == null || asProjector || info.isLoadableAsModel
+                val autoSelect = kind == ImportKind.MODEL && (note == null || info.isLoadableAsModel)
                 _downloads.value = _downloads.value.map {
                     if (it.id == id) it.copy(finished = true, speedBps = 0, note = note) else it
                 }
                 refreshModels()
                 val model = ModelFile(target.name, file = target, sizeBytes = target.length())
-                if (asProjector) selectMmproj(model) else if (autoSelect) selectModel(model)
+                when (kind) {
+                    ImportKind.PROJECTOR -> selectMmproj(model)
+                    ImportKind.ADAPTER -> Unit          // 适配器不自动绑，等用户在模型参数里挂
+                    ImportKind.MODEL -> if (autoSelect) selectModel(model)
+                }
                 persistDownloads()
             }.onFailure { e ->
                 poller.cancel(); pollerJobs.remove(id); targetFiles.remove(id)
@@ -392,6 +406,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         AppSettings.thinkEnabled = value
     }
 
+    /** 思考等级（low/medium/high，空 = 模型默认）；同样即改即存 */
+    fun updateReasoningEffort(value: String) {
+        _settings.value = _settings.value.copy(reasoningEffort = value)
+        AppSettings.reasoningEffort = value
+    }
+
     fun generateToken(): String {
         val t = (1..24).joinToString("") { ("abcdefghijklmnopqrstuvwxyz0123456789").random().toString() }
         _settings.value = _settings.value.copy(apiToken = t)
@@ -409,14 +429,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val arr = org.json.JSONArray(AppSettings.downloadTasksJson)
             (0 until arr.length()).mapNotNull { i ->
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
-                Triple(o.optString("repo"), o.optString("file"), o.optBoolean("proj")) to o.optBoolean("paused")
+                Triple(
+                    o.optString("repo"),
+                    o.optString("file"),
+                    parseKind(o.optString("kind"), o.optBoolean("proj"))
+                ) to o.optBoolean("paused")
             }
         }.getOrDefault(emptyList())
             .filter { it.first.first.isNotBlank() && it.first.second.isNotBlank() }
 
         records.forEach { (repoFile, paused) ->
-            val (repo, file, proj) = repoFile
-            val dir = if (proj) App.modelRepository.projectorsDir else App.modelRepository.modelsDir
+            val (repo, file, kind) = repoFile
+            val dir = App.modelRepository.dirFor(kind)
             val dest = File(dir, file.substringAfterLast('/'))
             if (dest.exists()) return@forEach // 已完成
             if (paused) {
@@ -424,16 +448,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val partLen = File(dir, dest.name + ".part").length()
                 _downloads.value = _downloads.value + DownloadState(
                     id, dest.name, partLen, -1, paused = true,
-                    repoId = repo, filePath = file, asProjector = proj
+                    repoId = repo, filePath = file, kind = kind
                 )
             } else {
-                startDownload(repo, file, proj, allowDuringRestore = true)
+                startDownload(repo, file, kind, allowDuringRestore = true)
             }
         }
 
         // 孤儿断点：有 .part.meta 但没进记录的（如记录被清但文件还在）→ 自动入列续传
-        for (proj in listOf(false, true)) {
-            val dir = if (proj) App.modelRepository.projectorsDir else App.modelRepository.modelsDir
+        for (kind in ImportKind.values()) {
+            val dir = App.modelRepository.dirFor(kind)
             dir.listFiles { f -> f.isFile && f.name.endsWith(".part") }?.forEach { part ->
                 val meta = File(part.path + ".meta")
                 if (!meta.exists()) return@forEach
@@ -443,11 +467,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     if (repo.isNotBlank() && file.isNotBlank() &&
                         records.none { it.first.first == repo && it.first.second == file }
                     ) {
-                        startDownload(repo, file, o.optBoolean("proj"), allowDuringRestore = true)
+                        startDownload(repo, file, kind, allowDuringRestore = true)
                     }
                 }
             }
         }
+    }
+
+    /** ?????????????? proj ??????? */
+    private fun parseKind(name: String, proj: Boolean): ImportKind = when (name.lowercase()) {
+        "model" -> ImportKind.MODEL
+        "projector" -> ImportKind.PROJECTOR
+        "adapter" -> ImportKind.ADAPTER
+        else -> if (proj) ImportKind.PROJECTOR else ImportKind.MODEL
     }
 
     private fun persistDownloads() {
@@ -457,7 +489,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 org.json.JSONObject()
                     .put("repo", d.repoId)
                     .put("file", d.filePath)
-                    .put("proj", d.asProjector)
+                    .put("kind", d.kind.name.lowercase())
+                    .put("proj", d.kind == ImportKind.PROJECTOR)
                     .put("paused", d.paused)
             )
         }
@@ -484,6 +517,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val all = list + _projectors.value + _adapters.value
             _ggufInfo.value = all.associate { it.file.absolutePath to GgufInspector.inspect(it.file) }
+            // 深扫要读 24MB/文件，逐个来并边扫边发，列表不会等它
+            val acc = HashMap<String, GgufInspector.GgufDeep>()
+            for (f in all) {
+                val d = runCatching { GgufInspector.deepInfo(f.file) }.getOrNull() ?: continue
+                acc[f.file.absolutePath] = d
+                _deepInfo.value = acc.toMap()
+            }
         }
     }
 
@@ -671,6 +711,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             faMode = AppSettings.faMode,
             prismEngineEnabled = AppSettings.prismEngineEnabled,
             thinkEnabled = AppSettings.thinkEnabled,
+            reasoningEffort = AppSettings.reasoningEffort,
             chatCloudEnabled = AppSettings.chatCloudEnabled,
             chatCloudUrl = AppSettings.chatCloudUrl,
             chatCloudKey = AppSettings.chatCloudKey,

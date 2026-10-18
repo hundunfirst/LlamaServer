@@ -65,6 +65,8 @@ object ChatClient {
         model: String = "local",
         /** 本地 jinja 模板思考真开关（chat_template_kwargs.enable_thinking）；null=不干预（云端模板自管） */
         thinking: Boolean? = null,
+        /** 思考等级（low/medium/high）；null/空 = 不下发 */
+        effort: String? = null,
         /** 本地生成上限：防止退化复读跑到撑满上下文（约几十分钟）；null=不设 */
         maxTokens: Int? = null,
         /** OpenAI tools 数组；null/空则不注入 */
@@ -119,9 +121,11 @@ object ChatClient {
             if (maxTokens != null && maxTokens > 0) {
                 body.put("max_tokens", maxTokens)
             }
-            if (thinking != null) {
-                body.put("chat_template_kwargs", JSONObject().put("enable_thinking", thinking))
-            }
+            // 只下发模型模板认的参数：认得 enable_thinking 才发开关，认得 reasoning_effort 才发等级
+            val kwargs = JSONObject()
+            if (thinking != null) kwargs.put("enable_thinking", thinking)
+            if (effort != null && effort.isNotBlank()) kwargs.put("reasoning_effort", effort)
+            if (kwargs.length() > 0) body.put("chat_template_kwargs", kwargs)
             conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
 
             val code = conn.responseCode

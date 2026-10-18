@@ -44,6 +44,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.localllm.server.core.AppSettings
+import com.localllm.server.core.ImportKind
 
 @Composable
 fun DownloadScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
@@ -81,7 +82,7 @@ fun DownloadScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             confirmButton = {
                 TextButton(onClick = {
                     pendingFile = null
-                    startOrConfirm { vm.startDownload(repo, path, asProjector = false) }
+                    startOrConfirm { vm.startDownload(repo, path, ImportKind.MODEL) }
                 }) { Text("对话模型") }
             },
             dismissButton = {
@@ -89,7 +90,11 @@ fun DownloadScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     TextButton(onClick = { pendingFile = null }) { Text("取消") }
                     TextButton(onClick = {
                         pendingFile = null
-                        startOrConfirm { vm.startDownload(repo, path, asProjector = true) }
+                        startOrConfirm { vm.startDownload(repo, path, ImportKind.ADAPTER) }
+                    }) { Text("LoRA 适配器") }
+                    TextButton(onClick = {
+                        pendingFile = null
+                        startOrConfirm { vm.startDownload(repo, path, ImportKind.PROJECTOR) }
                     }) { Text("多模态投影") }
                 }
             }

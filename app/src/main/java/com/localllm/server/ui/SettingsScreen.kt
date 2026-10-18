@@ -89,6 +89,17 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 onCheckedChange = { v -> vm.updateThinkEnabled(v) }
             )
         }
+        // 思考等级：只有模板认 reasoning_effort 的模型会用到（模型页标签里能看到）
+        Text(
+            "思考等级（仅对模板认 reasoning_effort 的模型生效；模型页点标签可看该模型支持哪种）",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        QuickChips(
+            options = listOf("" to "模型默认", "low" to "低", "medium" to "中", "high" to "高"),
+            current = settings.reasoningEffort
+        ) { v -> vm.updateReasoningEffort(v) }
 
         // ---- 助手指令（全局预设）----
         var sysPresets by remember {

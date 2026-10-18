@@ -9,6 +9,7 @@ import com.localllm.server.core.ChatStore
 import com.localllm.server.core.DocExtract
 import com.localllm.server.core.DocMaker
 import com.localllm.server.core.FileTools
+import com.localllm.server.core.GgufInspector
 import com.localllm.server.core.McpHttpClient
 import com.localllm.server.core.MemoryStore
 import com.localllm.server.core.OcrEngine
@@ -65,6 +66,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** 各会话的生成进度（“342 token · 28.1 tok/s”），用于全局运行中指示 */
     private val _progress = MutableStateFlow<Map<String, String>>(emptyMap())
     val progress: StateFlow<Map<String, String>> = _progress.asStateFlow()
+
+    /** 当前本地模型的模板是否认 enable_thinking；认才下发开关，云端不干预 */
+    private fun thinkSwitch(cloud: Boolean): Boolean? {
+        if (cloud) return null
+        val p = AppSettings.selectedModelPath ?: return null
+        val d = runCatching { GgufInspector.deepInfo(java.io.File(p)) }.getOrNull() ?: return null
+        return if (d.hasEnableThinking) AppSettings.thinkEnabled else null
+    }
+
+    /** 模板认 reasoning_effort 才下发等级（设置里留空则用模型默认） */
+    private fun thinkEffort(cloud: Boolean): String? {
+        if (cloud) return null
+        val p = AppSettings.selectedModelPath ?: return null
+        val d = runCatching { GgufInspector.deepInfo(java.io.File(p)) }.getOrNull() ?: return null
+        return if (d.hasReasoningEffort) AppSettings.reasoningEffort else null
+    }
 
     private fun setProgress(sid: String, text: String?) {
         _progress.value =
@@ -589,8 +606,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                    else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
                         baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
                         model = if (cloud) AppSettings.chatCloudModel.ifBlank { "default" } else "local",
-                        // 本地走 jinja 模板真开关；云端模板自管不干预
-                        thinking = if (cloud) null else AppSettings.thinkEnabled,
+                        // 本地走 jinja 模板真开关；云端模板自管不干预。
+                        // 只下发模型模板认的参数（检测见 GgufInspector.deepInfo）
+                        thinking = thinkSwitch(cloud),
+                        effort = thinkEffort(cloud),
                         // 本地生成上限：退化复读时不至于跑到撑满上下文
                         maxTokens = if (cloud) null else AppSettings.effectiveOut(AppSettings.selectedModelPath),
                         // 搜索配额用尽 / 多轮无正文 → 不再提供搜索工具（防止弱模型空转到轮数上限、永远不回答）
@@ -937,7 +956,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                        else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
                             baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
                             model = if (cloud) AppSettings.chatCloudModel.ifBlank { "default" } else "local",
-                            thinking = if (cloud) null else AppSettings.thinkEnabled,
+                            thinking = thinkSwitch(cloud),
+                            effort = thinkEffort(cloud),
                             maxTokens = if (cloud) null else AppSettings.effectiveOut(AppSettings.selectedModelPath),
                             tools = null,
                             onDelta = { d ->

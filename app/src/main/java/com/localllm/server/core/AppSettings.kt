@@ -183,6 +183,11 @@ object AppSettings {
         set(value) = prefs.edit().putString("spec_type", value).apply()
 
     /** 思考模式：true=展示思考卡（默认）；false=提示词抑制+不展示（速度优先） */
+    /** 思考等级（仅对模板认 reasoning_effort 的模型有意义）：low / medium / high；空 = 用模型默认 */
+    var reasoningEffort: String
+        get() = prefs.getString("reasoning_effort", "") ?: ""
+        set(value) = prefs.edit().putString("reasoning_effort", value).apply()
+
     var thinkEnabled: Boolean
         get() = prefs.getBoolean("think_enabled", true)
         set(value) = prefs.edit().putBoolean("think_enabled", value).apply()
