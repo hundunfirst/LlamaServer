@@ -25,6 +25,7 @@ import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -127,6 +128,23 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     "当前模型：${modelName ?: "未选择"}",
                     style = MaterialTheme.typography.bodyMedium
                 )
+                // 文件被删后进程仍握着旧文件继续跑（Linux 语义），显示上要说清楚，否则容易误判。
+                // 删文件不会触发重组，所以这里每 3 秒自己查一次。
+                val runningPath = state.modelPath
+                var runningFileGone by remember(runningPath) { mutableStateOf(false) }
+                LaunchedEffect(runningPath) {
+                    while (runningPath != null) {
+                        runningFileGone = !java.io.File(runningPath).exists()
+                        kotlinx.coroutines.delay(3000)
+                    }
+                }
+                if (runningFileGone) {
+                    Text(
+                        "⚠ 该模型文件已被删除，服务仍在用已删文件运行；停止后请重新选择模型",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
                 val effCtx = com.localllm.server.core.AppSettings.effectiveCtx(selectedModel)
                 val effOut = com.localllm.server.core.AppSettings.effectiveOut(selectedModel)
                 val ctxOver = com.localllm.server.core.AppSettings.localModelParam(selectedModel)?.ctx != null
