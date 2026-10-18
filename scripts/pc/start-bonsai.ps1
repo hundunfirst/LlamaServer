@@ -4,6 +4,7 @@
 param(
     [string]$Model = "",      # 直接指定主模型文件名（跳过菜单）
     [string]$Projector = "",  # 直接指定投影器文件名；填 none 表示不用视觉
+    [string]$Draft = "",      # 直接指定投机解码草稿（DFlash2/dspark/MTP）；none = 不用
     [switch]$NoMenu,
     [switch]$Diagnose,        # 只打印每个文件的类型判定，方便排查
     [switch]$DryRun           # 只打印将要执行的命令，不真正启动
@@ -17,10 +18,16 @@ $THREADS        = 8           # CPU 线程数，一般填物理核数
 $HOST_ADDR      = "0.0.0.0"   # 127.0.0.1=只本机；0.0.0.0=局域网（手机）可连
 $APIKEY         = "twgdh"     # HOST 设 0.0.0.0 时建议设置；留空=谁都能用
 $MMPROJ_ON_CPU  = 1           # 1=投影器放内存（显存紧张推荐），0=放显存
+$USE_DRAFT      = 1           # 1=自动给主模型配上同尺寸的投机解码草稿（DFlash2/dspark/MTP）
+$DRAFT_N_MAX    = 4           # 每轮最多预测几个 token（投机解码，4~8 比较稳）
 
 # 名字对不上的投影器在这里手动配对（默认按"同系列名前缀"自动配）
 $ProjectorOverride = @{
     # "MiniCPM-V-4_7-1B-F16.gguf" = "mmproj-model-f16-4x.gguf"
+}
+# 投机解码草稿同理：默认按同尺寸自动配，特殊情况在这里手动指定
+$DraftOverride = @{
+    # "Ternary-Bonsai-2-9B-Q2_0.gguf" = "Ternary-Bonsai-2-9B-DFlash2-Q8_0.gguf"
 }
 # ===================================================================
 
@@ -101,26 +108,41 @@ function Get-GgufKind([string]$path) {
     return "main"
 }
 
-# 家族前缀：砍掉量化/精度/投影器那些尾巴，用来把主模型和投影器配对
+# 家族前缀：砍掉量化/精度/投影器/侧车那些尾巴，用来把主模型和投影器、草稿配对
 function Get-Base([string]$name) {
     $n = $name -replace '(?i)\.gguf$', ''
     $n = $n -replace '(?i)[-_.]mmproj.*$', ''
+    $n = $n -replace '(?i)[-_.](dflash2?|dspark|eagle3|mtp)([-_.].*)?$', ''
     $n = $n -replace '(?i)[-_.](UD[-_])?(PQ2_0|PTQ1_0|BF16|F16|F32)([-_.].*)?$', ''
     $n = $n -replace '(?i)[-_.](Q|IQ)\d+([-_][A-Z0-9]+)*$', ''
     return $n
 }
 
+# 草稿文件对应的 --spec-type 取值（看 architecture）
+function Get-DraftSpecType([string]$path) {
+    $a = "$((Get-GgufMeta $path).arch)".ToLower()
+    switch ($a) {
+        "dflash" { return "draft-dflash" }
+        "dspark" { return "draft-dspark" }
+        "eagle3" { return "draft-eagle3" }
+        "mtp"    { return "draft-mtp" }
+        default  { return "draft-simple" }
+    }
+}
+
 Write-Host ""
 Write-Host "  扫描 models\ ..." -ForegroundColor DarkGray
-$mains = @(); $projs = @(); $skipped = @()
+$mains = @(); $projs = @(); $drafts = @(); $skipped = @()
 foreach ($f in (Get-ChildItem $modelsDir -Filter *.gguf -File)) {
     $kind = Get-GgufKind $f.FullName
     if ($kind -eq "main") { $mains += $f }
     elseif ($kind -eq "mmproj") { $projs += $f }
+    elseif ($kind -eq "draft") { $drafts += $f }
     else { $skipped += ("{0}（{1}）" -f $f.Name, $kind) }
 }
 $mains = @($mains | Sort-Object Name)
 $projs = @($projs | Sort-Object Name)
+$drafts = @($drafts | Sort-Object Name)
 
 if ($Diagnose) {
     Write-Host ""
@@ -144,6 +166,15 @@ function Find-Projector([string]$modelName) {
     return $projs | Where-Object { (Get-Base $_.Name) -ieq $b } | Select-Object -First 1
 }
 
+function Find-Draft([string]$modelName) {
+    if ($DraftOverride.ContainsKey($modelName)) {
+        $hit = $drafts | Where-Object { $_.Name -ieq $DraftOverride[$modelName] } | Select-Object -First 1
+        if ($hit) { return $hit }
+    }
+    $b = Get-Base $modelName
+    return $drafts | Where-Object { (Get-Base $_.Name) -ieq $b } | Select-Object -First 1
+}
+
 # ---------- 选择模型 ----------
 $chosen = $null; $chosenProj = $null
 if ($Model) {
@@ -162,7 +193,9 @@ if ($Model) {
         $i++
         $gb = [math]::Round($m.Length / 1GB, 2)
         $p = Find-Projector $m.Name
+        $d = if ($USE_DRAFT -eq 1) { Find-Draft $m.Name } else { $null }
         $vis = if ($p) { "视觉：" + $p.Name } else { "视觉：无" }
+        if ($d) { $vis += "   草稿：" + $d.Name }
         Write-Host ("   [{0}] {1}" -f $i, $m.Name)
         Write-Host ("       {0} GB   {1}" -f $gb, $vis) -ForegroundColor DarkGray
     }
@@ -192,6 +225,16 @@ if ($Projector -eq "none") {
     $chosenProj = Find-Projector $chosen.Name
 }
 
+# 投机解码草稿：显式指定 > 自动配对；USE_DRAFT=0 时一律不用
+if ($Draft -eq "none" -or $USE_DRAFT -eq 0) {
+    $chosenDraft = $null
+} elseif ($Draft) {
+    $chosenDraft = $drafts | Where-Object { $_.Name -ieq $Draft } | Select-Object -First 1
+    if (-not $chosenDraft) { Fail "models\ 里没有草稿文件：$Draft（用 -Draft none 表示不用）" }
+} else {
+    $chosenDraft = Find-Draft $chosen.Name
+}
+
 Set-Content -Path $lastFile -Value ($mains.IndexOf($chosen) + 1) -NoNewline
 
 # ---------- 组装参数 ----------
@@ -208,11 +251,17 @@ if ($chosenProj) {
     $argList += @("--mmproj", $chosenProj.FullName)
     if ($MMPROJ_ON_CPU -eq 1) { $argList += "--no-mmproj-offload" }
 }
+if ($chosenDraft) {
+    $argList += @("--spec-draft-model", $chosenDraft.FullName,
+                  "--spec-type", (Get-DraftSpecType $chosenDraft.FullName),
+                  "--spec-draft-n-max", "$DRAFT_N_MAX")
+}
 
 Write-Host ""
 Write-Host "  ============================================================" -ForegroundColor Cyan
 Write-Host ("   主模型 : {0}" -f $chosen.Name)
 Write-Host ("   视觉   : {0}" -f $(if ($chosenProj) { $chosenProj.Name + $(if ($MMPROJ_ON_CPU -eq 1) { "（放内存）" } else { "（放显存）" }) } else { "不使用" }))
+Write-Host ("   草稿   : {0}" -f $(if ($chosenDraft) { $chosenDraft.Name + "（" + (Get-DraftSpecType $chosenDraft.FullName) + "，最多预测 " + $DRAFT_N_MAX + " token）" } else { "不使用" }))
 Write-Host ("   端口   : {0}    上下文: {1}    GPU层数: {2}    线程: {3}" -f $PORT, $CTX, $NGL, $THREADS)
 Write-Host ("   监听   : {0}" -f $HOST_ADDR)
 if ($APIKEY) { Write-Host "   令牌   : 已设置（客户端带 Authorization: Bearer ...）" }
