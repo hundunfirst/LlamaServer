@@ -1,8 +1,10 @@
 package com.localllm.server.ui
 
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -21,12 +23,13 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -49,6 +52,7 @@ import com.localllm.server.core.GgufKind
 import com.localllm.server.core.ModelFile
 import com.localllm.server.core.AppSettings
 import com.localllm.server.core.LocalModelParam
+import com.localllm.server.core.ModelRepository
 
 @Composable
 fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
@@ -58,12 +62,16 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val selected by vm.selectedModel.collectAsStateWithLifecycle()
     val selectedMmproj by vm.selectedMmproj.collectAsStateWithLifecycle()
     val importing by vm.importing.collectAsStateWithLifecycle()
+    val trash by vm.trash.collectAsStateWithLifecycle()
 
     // 待确认类型的导入 URI（先选文件，再选「对话模型 / 多模态投影」）
     var pendingUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var renamingModel by remember { mutableStateOf<ModelFile?>(null) }
     var paramModel by remember { mutableStateOf<ModelFile?>(null) }
+    var pendingDelete by remember { mutableStateOf<ModelFile?>(null) }
+    var emptyTrashAsk by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -120,6 +128,49 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         )
     }
 
+    pendingDelete?.let { m ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除模型？") },
+            text = {
+                Text(
+                    "${AppSettings.aliasFor(m.file.absolutePath) ?: m.name}（${formatSize(m.sizeBytes)}）\n\n" +
+                            "会先移到回收站，${ModelRepository.TRASH_KEEP_DAYS} 天内可以恢复；" +
+                            "到期自动清理，也可以现在就去回收站点「彻底删除」。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingDelete = null
+                    vm.deleteModel(m)
+                    Toast.makeText(context, "已移入回收站，可在列表底部恢复", Toast.LENGTH_SHORT).show()
+                }) { Text("移到回收站") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+            }
+        )
+    }
+
+    if (emptyTrashAsk) {
+        AlertDialog(
+            onDismissRequest = { emptyTrashAsk = false },
+            title = { Text("清空回收站？") },
+            text = {
+                Text("回收站里 ${trash.size} 个文件（共 ${formatSize(trash.sumOf { it.sizeBytes })}）会被彻底删除，无法恢复。")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    emptyTrashAsk = false
+                    vm.emptyTrash()
+                }) { Text("彻底删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { emptyTrashAsk = false }) { Text("取消") }
+            }
+        )
+    }
+
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -160,7 +211,7 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     model = model,
                     selected = model.file.absolutePath == selected,
                     onSelect = { vm.selectModel(model) },
-                    onDelete = { vm.deleteModel(model) },
+                    onDelete = { pendingDelete = model },
                     onRename = { mm -> renameText = AppSettings.aliasFor(mm.file.absolutePath) ?: mm.name; renamingModel = mm },
                     onParams = { paramModel = it },
                     info = ggufInfo[model.file.absolutePath]
@@ -193,7 +244,7 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     model = proj,
                     selected = proj.file.absolutePath == selectedMmproj,
                     onSelect = { vm.selectMmproj(proj) },
-                    onDelete = { vm.deleteModel(proj) },
+                    onDelete = { pendingDelete = proj },
                     onRename = { mm -> renameText = AppSettings.aliasFor(mm.file.absolutePath) ?: mm.name; renamingModel = mm },
                     onParams = { paramModel = it },
                     info = ggufInfo[proj.file.absolutePath],
@@ -207,6 +258,60 @@ fun ModelsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
+
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "回收站（${trash.size}）",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    if (trash.isNotEmpty()) {
+                        TextButton(onClick = { emptyTrashAsk = true }) { Text("清空") }
+                    }
+                }
+            }
+            if (trash.isEmpty()) {
+                item {
+                    Text(
+                        "（空。删除的模型会先放这里，${ModelRepository.TRASH_KEEP_DAYS} 天内可恢复）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            items(trash, key = { "trash:" + it.file.absolutePath }) { t ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                t.originalName,
+                                fontWeight = FontWeight.Medium,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                formatSize(t.sizeBytes) + " · 删除于 " + formatTrashTime(t.deletedAt) +
+                                        (if (t.wasProjector) " · 投影" else ""),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        TextButton(onClick = {
+                            vm.restoreTrashed(t)
+                            Toast.makeText(context, "已恢复：${t.originalName}", Toast.LENGTH_SHORT).show()
+                        }) { Text("恢复") }
+                        TextButton(onClick = { vm.purgeTrashed(t) }) {
+                            Text("彻底删除", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
                 }
             }
         }
@@ -227,6 +332,7 @@ private fun ModelCard(model: ModelFile, selected: Boolean, onSelect: () -> Unit,
     }
     val alias = AppSettings.aliasFor(model.file.absolutePath)
     val custom = AppSettings.localModelParam(model.file.absolutePath) != null
+    var menuOpen by remember { mutableStateOf(false) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -258,11 +364,26 @@ private fun ModelCard(model: ModelFile, selected: Boolean, onSelect: () -> Unit,
                            else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            IconButton(onClick = { onRename(model) }) {
-                Icon(Icons.Default.Edit, contentDescription = "命名", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            IconButton(onClick = onDelete) {
-                Icon(Icons.Default.Delete, contentDescription = "删除", tint = MaterialTheme.colorScheme.error)
+            // 重命名/删除收进二级菜单：卡片上少一个误触入口，删除还有确认弹窗兜底
+            Box {
+                IconButton(onClick = { menuOpen = true }) {
+                    Icon(
+                        Icons.Default.MoreVert, contentDescription = "更多",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("重命名") },
+                        onClick = { menuOpen = false; onRename(model) }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text("删除", color = MaterialTheme.colorScheme.error)
+                        },
+                        onClick = { menuOpen = false; onDelete() }
+                    )
+                }
             }
         }
     }
@@ -377,5 +498,12 @@ private fun LocalModelParamsDialog(
 
 private fun formatSize(bytes: Long): String {
     val mb = bytes / (1024.0 * 1024.0)
-    return if (mb >= 1024) String.format("%.2f GB", mb / 1024) else String.format("%.1f MB", mb)
+    return when {
+        mb >= 1024 -> String.format("%.2f GB", mb / 1024)
+        mb >= 1 -> String.format("%.1f MB", mb)
+        else -> String.format("%.0f KB", bytes / 1024.0)
+    }
 }
+
+private fun formatTrashTime(ts: Long): String =
+    java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(ts))

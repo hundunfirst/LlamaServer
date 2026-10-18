@@ -12,6 +12,7 @@ import com.localllm.server.core.GgufInspector
 import com.localllm.server.core.GgufKind
 import com.localllm.server.core.HfMirrorClient
 import com.localllm.server.core.ModelFile
+import com.localllm.server.core.TrashedFile
 import com.localllm.server.core.ServerProcessManager
 import com.localllm.server.core.ServerService
 import com.localllm.server.core.ServerUiState
@@ -510,8 +511,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deleteModel(model: ModelFile) {
-        App.modelRepository.delete(model)
+        if (!App.modelRepository.trash(model)) {
+            _actionError.value = "移入回收站失败：${model.name}"
+            return
+        }
         refreshModels()
+        refreshTrash()
+    }
+
+    private val _trash = MutableStateFlow<List<TrashedFile>>(emptyList())
+    val trash: StateFlow<List<TrashedFile>> = _trash.asStateFlow()
+
+    fun refreshTrash() {
+        _trash.value = App.modelRepository.listTrash()
+    }
+
+    fun restoreTrashed(t: TrashedFile) {
+        if (!App.modelRepository.restore(t)) {
+            _actionError.value = "恢复失败：${t.originalName}"
+        }
+        refreshModels()
+        refreshTrash()
+    }
+
+    fun purgeTrashed(t: TrashedFile) {
+        App.modelRepository.purge(t)
+        refreshTrash()
+    }
+
+    fun emptyTrash() {
+        App.modelRepository.emptyTrash()
+        refreshTrash()
     }
 
     /** 启动自动检查到的新版本（非空时 Root 弹窗提示） */
@@ -519,6 +549,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val autoUpdate: StateFlow<com.localllm.server.core.UpdateChecker.Info?> = _autoUpdate.asStateFlow()
 
     init {
+        viewModelScope.launch(Dispatchers.IO) {
+            // 回收站里的模型都是 GB 级，超过保留期就清掉，别长期占着空间
+            runCatching { App.modelRepository.purgeExpired() }
+            refreshTrash()
+        }
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val app = getApplication<Application>()
