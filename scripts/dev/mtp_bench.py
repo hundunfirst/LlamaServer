@@ -82,7 +82,7 @@ def http_json(path, body=None, timeout=900):
         return json.load(r)
 
 
-def start_server(engine, model, spec, nmax, ctx, threads, fa="on", env="", ngl=0):
+def start_server(engine, model, spec, nmax, ctx, threads, fa="on", env="", ngl=0, extra=""):
     kill_server()
     tag = "%s_%s_%s" % (re.sub(r"[^\w.-]", "_", model.replace(".gguf", ""))[:24],
                         spec, nmax if nmax else "def")
@@ -96,6 +96,8 @@ def start_server(engine, model, spec, nmax, ctx, threads, fa="on", env="", ngl=0
         cmd += " --spec-type %s" % spec
         if nmax:
             cmd += " --spec-draft-n-max %d" % nmax
+    if extra:
+        cmd += " " + extra
     cmd += " > %s/bench/%s 2>&1 </dev/null &" % (REMOTE, logname)
     t0 = time.time()
     # 后台服务会一直占住 pty，这条 adb 连接不能等它返回
@@ -113,10 +115,14 @@ def start_server(engine, model, spec, nmax, ctx, threads, fa="on", env="", ngl=0
     raise SystemExit("等待 /health 超时：\n" + tail_log(logname))
 
 
-def ask(text, max_tokens):
+def ask(text, max_tokens, lora_scale=None):
     body = {"messages": [{"role": "user", "content": text}],
             "max_tokens": max_tokens, "temperature": 0.0, "ignore_eos": True}
-    return http_json("/v1/chat/completions", body).get("timings") or {}
+    if lora_scale is not None:
+        # 需要启动时带 --lora-init-without-apply，强度才能按请求调
+        body["lora"] = [{"id": 0, "scale": lora_scale}]
+    d = http_json("/v1/chat/completions", body)
+    return d.get("timings") or {}, ((d.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
 
 
 def draft_lines(logname):
@@ -154,6 +160,9 @@ def main():
     ap.add_argument("--long", action="store_true")
     ap.add_argument("--fa", default="on", choices=["on", "off"])
     ap.add_argument("--env", default="", help="给 llama-server 加环境变量，如 LLAMA_MTP_CHAIN=1")
+    ap.add_argument("--extra", default="", help="原样追加给 llama-server 的参数，如 --lora x.gguf")
+    ap.add_argument("--lora-scale", type=float, default=None, help="按请求下发 lora 强度（需 --extra 带 --lora-init-without-apply）")
+    ap.add_argument("--show", type=int, default=0, help="打印回答前 N 个字符")
     a = ap.parse_args()
 
     global PORT
@@ -173,15 +182,17 @@ def main():
         print("-- 轮%d  CPU %s°C  电池 %s°C" % (r + 1, t_cpu, t_bat), flush=True)
         for label, spec, nmax, model in order:
             logname, load_s = start_server(a.engine, model, spec, nmax, a.ctx, a.threads,
-                                           a.fa, a.env, a.ngl)
+                                           a.fa, a.env, a.ngl, a.extra)
             decs = []
             for p in (PROMPT_A, PROMPT_B):
-                t = ask(p, a.gen)
+                t, content = ask(p, a.gen, a.lora_scale)
                 decs.append(float(t.get("predicted_per_second") or 0))
+                if a.show:
+                    print("     回答：%s" % content[:a.show].replace("\n", " "), flush=True)
             line = "   %-34s 起 %4.1fs | decode %6.2f / %6.2f" % (label, load_s, decs[0], decs[1])
             s = samples[label]
             if a.long:
-                tl = ask(long_prompt, a.gen)
+                tl, _ = ask(long_prompt, a.gen, a.lora_scale)
                 s["prefill"].append(float(tl.get("prompt_per_second") or 0))
                 decs.append(float(tl.get("predicted_per_second") or 0))
                 line += " / 长 %6.2f | prefill %5.1f (%d tok)" % (

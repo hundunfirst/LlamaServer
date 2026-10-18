@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 """璁惧璋冭瘯灏忓伐鍏凤紙鐪熸満楠岃瘉鐢級銆?
 鐢ㄦ硶:
   python scripts/dev/device.py ui [姝ｅ垯]              # dump 褰撳墠鐣岄潰骞跺垪鍑烘枃鏈妭鐐?  python scripts/dev/device.py tap X Y                 # 鐐逛竴涓?  python scripts/dev/device.py prefs K=V [K=V ...]     # 鏀?shared_prefs锛堝厛 force-stop锛?      鏀寔 selected_model / ctx_size / ngl / port / 甯冨皵閿紙true/false锛?  python scripts/dev/device.py bench [PORT] [妯″瀷鍚峕   # 瀵硅繍琛屼腑鐨勬湇鍔¤窇 128 token 鍩哄噯
@@ -134,7 +134,7 @@ if __name__ == "__main__":
     elif op == "bench":
         cmd_bench(args[0] if args else None)
     elif op == "help":
-        cmd_engine_help(args[0] if args else "prism")
+        cmd_engine_help(args[0] if args else "prism", tuple(args[1:]) or ("spec",))
     elif op == "server":
         cmd_server(args[0] if args else "--start")
     else:

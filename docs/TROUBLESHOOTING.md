@@ -241,6 +241,28 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
 - **复跑方式**：`scripts/dev/mtp_bench.py --configs "none;draft-mtp:1;draft-mtp:3" --runs 4`
   （直接起 llama-server、交替配置顺序、每轮重启服务，把热衰减从差值里扣掉；日志里抓接受率）。
 
+### #25e 三元包能挂 LoRA 适配器（实测，2026-10-18）
+
+- **背景**：AtomicChat 给 Bonsai 2 全家出了一套 rank-1「反拒答方向」适配器
+  （`AtomicChat/Ternary-Bonsai-2-{2B,4B,9B,27B}-Uncensored-LoRA-GGUF`，1.2 / 2.4 / 3.2 / 9.7 MB）。
+  基础包保持字节不变，方向只在计算图里以两个额外 matmul 生效，强度可按请求调。
+- **前提**：只有 PrismML fork 能开这些三元包（上游 opencl 引擎报
+  `invalid ggml type 142` / `unsupported prism.hadamard.version`）。本仓库内置的 prism 引擎
+  `prism-b10777-e3de715` 正是适配器作者验证过的构建。
+- **实测（本机，prism + `Ternary-Bonsai-2-2B-PQ2_0.gguf`）**：
+  | 项目 | 结果 |
+  |---|---|
+  | 加载 | 通过；`--lora <path> --lora-init-without-apply` 后 `GET /lora-adapters` 返回 `id 0 / scale 1.0` |
+  | 按请求调强度 | 通过；请求体带 `"lora":[{"id":0,"scale":1}]` 正常返回 |
+  | 代价 | decode 24.74 → 26.89 tok/s（`-t 8 -fa off`，2 轮，差异在噪声内）；加载慢约 1s |
+  | 错路径 | 立即失败 `failed to load lora adapter`，不会静默忽略 |
+- **注意**：作者只在 **PTQ1_0** 包上测过（2B/4B/9B 官方包就是 PTQ1_0）；我们手上的 **PQ2_0 / MTP**
+  包作者未测。上面只证明「机制通、速度无损失」，**PQ2_0 上的效果（拒答率）没有量过**。
+  作者自述该适配器是 research-grade（2B 方向残留约 1e-4）。
+- **App 现状**：`core/GgufInfo.kt` 会把这类文件判成 `ADAPTER` 并提示"需要配主模型使用"，
+  但**没有挂载入口**——要支持就得加「适配器目录 + 模型级绑定 + `--lora`」，规模与 mmproj 绑定相当。
+- 复测：`scripts/dev/mtp_bench.py --extra "--lora <设备路径> --lora-init-without-apply" --lora-scale 1`
+
 ### #26 OCR 数字/小数识别误差 [APP]
 - **现象**：表格类截图里个别金额小数点丢失（如 `7177.50` → `717750`）。
 - **原因**：ML Kit 对小字号数字的固有误差；已做「原图识别 + 坐标重建行 + 放大灰度预处理」降低概率。
