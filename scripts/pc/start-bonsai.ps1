@@ -12,7 +12,8 @@ param(
 
 # ================= 可调参数（改这里，改完保存即可） =================
 $PORT           = 8081        # 端口：别和你常驻的 llama-server 撞
-$CTX            = 8192        # 上下文：4GB 显存建议 8192，最多 16384
+$CTX            = 0           # 上下文：0 = 按模型大小自动（4GB 显存档位，见下）；写具体数字则强制
+$CTX_MAX        = 32768       # 自动模式的上限
 $NGL            = 99          # 送多少层到显卡：99=全部，0=纯 CPU
 $THREADS        = 8           # CPU 线程数，一般填物理核数
 $HOST_ADDR      = "0.0.0.0"   # 127.0.0.1=只本机；0.0.0.0=局域网（手机）可连
@@ -20,6 +21,7 @@ $APIKEY         = "twgdh"     # HOST 设 0.0.0.0 时建议设置；留空=谁都
 $MMPROJ_ON_CPU  = 1           # 1=投影器放内存（显存紧张推荐），0=放显存
 $USE_DRAFT      = 1           # 1=自动给主模型配上同尺寸的投机解码草稿（DFlash2/dspark/MTP）
 $DRAFT_N_MAX    = 4           # 每轮最多预测几个 token（投机解码，4~8 比较稳）
+$USE_MODEL_MTP  = 1           # 1=主模型自带 MTP 头时启用它投机（没有独立草稿文件时才有意义）
 
 # 名字对不上的投影器在这里手动配对（默认按"同系列名前缀"自动配）
 $ProjectorOverride = @{
@@ -42,6 +44,8 @@ function Fail($msg) {
     Write-Host ""
     Write-Host "  [错误] $msg" -ForegroundColor Red
     Write-Host ""
+    # 双击启动时窗口可能一闪而过/看不到，落一份到 error.log 便于排查
+    try { Add-Content -Path (Join-Path $PSScriptRoot "error.log") -Value ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), ($msg -replace "`n", " ")) } catch { }
     Read-Host "按回车退出"
     exit 1
 }
@@ -57,45 +61,48 @@ try {
 } catch { }
 
 # ---------- 读 GGUF 头，判断文件类型（主模型 / 投影器 / 草稿…） ----------
+# 做法：不按 KV 顺序逐个解析（不同版本/工具写的文件顺序和类型不一致，容易错位），
+# 而是直接在头部字节里搜 "general.architecture" 这类键名，再读它后面的值。
 function Get-GgufMeta([string]$path) {
+    $arch = ""; $type = ""
     try {
         $fs = [IO.File]::OpenRead($path)
         try {
-            $len = [Math]::Min(524288, $fs.Length)
+            # 注意：$fs.Length 是 Int64，[Math]::Min 必须两边都转 Int64，否则重载解析失败会抛异常
+            $len = [int][Math]::Min([int64]2097152, [int64]$fs.Length)
             $buf = New-Object byte[] $len
-            [void]$fs.Read($buf, 0, $len)
+            $got = 0
+            while ($got -lt $len) {
+                $n = $fs.Read($buf, $got, $len - $got)
+                if ($n -le 0) { break }
+                $got += $n
+            }
         } finally { $fs.Close() }
-        if ($len -lt 32 -or [Text.Encoding]::ASCII.GetString($buf, 0, 4) -ne "GGUF") {
+        $len = $got
+        if ($len -lt 64 -or [Text.Encoding]::ASCII.GetString($buf, 0, 4) -ne "GGUF") {
             return @{ arch = ""; type = "" }
         }
-        $pos = 4
-        $ver = [BitConverter]::ToUInt32($buf, $pos); $pos += 4
-        $nT  = [BitConverter]::ToUInt64($buf, $pos); $pos += 8
-        $nKV = [BitConverter]::ToUInt64($buf, $pos); $pos += 8
-        $arch = ""; $type = ""
-        for ($i = 0; $i -lt [int]$nKV; $i++) {
-            $klen = [int][BitConverter]::ToUInt64($buf, $pos); $pos += 8
-            $key  = [Text.Encoding]::UTF8.GetString($buf, $pos, $klen); $pos += $klen
-            $t    = [BitConverter]::ToUInt32($buf, $pos); $pos += 4
-            if ($t -eq 8) {
-                $vlen = [int][BitConverter]::ToUInt64($buf, $pos); $pos += 8
-                $val  = [Text.Encoding]::UTF8.GetString($buf, $pos, $vlen); $pos += $vlen
-                if ($key -eq "general.architecture") { $arch = $val }
-                elseif ($key -eq "general.type")     { $type = $val }
-            } elseif ($t -eq 9) {
-                $et = [BitConverter]::ToUInt32($buf, $pos); $pos += 4
-                $n  = [int][BitConverter]::ToUInt64($buf, $pos); $pos += 8
-                if ($arch -or $n -gt 4096) { break }   # 词表那种大数组不必读完
-                for ($j = 0; $j -lt $n; $j++) {
-                    $sl = [int][BitConverter]::ToUInt64($buf, $pos); $pos += 8 + $sl
-                }
-            } else {
-                $pos += switch ($t) { 0 {1} 1 {1} 7 {1} 2 {2} 3 {2} 4 {4} 5 {4} 6 {4} 10 {8} 11 {8} 12 {8} default {0} }
-            }
-            if ($arch -and $type) { break }
+        # Latin1：1 字符 = 1 字节，所以字符下标就是字节偏移
+        $s = [Text.Encoding]::GetEncoding(28591).GetString($buf)
+
+        $readValue = {
+            param([string]$key)
+            $i = $s.IndexOf($key, [StringComparison]::Ordinal)
+            if ($i -lt 0) { return "" }
+            $p = $i + $key.Length
+            if ($p + 12 -gt $buf.Length) { return "" }
+            $t = [BitConverter]::ToUInt32($buf, $p); $p += 4
+            if ($t -ne 8) { return "" }                      # 不是字符串（8）就跳过
+            $vlen = [int][BitConverter]::ToUInt64($buf, $p); $p += 8
+            if ($vlen -le 0 -or $vlen -gt 64 -or $p + $vlen -gt $buf.Length) { return "" }
+            return [Text.Encoding]::UTF8.GetString($buf, $p, $vlen)
         }
-        return @{ arch = $arch; type = $type }
-    } catch { return @{ arch = ""; type = "" } }
+
+        $arch = & $readValue "general.architecture"
+        $type = & $readValue "general.type"
+        $size = & $readValue "general.size_label"
+    } catch { }
+    return @{ arch = $arch; type = $type; size = $size }
 }
 
 function Get-GgufKind([string]$path) {
@@ -195,7 +202,7 @@ if ($Model) {
         $p = Find-Projector $m.Name
         $d = if ($USE_DRAFT -eq 1) { Find-Draft $m.Name } else { $null }
         $vis = if ($p) { "视觉：" + $p.Name } else { "视觉：无" }
-        if ($d) { $vis += "   草稿：" + $d.Name }
+        if ($d) { $vis += "   草稿可选：" + $d.Name }
         Write-Host ("   [{0}] {1}" -f $i, $m.Name)
         Write-Host ("       {0} GB   {1}" -f $gb, $vis) -ForegroundColor DarkGray
     }
@@ -225,22 +232,47 @@ if ($Projector -eq "none") {
     $chosenProj = Find-Projector $chosen.Name
 }
 
-# 投机解码草稿：显式指定 > 自动配对；USE_DRAFT=0 时一律不用
+# 投机解码：
+#   -Draft <文件>  → 用指定草稿（必须是同一血统的主模型配套，否则会报 invalid vector subscript）
+#   -Draft mtp     → 只用主模型自带的 MTP 头
+#   -Draft none    → 全关（纯基线，用于对比）
+#   默认(auto)     → 主模型自带 MTP 就开 MTP；外部草稿文件只在菜单里提示，不自动启用
+#                    （实测：9B 的 DFlash2 草稿配 PQ2_0-MTP 主模型会加载失败）
+$chosenDraft = $null
+$useMtp = $false
+$draftHint = $null
 if ($Draft -eq "none" -or $USE_DRAFT -eq 0) {
-    $chosenDraft = $null
+    # 显式关闭
+} elseif ($Draft -ieq "mtp") {
+    $useMtp = $true
 } elseif ($Draft) {
     $chosenDraft = $drafts | Where-Object { $_.Name -ieq $Draft } | Select-Object -First 1
-    if (-not $chosenDraft) { Fail "models\ 里没有草稿文件：$Draft（用 -Draft none 表示不用）" }
+    if (-not $chosenDraft) { Fail "models\ 里没有草稿文件：$Draft（用 -Draft none 表示不用，-Draft mtp 用内置 MTP）" }
 } else {
-    $chosenDraft = Find-Draft $chosen.Name
+    if ($USE_MODEL_MTP -eq 1 -and $chosen.Name -match '(?i)\bmtp\b') { $useMtp = $true }
+    $maybe = Find-Draft $chosen.Name
+    if ($maybe) { $draftHint = $maybe.Name }
 }
 
 Set-Content -Path $lastFile -Value ($mains.IndexOf($chosen) + 1) -NoNewline
 
+# ---------- 上下文：$CTX=0 时按模型大小自动（4GB 显存档位） ----------
+$ctxUse = $CTX
+if ($ctxUse -le 0) {
+    $sizeGb = 0.0
+    $label = "$((Get-GgufMeta $chosen.FullName).size)"
+    if ($label -match '(?i)^([0-9.]+)\s*B') { [void][double]::TryParse($Matches[1], [ref]$sizeGb) }
+    $ctxUse = if ($sizeGb -ge 20) { 2048 }
+              elseif ($sizeGb -ge 8) { 4096 }
+              elseif ($sizeGb -ge 3) { 16384 }
+              else { $CTX_MAX }
+    if ($ctxUse -gt $CTX_MAX) { $ctxUse = $CTX_MAX }
+}
+
 # ---------- 组装参数 ----------
 $argList = @(
     "-m", $chosen.FullName,
-    "-c", "$CTX",
+    "-c", "$ctxUse",
     "-ngl", "$NGL",
     "-t", "$THREADS",
     "--host", $HOST_ADDR,
@@ -255,24 +287,39 @@ if ($chosenDraft) {
     $argList += @("--spec-draft-model", $chosenDraft.FullName,
                   "--spec-type", (Get-DraftSpecType $chosenDraft.FullName),
                   "--spec-draft-n-max", "$DRAFT_N_MAX")
+} elseif ($useMtp) {
+    # 主模型名里带 MTP = 自带 MTP 头，用模型自己的头做投机（不需要额外草稿文件）
+    $argList += @("--spec-type", "draft-mtp", "--spec-draft-n-max", "$DRAFT_N_MAX")
 }
 
 Write-Host ""
 Write-Host "  ============================================================" -ForegroundColor Cyan
 Write-Host ("   主模型 : {0}" -f $chosen.Name)
 Write-Host ("   视觉   : {0}" -f $(if ($chosenProj) { $chosenProj.Name + $(if ($MMPROJ_ON_CPU -eq 1) { "（放内存）" } else { "（放显存）" }) } else { "不使用" }))
-Write-Host ("   草稿   : {0}" -f $(if ($chosenDraft) { $chosenDraft.Name + "（" + (Get-DraftSpecType $chosenDraft.FullName) + "，最多预测 " + $DRAFT_N_MAX + " token）" } else { "不使用" }))
-Write-Host ("   端口   : {0}    上下文: {1}    GPU层数: {2}    线程: {3}" -f $PORT, $CTX, $NGL, $THREADS)
+Write-Host ("   草稿   : {0}" -f $($(if ($chosenDraft) { $chosenDraft.Name + "（" + (Get-DraftSpecType $chosenDraft.FullName) + "，最多预测 " + $DRAFT_N_MAX + " token）" }
+                                 elseif ($useMtp) { "用模型自带的 MTP 头（draft-mtp，最多预测 " + $DRAFT_N_MAX + " token）" }
+                                 else { "不使用" })))
+Write-Host ("   端口   : {0}    上下文: {1}{2}    GPU层数: {3}    线程: {4}" -f $PORT, $ctxUse, $(if ($CTX -le 0) { "（按模型大小自动）" } else { "" }), $NGL, $THREADS)
 Write-Host ("   监听   : {0}" -f $HOST_ADDR)
 if ($APIKEY) { Write-Host "   令牌   : 已设置（客户端带 Authorization: Bearer ...）" }
 Write-Host ("   接口   : http://127.0.0.1:{0}/v1    界面: http://127.0.0.1:{0}/" -f $PORT)
 Write-Host "  ============================================================" -ForegroundColor Cyan
 Write-Host "   关闭这个窗口即可停止服务。" -ForegroundColor DarkGray
+if ($draftHint -and -not $chosenDraft) {
+    Write-Host ("   提示：同尺寸还有 $draftHint 可以当投机草稿，但必须和主模型同一血统；" +
+                "想试就加 -Draft `"$draftHint`"（配不上会直接报错退出）") -ForegroundColor DarkYellow
+}
 Write-Host ""
 Write-Host "  切换模型：关掉窗口，重新双击 启动Bonsai.bat 再选一个。" -ForegroundColor DarkGray
 Write-Host ""
 
+$script:bootLog = Join-Path $root "boot.log"
+function Boot([string]$msg) {
+    try { Add-Content -Path $script:bootLog -Value ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $msg) } catch { }
+}
+
 Push-Location $llamaDir
+Boot ("launch: " + $exe + " " + ($argList -join " "))
 if ($DryRun) {
     Write-Host ""
     Write-Host "  [DryRun] 将要执行：" -ForegroundColor Yellow
@@ -282,8 +329,13 @@ if ($DryRun) {
     exit 0
 }
 try {
-    & $exe @argList 2>&1 | Tee-Object -FilePath (Join-Path $root "server.log")
+    # 直接执行，不接管它的输出：
+    #   一旦写成 "2>&1 | Tee/ForEach"，PowerShell 5.1 会把 llama-server 写到 stderr 的日志
+    #   当成 ErrorRecord，整屏变红（像在报错），所以这里保持原样直出，颜色由程序自己决定。
+    Boot "exe start"
+    & $exe @argList
     $code = $LASTEXITCODE
+    Boot ("exe exit code=" + $code)
 } finally { Pop-Location }
 
 Write-Host ""
