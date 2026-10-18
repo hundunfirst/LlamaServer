@@ -193,8 +193,7 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
   | 视觉 mmproj | 通过；Qwen2.5-VL-3B + 配套投影器正确识别"蓝圆 + 红矩形" |
   | KV 量化 + `-fa` | 通过；`--cache-type-k/v q8_0` + 自动 `-fa on`，0.5B 107 tok/s |
   | 投机 `--spec-type ngram-simple` | 通过；带 `--spec-draft-n-max 32` 正常起 |
-  | 投机 `--spec-type draft-mtp` | **参数被接受**（会走 "creating MTP draft context"），但要求模型自带 MTP 头，
-  普通模型报 `model doesn't contain MTP layers`；端到端未验（设备上已无 MTP 模型） |
+  | 投机 `--spec-type draft-mtp` | 普通模型报 `model doesn't contain MTP layers`；带 nextn 层的模型能起，但**实测更慢**（见 #25d） |
 
 
 ### #25c App 会读 GGUF 头判定文件类型（2026-10-18）
@@ -209,6 +208,38 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
   报「不是主模型：这是投机解码的草稿/侧车文件（architecture=dflash）」而不是让 llama-server 抛 loader 错。
 - **验证**：造了一个 156 字节的最小 GGUF（arch=clip）放进模型目录，模型页正确标红、
   启动被拦截（用户真机确认）。
+
+### #25d 模型自带 MTP 层：能跑，但在这台机器上是负收益（2026-10-18 实测）
+
+- **判据（别信文件名）**：KV 元数据里 `<arch>.nextn_predict_layers > 0` 就说明模型自带 MTP 头，
+  llama.cpp 建 MTP 上下文时只看这个。`Ternary-Bonsai-2-4B-PQ2_0-MTP-Q8_0.gguf` 是
+  `qwen35.nextn_predict_layers = 1`（block_count 33 而不是 32，多出来的 `blk.32.nextn.*` 就是 MTP 层）。
+  实测 `Qwen3.5-4B-UD-Q5_K_XL.gguf` 也带这一层。
+- **这个键排在词表大数组之后**（本机这两个模型 KV 段约 10.5MB），只读头 512KB 读不到。
+  `core/GgufInfo.kt` 的 `hasMtpHead()` 单独读 24MB 并按字节搜键名（不在字节流里逐条走 KV，
+  词表那种几十万条字符串数组很容易踩类型对齐坑），结果带缓存；只在启动前对选中的那个文件调一次。
+- **App 策略（0.3.6）**：检测到就**只记一行日志、默认不开**；想强开在设置里填 `spec_type=draft-mtp`
+  （模型不带 nextn 层时自动忽略）。三个引擎都接受这个参数，所以代码里不按引擎分支。
+  引擎真拒绝时（`failed to create MTP context`）会自动去掉参数重试一次，加载不中断；
+  无关错误（如 opencl 装三元包的 `invalid ggml type 142`）不会被误判成 MTP 问题。
+- **A/B 实测（同机交替多轮取中位数，`-t 8 -fa off`，全程 CPU 95.8°C 降频）**：
+
+  | 配置 | Bonsai 4B PQ2_0-MTP | Qwen3.5-4B Q5_K_XL |
+  |---|---|---|
+  | 不带投机 | 12.48 tok/s | 6.99 tok/s |
+  | `draft-mtp` 默认（n-max 3） | 9.27（**0.74x**） | 5.09（**0.73x**） |
+  | `draft-mtp` n-max 1 | 10.92（0.95x） | — |
+  | `draft-mtp` n-max 8 | 5.99（0.52x） | — |
+
+  草稿接受率 0.63–0.90、平均猜中 1.9–3.3 个 token，**问题不在 MTP 头**。
+- **根因**：这台机器的批量前向几乎不省时间——prefill 只有 23 tok/s，而单 token 解码 12.5 tok/s，
+  即"验证 4 个候选"≈"顺序跑 3.2 个 token"的成本，投机的前提（验证比顺序便宜）不成立。
+  n-max 越大越亏（0.95 → 0.74 → 0.52）正是这条的推论。等引擎的 batch 路径变快后，
+  把 `ServerProcessManager` 里那句默认跳过改回默认启用即可，用户无感。
+- **三元包上还有一个前提**：`PQ2_0`（type 142）只有 prism 能解，上游 opencl 引擎直接
+  `invalid ggml type 142`，所以 GPU 路径对这个模型没有 MTP 可谈。
+- **复跑方式**：`scripts/dev/mtp_bench.py --configs "none;draft-mtp:1;draft-mtp:3" --runs 4`
+  （直接起 llama-server、交替配置顺序、每轮重启服务，把热衰减从差值里扣掉；日志里抓接受率）。
 
 ### #26 OCR 数字/小数识别误差 [APP]
 - **现象**：表格类截图里个别金额小数点丢失（如 `7177.50` → `717750`）。

@@ -57,12 +57,16 @@ object ServerProcessManager {
     @Volatile
     private var ctxDegradeUsed = false
 
+    /** MTP 退回只做一次，避免反复试 */
+    @Volatile
+    private var specDisabledUsed = false
+
     /** 上下文过大 → 自动减半重试一次 */
     private fun degradeCtxAndRestart(
         modelPath: String, port: Int, ctxSize: Int, threads: Int, ngl: Int,
         lanEnabled: Boolean, apiToken: String, cacheTypeK: String, cacheTypeV: String,
         specType: String, mmprojPath: String?, faMode: String, apiTokenEnabled: Boolean,
-        displayHost: String, prismEngine: Boolean
+        displayHost: String, prismEngine: Boolean, specDisabled: Boolean = false
     ): Boolean {
         synchronized(this) {
             if (ctxDegradeUsed || ctxSize <= 2048) return false
@@ -83,7 +87,8 @@ object ServerProcessManager {
                 kotlinx.coroutines.delay(500)
                 start(
                     modelPath, port, newCtx, threads, ngl, lanEnabled, apiToken,
-                    cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, prismEngine
+                    cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, prismEngine,
+                    specDisabled = specDisabled
                 )
             }
             return true
@@ -94,6 +99,46 @@ object ServerProcessManager {
     private fun allocFailed(): Boolean = synchronized(logBuffer) {
         logBuffer.any {
             it.contains("GPU 显存分配失败") || it.contains("failed to allocate OpenCL buffer")
+        }
+    }
+
+    /** 引擎拒绝 MTP 投机解码（模型不带 nextn 层 / 该引擎未编入），两种引擎报错原文都在这 */
+    private fun specFailed(): Boolean = synchronized(logBuffer) {
+        logBuffer.any {
+            it.contains("failed to create MTP context") || it.contains("doesn't contain MTP layers")
+        }
+    }
+
+    /** MTP 起不来 → 去掉 --spec-type 重试一次，把失败从用户视野里拿掉 */
+    private fun degradeSpecAndRestart(
+        modelPath: String, port: Int, ctxSize: Int, threads: Int, ngl: Int,
+        lanEnabled: Boolean, apiToken: String, cacheTypeK: String, cacheTypeV: String,
+        specType: String, mmprojPath: String?, faMode: String, apiTokenEnabled: Boolean,
+        displayHost: String, prismEngine: Boolean
+    ): Boolean {
+        synchronized(this) {
+            if (specDisabledUsed) return false
+            specDisabledUsed = true
+            appendLog("MTP 投机解码未能启动，去掉该参数重试（其他设置不变）")
+            restartPending = true
+            killCurrentQuiet()
+            _state.value = ServerUiState(
+                status = ServerUiState.Status.STARTING,
+                host = displayHost,
+                port = port,
+                modelPath = modelPath,
+                runningMmproj = mmprojPath,
+                message = "MTP 不可用，正在按普通模式重试…"
+            )
+            scope.launch {
+                kotlinx.coroutines.delay(500)
+                start(
+                    modelPath, port, ctxSize, threads, ngl, lanEnabled, apiToken,
+                    cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, prismEngine,
+                    specDisabled = true
+                )
+            }
+            return true
         }
     }
 
@@ -116,7 +161,7 @@ object ServerProcessManager {
         modelPath: String, port: Int, ctxSize: Int, threads: Int, ngl: Int,
         lanEnabled: Boolean, apiToken: String, cacheTypeK: String, cacheTypeV: String,
         specType: String, mmprojPath: String?, faMode: String, apiTokenEnabled: Boolean,
-        displayHost: String, prismEngine: Boolean
+        displayHost: String, prismEngine: Boolean, specDisabled: Boolean = false
     ): Boolean {
         synchronized(this) {
             if (degradedRetryUsed || ngl <= 0) return false
@@ -137,7 +182,8 @@ object ServerProcessManager {
                 kotlinx.coroutines.delay(500)
                 start(
                     modelPath, port, ctxSize, threads, newNgl, lanEnabled, apiToken,
-                    cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, prismEngine
+                    cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, prismEngine,
+                    specDisabled = specDisabled
                 )
             }
             return true
@@ -165,12 +211,15 @@ object ServerProcessManager {
         faMode: String = "",
         apiTokenEnabled: Boolean = false,
         /** 纯 CPU 模式下是否改用 PrismML fork 引擎（见 BinaryInstaller.MODE_PRISM） */
-        prismEngine: Boolean = false
+        prismEngine: Boolean = false,
+        /** 上一轮带的 MTP 投机解码导致启动失败时置 true，防止反复重试 */
+        specDisabled: Boolean = false
     ) {
         synchronized(this) {
             if (process?.isAlive == true) return
             degradedRetryUsed = false
             ctxDegradeUsed = false
+            specDisabledUsed = false
             restartPending = false
             // 清空上一次启动的日志残留：否则历史分配失败会误触发本次降级
             synchronized(logBuffer) {
@@ -213,13 +262,35 @@ object ServerProcessManager {
                 return
             }
 
+            // 投机解码：模型自带 MTP 层（nextn）时默认**不用**——本机实测带它反而慢 25%
+            // （批量验证在这台 CPU 上几乎不省时间，见 docs/TROUBLESHOOTING #25d）。
+            // 想强开就在设置里填 draft-mtp：只有模型真带 nextn 层时才生效，否则自动忽略；
+            // 万一引擎拒绝，下面还有一次去掉参数的自动重试，加载不会中断。
+            // draft-mtp 在 cpu / opencl / prism 三套引擎里都支持，所以这里不按引擎分支。
+            val hasMtp = try {
+                GgufInspector.hasMtpHead(File(modelPath))
+            } catch (e: Exception) {
+                appendLog("MTP 检测跳过：${e.message}")
+                false
+            }
+            val specEffective = when {
+                specDisabled -> if (specType == "draft-mtp") "none" else specType
+                specType == "draft-mtp" -> if (hasMtp) "draft-mtp" else "none"
+                else -> specType
+            }
+            if (hasMtp && specEffective != "draft-mtp") {
+                appendLog("检测到 MTP 层（nextn）：当前引擎带它更慢，已跳过（想强开可在设置里填 draft-mtp）")
+            } else if (specEffective == "draft-mtp") {
+                appendLog("投机解码：draft-mtp（模型自带 nextn 层）")
+            }
+
             // 绑定地址：局域网模式必须 0.0.0.0（否则手机本机客户端连不上回环）
             val bindHost = if (lanEnabled) "0.0.0.0" else "127.0.0.1"
             // 展示地址：局域网模式显示真实 IP，方便外部客户端填写
             val displayHost = if (lanEnabled) currentLanIp() else "127.0.0.1"
             val cmd = buildCommand(
                 binary, modelPath, bindHost, port, ctxSize, threads, ngl, lanEnabled, apiToken,
-                cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled
+                cacheTypeK, cacheTypeV, specEffective, mmprojPath, faMode, apiTokenEnabled
             )
             appendLog("启动: ${cmd.joinToString(" ")}")
 
@@ -263,11 +334,20 @@ object ServerProcessManager {
                     }
                     val exit = try { process?.waitFor() } catch (_: Exception) { null }
                     appendLog("进程已退出 (code=$exit)")
+                    // MTP 被引擎拒绝 → 去掉投机参数重试一次（用户不该看到这次失败）
+                    if (specEffective == "draft-mtp" && specFailed() &&
+                        degradeSpecAndRestart(
+                            modelPath, port, ctxSize, threads, ngl, lanEnabled, apiToken,
+                            cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine
+                        )
+                    ) {
+                        return@launch
+                    }
                     // 上下文过大 → 先减半重试（优先于 ngl 降级）
                     if (ctxFailed() &&
                         degradeCtxAndRestart(
                             modelPath, port, ctxSize, threads, ngl, lanEnabled, apiToken,
-                            cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine
+                            cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
                         )
                     ) {
                         return@launch
@@ -276,7 +356,7 @@ object ServerProcessManager {
                     if (ngl > 0 && allocFailed() &&
                         degradeAndRestart(
                             modelPath, port, ctxSize, threads, ngl, lanEnabled, apiToken,
-                            cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine
+                            cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
                         )
                     ) {
                         return@launch
@@ -310,7 +390,7 @@ object ServerProcessManager {
                         if (ngl > 0 && allocFailed() &&
                             degradeAndRestart(
                                 modelPath, port, ctxSize, threads, ngl, lanEnabled, apiToken,
-                                cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine
+                                cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
                             )
                         ) {
                             return@launch

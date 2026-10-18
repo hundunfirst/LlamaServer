@@ -59,6 +59,72 @@ object GgufInspector {
         return info
     }
 
+    /**
+     * 模型是否自带 MTP（多 token 预测）层——判断能否用 `--spec-type draft-mtp`。
+     *
+     * 判据是 KV 元数据里 `<arch>.nextn_predict_layers > 0`：llama.cpp 建 MTP 上下文时只看这个，
+     * 缺失时报 "model doesn't contain MTP layers"。这个键排在词表那几个大数组之后
+     * （本机实测 KV 段约 10.5MB），512KB 的头读不到，所以单独整段扫一次。
+     * 只在启动前对选中的那一个文件调用，结果带缓存。为什么默认不用它见 TROUBLESHOOTING #25d。
+     */
+    private const val MTP_SCAN_BYTES = 24 * 1024 * 1024
+    private val mtpCache = HashMap<String, Boolean>()
+
+    fun hasMtpHead(file: File): Boolean {
+        val key = file.absolutePath + "@" + file.length() + "@" + file.lastModified()
+        mtpCache[key]?.let { return it }
+        val v = scanNextn(file)
+        if (mtpCache.size > 64) mtpCache.clear()
+        mtpCache[key] = v
+        return v
+    }
+
+    private fun scanNextn(file: File): Boolean {
+        if (!file.isFile || file.length() < 32) return false
+        val head = RandomAccessFile(file, "r").use { raf ->
+            val buf = ByteArray(minOf(MTP_SCAN_BYTES.toLong(), raf.length()).toInt())
+            raf.readFully(buf)
+            buf
+        }
+        if (head.size < 8 || String(head, 0, 4, Charsets.US_ASCII) != "GGUF") return false
+        // 不在字节流里逐条走 KV（词表那种几十万条字符串数组容易踩到类型对齐坑），
+        // 直接找键名：命中的位置后面紧跟 value 的类型和取值。
+        val needle = ".nextn_predict_layers".toByteArray(Charsets.US_ASCII)
+        var from = 0
+        while (true) {
+            val at = indexOf(head, needle, from)
+            if (at < 0) return false
+            val typeAt = at + needle.size
+            if (typeAt + 8 <= head.size) {
+                val t = readU32(head, typeAt)
+                val v = readU32(head, typeAt + 4)          // 层数都是小整数，取低 32 位足够
+                if ((t in 4L..5L || t == 10L || t == 11L) && v > 0) return true
+            }
+            from = at + 1
+        }
+    }
+
+    private fun indexOf(b: ByteArray, needle: ByteArray, from: Int): Int {
+        val last = b.size - needle.size
+        var i = from
+        while (i <= last) {
+            if (b[i] == needle[0]) {
+                var j = 1
+                while (j < needle.size && b[i + j] == needle[j]) j++
+                if (j == needle.size) return i
+            }
+            i++
+        }
+        return -1
+    }
+
+    private fun readU32(b: ByteArray, at: Int): Long =
+        if (at + 4 > b.size) -1L
+        else (b[at].toLong() and 0xFF) or
+                ((b[at + 1].toLong() and 0xFF) shl 8) or
+                ((b[at + 2].toLong() and 0xFF) shl 16) or
+                ((b[at + 3].toLong() and 0xFF) shl 24)
+
     private class Buf(private val b: ByteArray) {
         var pos = 0
         fun remaining() = b.size - pos

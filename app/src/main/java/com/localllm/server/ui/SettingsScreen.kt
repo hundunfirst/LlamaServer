@@ -503,11 +503,11 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         CompactField(
             value = settings.specType,
             onValueChange = { v -> vm.updateSettings { it.copy(specType = v) } },
-            label = "投机解码（none / ngram-simple / draft-mtp）",
+            label = "投机解码（none / ngram-simple / draft-mtp；draft-mtp 需模型自带 nextn 层，本机实测更慢）",
             modifier = Modifier.fillMaxWidth()
         )
         QuickChips(
-            options = listOf("none" to "关闭", "ngram-simple" to "ngram", "draft-mtp" to "MTP(需模型支持)"),
+            options = listOf("none" to "关闭", "ngram-simple" to "ngram"),
             current = settings.specType
         ) { v -> vm.updateSettings { it.copy(specType = v) } }
         CompactField(
