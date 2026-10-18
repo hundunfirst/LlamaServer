@@ -5,6 +5,12 @@ param(
     [string]$Model = "",      # 直接指定主模型文件名（跳过菜单）
     [string]$Projector = "",  # 直接指定投影器文件名；填 none 表示不用视觉
     [string]$Draft = "",      # 直接指定投机解码草稿（DFlash2/dspark/MTP）；none = 不用
+    [int]$CtxSize = -1,       # 上下文；不传 = 自动（-1）
+    [int]$GpuLayers = -1,     # GPU 层数；不传 = 用配置里的 99
+    [int]$ListenPort = -1,    # 端口；不传 = 用配置里的 8081
+    [string]$ApiKey = $null,  # 访问令牌；不传 = 用配置里的值，传空串 = 不设
+    [switch]$Ask,             # 即使 -Model 也弹出参数询问
+    [switch]$NoPrompt,        # 不询问，直接用配置/命令行参数
     [switch]$NoMenu,
     [switch]$Diagnose,        # 只打印每个文件的类型判定，方便排查
     [switch]$DryRun           # 只打印将要执行的命令，不真正启动
@@ -13,7 +19,7 @@ param(
 # ================= 可调参数（改这里，改完保存即可） =================
 $PORT           = 8081        # 端口：别和你常驻的 llama-server 撞
 $CTX            = 0           # 上下文：0 = 按模型大小自动（4GB 显存档位，见下）；写具体数字则强制
-$CTX_MAX        = 32768       # 自动模式的上限
+$CTX_MAX        = 131072       # 自动模式的上限
 $NGL            = 99          # 送多少层到显卡：99=全部，0=纯 CPU
 $THREADS        = 8           # CPU 线程数，一般填物理核数
 $HOST_ADDR      = "0.0.0.0"   # 127.0.0.1=只本机；0.0.0.0=局域网（手机）可连
@@ -184,6 +190,7 @@ function Find-Draft([string]$modelName) {
 
 # ---------- 选择模型 ----------
 $chosen = $null; $chosenProj = $null
+$wantPrompt = $false
 if ($Model) {
     $chosen = $mains | Where-Object { $_.Name -ieq $Model } | Select-Object -First 1
     if (-not $chosen) { Fail "models\ 里没有主模型：$Model" }
@@ -194,6 +201,7 @@ if ($Model) {
         Fail "models\ 里没有可用的主模型（*.gguf）。`n         注意：带 mmproj 的是投影器，DFlash/dspark/MTP 侧车不能当主模型。"
     }
     Write-Host ""
+    $wantPrompt = $true
     Write-Host "  可选主模型：" -ForegroundColor Cyan
     $i = 0
     foreach ($m in $mains) {
@@ -258,6 +266,7 @@ Set-Content -Path $lastFile -Value ($mains.IndexOf($chosen) + 1) -NoNewline
 
 # ---------- 上下文：$CTX=0 时按模型大小自动（4GB 显存档位） ----------
 $ctxUse = $CTX
+$ctxSource = "手动指定"
 if ($ctxUse -le 0) {
     $sizeGb = 0.0
     $label = "$((Get-GgufMeta $chosen.FullName).size)"
@@ -267,6 +276,71 @@ if ($ctxUse -le 0) {
               elseif ($sizeGb -ge 3) { 16384 }
               else { $CTX_MAX }
     if ($ctxUse -gt $CTX_MAX) { $ctxUse = $CTX_MAX }
+    $ctxSource = "按模型大小自动"
+}
+
+# ---------- 命令行参数覆盖配置（注意：参数名不能和下面的 $CTX/$NGL/$PORT 同名，
+#            PowerShell 变量不分大小写，同名会被配置赋值覆盖掉） ----------
+if ($CtxSize -ge 0) { $ctxUse = [Math]::Max(512, $CtxSize); $ctxSource = "手动指定" }
+if ($GpuLayers -ge 0) { $NGL = $GpuLayers }
+if ($ListenPort -ge 0) { $PORT = $ListenPort }
+if ($null -ne $ApiKey) { $APIKEY = $ApiKey }
+
+# ---------- 交互式询问（双击运行时；回车 = 用默认） ----------
+if ((-not $NoPrompt) -and ($wantPrompt -or $Ask)) {
+    Write-Host ""
+    Write-Host "  ------------------ 参数设置 ------------------" -ForegroundColor Cyan
+    Write-Host "  下面每一项直接回车 = 用括号里的默认值" -ForegroundColor DarkGray
+    Write-Host ""
+
+    # 1) 上下文
+    Write-Host "  1) 上下文长度：1=4K   2=8K   3=16K   4=32K   5=64K   6=128K" -ForegroundColor Gray
+    Write-Host "     也可以直接输入数字（例如 24576）" -ForegroundColor DarkGray
+    $a = Read-Host ("     请输入（回车 = {0} {1}）" -f $ctxSource, $ctxUse)
+    if ($a) {
+        $map = @{ "1" = 4096; "2" = 8192; "3" = 16384; "4" = 32768; "5" = 65536; "6" = 131072 }
+        $num = 0
+        if ($map.ContainsKey($a.Trim())) {
+            $ctxUse = $map[$a.Trim()]; $ctxSource = "手动指定"
+        } elseif ([int]::TryParse($a.Trim(), [ref]$num) -and $num -ge 512) {
+            $ctxUse = $num; $ctxSource = "手动指定"
+        } else {
+            Write-Host "     输入无效，继续用默认值" -ForegroundColor Yellow
+        }
+    }
+
+    # 2) GPU 层数
+    $b = Read-Host ("  2) GPU 层数（99 = 全部上卡，0 = 纯 CPU；回车 = {0}）" -f $NGL)
+    if ($b) {
+        $n = 0
+        if ([int]::TryParse($b.Trim(), [ref]$n) -and $n -ge 0 -and $n -le 999) { $NGL = $n }
+        else { Write-Host "     输入无效，继续用默认值" -ForegroundColor Yellow }
+    }
+
+    # 3) 端口
+    $c = Read-Host ("  3) 端口（回车 = {0}）" -f $PORT)
+    if ($c) {
+        $n = 0
+        if ([int]::TryParse($c.Trim(), [ref]$n) -and $n -ge 1024 -and $n -le 65535) { $PORT = $n }
+        else { Write-Host "     端口必须在 1024-65535 之间，继续用默认值" -ForegroundColor Yellow }
+    }
+
+    # 4) 访问令牌
+    $d = Read-Host "  4) 访问令牌（回车 = 不设；设了之后客户端要带 Authorization: Bearer <令牌>）"
+    $APIKEY = if ($d) { $d.Trim() } else { "" }
+
+    Write-Host "  ----------------------------------------------" -ForegroundColor Cyan
+}
+
+# ---------- 冲突/风险提示 ----------
+if (Get-NetTCPConnection -LocalPort $PORT -State Listen -ErrorAction SilentlyContinue) {
+    Write-Host ("  提示：端口 {0} 已经被占用，启动可能失败；换个端口再试。" -f $PORT) -ForegroundColor DarkYellow
+}
+if ($HOST_ADDR -eq "0.0.0.0" -and -not $APIKEY) {
+    Write-Host "  提示：监听 0.0.0.0 且没设令牌 —— 同网段任何人都能用你的电脑跑模型。" -ForegroundColor DarkYellow
+}
+if ($NGL -gt 0 -and $ctxUse -gt 32768) {
+    Write-Host ("  提示：上下文 {0} 偏大，4GB 显存可能起不来；失败就把上下文调小或 GPU 层数降低。" -f $ctxUse) -ForegroundColor DarkYellow
 }
 
 # ---------- 组装参数 ----------
@@ -299,9 +373,10 @@ Write-Host ("   视觉   : {0}" -f $(if ($chosenProj) { $chosenProj.Name + $(if 
 Write-Host ("   草稿   : {0}" -f $($(if ($chosenDraft) { $chosenDraft.Name + "（" + (Get-DraftSpecType $chosenDraft.FullName) + "，最多预测 " + $DRAFT_N_MAX + " token）" }
                                  elseif ($useMtp) { "用模型自带的 MTP 头（draft-mtp，最多预测 " + $DRAFT_N_MAX + " token）" }
                                  else { "不使用" })))
-Write-Host ("   端口   : {0}    上下文: {1}{2}    GPU层数: {3}    线程: {4}" -f $PORT, $ctxUse, $(if ($CTX -le 0) { "（按模型大小自动）" } else { "" }), $NGL, $THREADS)
+Write-Host ("   端口   : {0}    上下文: {1}（{2}）    GPU层数: {3}    线程: {4}" -f $PORT, $ctxUse, $ctxSource, $NGL, $THREADS)
 Write-Host ("   监听   : {0}" -f $HOST_ADDR)
 if ($APIKEY) { Write-Host "   令牌   : 已设置（客户端带 Authorization: Bearer ...）" }
+else { Write-Host "   令牌   : 未设置（同网段可直接调用）" -ForegroundColor DarkGray }
 Write-Host ("   接口   : http://127.0.0.1:{0}/v1    界面: http://127.0.0.1:{0}/" -f $PORT)
 Write-Host "  ============================================================" -ForegroundColor Cyan
 Write-Host "   关闭这个窗口即可停止服务。" -ForegroundColor DarkGray
@@ -313,13 +388,7 @@ Write-Host ""
 Write-Host "  切换模型：关掉窗口，重新双击 启动Bonsai.bat 再选一个。" -ForegroundColor DarkGray
 Write-Host ""
 
-$script:bootLog = Join-Path $root "boot.log"
-function Boot([string]$msg) {
-    try { Add-Content -Path $script:bootLog -Value ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $msg) } catch { }
-}
-
 Push-Location $llamaDir
-Boot ("launch: " + $exe + " " + ($argList -join " "))
 if ($DryRun) {
     Write-Host ""
     Write-Host "  [DryRun] 将要执行：" -ForegroundColor Yellow
@@ -332,10 +401,8 @@ try {
     # 直接执行，不接管它的输出：
     #   一旦写成 "2>&1 | Tee/ForEach"，PowerShell 5.1 会把 llama-server 写到 stderr 的日志
     #   当成 ErrorRecord，整屏变红（像在报错），所以这里保持原样直出，颜色由程序自己决定。
-    Boot "exe start"
     & $exe @argList
     $code = $LASTEXITCODE
-    Boot ("exe exit code=" + $code)
 } finally { Pop-Location }
 
 Write-Host ""
