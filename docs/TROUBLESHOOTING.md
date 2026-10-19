@@ -267,6 +267,36 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
   适配器同样进回收站、可恢复。
 - 复测：`scripts/dev/mtp_bench.py --extra "--lora <设备路径> --lora-init-without-apply" --lora-scale 1`
 
+### #25f Flash Attention 设成「关」会让解码速度腰斩（实测，2026-10-19）
+
+- **现象**：`qwen2.5-0.5b-instruct-q4_k_m` 解码掉到 30 出头，与记忆中「稳定 55」差一截。
+  这台机器常年 95°C 降频，绝对速度本来就在飘，所以第一反应容易误判成热降频。
+- **根因**：设置里 Flash Attention 被设成「关」，启动命令里出现 `-fa off`：
+
+  ```
+  llama-server ... -c 32768 --jinja -t 8 --mmproj ... -fa off
+  ```
+
+  「关」是唯一会显式追加该参数的状态；留空 = 「自动」，根本不传这个参数
+  （`ServerProcessManager.kt:541`）。只有量化 V 缓存会强制改回 on 并留日志（同文件 534-540）。
+- **实测（本机，同模型、同上下文）**：
+
+  | FA 档位 | decode |
+  |---|---|
+  | 关（`-fa off`） | 30 tok/s |
+  | 自动（不传参） | **58 tok/s** |
+
+  约 1.9×，代价接近一半。
+- **为什么伤害这么大**：解码是内存带宽瓶颈。FA 关闭后注意力走非融合路径，KV 读取量被放大，
+  上下文越长越明显——当时 0.5B 的模型级 ctx 是 32768，2B 是 65536。
+- **别靠界面猜，直接读真实命令**：
+  `adb shell run-as com.localllm.server cat /proc/<llama-server pid>/cmdline`。
+  本例就是靠这条确认的（界面显示与实际生效参数不一定一致）。
+- **记数字时注意可比性**：`scripts/dev/mtp_bench.py` 默认 `-fa on`
+  （`--fa on|off`，没有 auto 档），而 App 侧可能是 off，两者不能混着比。
+  #25e 里标注 `-fa off` 的 24.74 / 26.89 与脚本默认档不同源，不要当作同一基线。
+- **结论**：除排障外不要设「关」。0.5B 那段 32768 上下文对它也偏大，压到 8192 还能再快一点。
+
 ### #26 OCR 数字/小数识别误差 [APP]
 - **现象**：表格类截图里个别金额小数点丢失（如 `7177.50` → `717750`）。
 - **原因**：ML Kit 对小字号数字的固有误差；已做「原图识别 + 坐标重建行 + 放大灰度预处理」降低概率。
@@ -284,3 +314,17 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
 - **处理**：configure 三个变量一起给 `-Wl,-z,max-page-size=16384`。复核命令：
   `llvm-readelf.exe -l <so> | findstr LOAD`，末列必须全是 `0x4000`。
 
+
+### #29 本地长时间推理 + 快充 → 触发热保护被系统清后台 [设备]
+- **现象**：本地模型跑多轮工具循环（例如代码任务里 7 轮生成 + 反复加载沙箱页面）中途会话突然中断，
+  日志停在 `工具回传完成，第 N 轮继续生成…`，**没有崩溃堆栈、也没有 OOM 记录**，
+  `ps` 里 `llama-server` 消失；温度 `CPU 91–96°C`、电池 40°C。
+- **原因**：**同时快充**。推理本身已把 CPU 顶到 95°C 附近，充电的额外热量让它越过保护线，
+  MIUI 主动清后台降温。事件日志里能看到 `am_kill … SwipeUpClean`，
+  连带 `com.google.android.webview:sandboxed_process0` 也一起被杀。
+- **判据**：`adb logcat -b events -d -t 3000 | grep -E "am_kill|am_proc_died"`；
+  `adb shell dumpsys thermalservice | grep CPU`。
+  如果是内存不足，会看到 `lmkd` / `lowmemorykiller`，两者要分清。
+- **处理**：跑长任务时不要充电；或用电脑端模型（不受此限制）。
+  本地代码类任务可把上下文压到 16384 以内，缩短单轮时间。
+- **注意**：这不是 App 的 bug，也不必为此收紧轮数上限——正常温度下 8 轮没问题。
