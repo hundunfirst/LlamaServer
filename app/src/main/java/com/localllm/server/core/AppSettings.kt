@@ -132,7 +132,8 @@ object AppSettings {
         set(value) = prefs.edit().putInt("port", value).apply()
 
     var ctxSize: Int
-        get() = prefs.getInt("ctx_size", 4096)
+        // 默认 8192：4096 装不下「一个完整的单文件小游戏」，输出会被硬截断在半行代码上
+        get() = prefs.getInt("ctx_size", 8192)
         set(value) = prefs.edit().putInt("ctx_size", value).apply()
 
     var threads: Int
@@ -500,6 +501,14 @@ object AppSettings {
         get() = prefs.getString("work_dir_tree", "") ?: ""
         set(value) = prefs.edit().putString("work_dir_tree", value).apply()
 
+    /**
+     * 代码自检开关：允许模型把生成的 HTML 丢进内置 WebView 沙箱跑一次，拿到报错后自己修。
+     * 没有这条回路，弱模型写的代码就只能一次成型、错了也不知道。
+     */
+    var webSandboxEnabled: Boolean
+        get() = prefs.getBoolean("web_sandbox_enabled", true)
+        set(value) = prefs.edit().putBoolean("web_sandbox_enabled", value).apply()
+
     /** 已弹窗提示过的更新版本（避免每次启动重复提示） */
     var lastPromptedUpdateVersion: String
         get() = prefs.getString("last_prompted_update", "") ?: ""
@@ -553,8 +562,8 @@ object AppSettings {
     /** 生效上下文长度：模型级 → 全局 */
     fun effectiveCtx(modelPath: String?): Int = localModelParam(modelPath)?.ctx ?: ctxSize
 
-    /** 生效输出上限（本地 max_tokens）：模型级 → 默认 4096 */
-    fun effectiveOut(modelPath: String?): Int = localModelParam(modelPath)?.out ?: 4096
+    /** 生效输出上限（本地 max_tokens）：模型级 → 默认 8192 */
+    fun effectiveOut(modelPath: String?): Int = localModelParam(modelPath)?.out ?: 8192
 
     /** 生效 mmproj：模型级（空串=跟全局，"none"=明确不用）→ 全局 */
     fun effectiveMmproj(modelPath: String?): String? =

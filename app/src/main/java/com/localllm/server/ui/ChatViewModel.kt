@@ -17,6 +17,7 @@ import com.localllm.server.core.ServerProcessManager
 import com.localllm.server.core.ServerUiState
 import com.localllm.server.core.TodoTool
 import com.localllm.server.core.UrlFetch
+import com.localllm.server.core.WebRunTool
 import com.localllm.server.core.WebSearch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -353,6 +354,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val searchOn = AppSettings.webSearchEnabled
                 val todoOn = AppSettings.todoToolEnabled
                 val fileOn = AppSettings.fileToolsEnabled && AppSettings.workDirTreeUri.isNotBlank()
+                val sandboxOn = AppSettings.webSandboxEnabled
                 val memoryOn = AppSettings.memoryEnabled
                 // 隐私护栏：本轮用户消息含图片（可能是身份证/证件等敏感件）→ 不注入任何联网搜索工具，
                 // 并把模型幻觉出的 web_search 调用靠白名单挡掉（OCR 文字不会流向搜索引擎）。
@@ -382,13 +384,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     "多步任务可先用 todo_write 列出计划（同一消息最多 3 次），随后必须在正文中直接给出实际产出（代码/文件内容），" +
                             "绝不能用「已完成…」之类的进度描述代替真正的内容。"
                 } else ""
+                // 自检回路：弱模型看不到运行结果就永远不会自我修正
+                val sandboxHint = if (sandboxOn) {
+                    "用户要的是能直接打开运行的成品。禁止用方案、架构、步骤清单、伪代码来替代代码——" +
+                            "直接写出完整可运行的单文件代码，这是唯一合格的产出。" +
+                            "写完必须调用 " + WebRunTool.NAME +
+                            " 自检：它会把页面放进真实浏览器环境跑一次，返回语法错误与运行期错误（含行号）、" +
+                            "是否死循环、canvas 是否真的画出了内容、画面是否在动。" +
+                            "按返回的错误逐条修完，再自检一次；没有自检通过前不要声称已完成。" +
+                            "修改时只动出错的那一处及直接相关代码，不要整份重写——" +
+                            "每次重写都会把已经正确的部分改坏，也会引入新的错误。" +
+                            "单文件程序控制在 500 行以内；确实超出这个规模时，先写出能跑的最小版本，" +
+                            "再用后续轮次迭代补齐，不要用「接下来可以怎么做」来代替代码。"
+                } else ""
                 val systemText = (if (basePrompt.isNotBlank())
                     "【本会话角色设定，优先遵守】" + basePrompt + " "
-                else "") + todoHint + fileHint + memoryHint +
+                else "") + todoHint + fileHint + sandboxHint + memoryHint +
                         (if (AppSettings.thinkEnabled) {
-                    "用中文简洁回答。"
+                    // 不能只说“简洁回答”：实测弱模型会把它理解成“别用工具、直接答”，
+                    // 于是把多轮验证流程提前掐断。
+                    "用中文回答，简洁但保留必要步骤；该调用工具时照常调用，不要为了简洁跳过动手验证。"
                 } else {
-                    "不要输出思考过程，直接用中文简洁回答。"
+                    "不要输出思考过程，直接用中文回答；该调用工具时照常调用，不要跳过必要的步骤。"
                 }) + if (searchAvailable) {
                     "今天是${today}。涉及最新信息时，先用 web_search 工具联网查询再回答，不要臆造日期。"
                 } else ""
@@ -488,6 +505,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             }
                         }
                 val cloud = AppSettings.chatCloudEnabled && AppSettings.chatCloudUrl.isNotBlank()
+                // 代码/工具类任务用低温采样：量化模型在语法层抽风的概率明显下降。
+                // 关键词判据是启发式的，误判影响很小（只是温度低一点），不必做成开关。
+                val codeWordPattern = Regex(
+                    "html|css|javascript|typescript|\\bjs\\b|\\bpython\\b|代码|脚本|程序|游戏|函数|接口|" +
+                            "单文件|生成文件|写一个|实现一个|编译|报错|重构",
+                    RegexOption.IGNORE_CASE
+                )
+                val lastUserForTemp = _messages.value.dropLast(1)
+                    .lastOrNull { it.role == "user" }?.content ?: ""
+                val codeTask = codeWordPattern.containsMatchIn(lastUserForTemp)
 
                 // HTTP MCP 多服务器：聚合已启用服务器的工具（mcp__服务器__工具 前缀防冲突），并记录路由
                 val mcpRoute = mutableMapOf<String, Pair<String, String>>() // 完整名 → (url, 原始工具名)
@@ -519,6 +546,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         for (i in 0 until fa.length()) arr.put(fa.getJSONObject(i))
                     }
                     if (memoryOn) arr.put(MemoryStore.toolJson())
+                    if (sandboxOn) arr.put(WebRunTool.toolJson())
                     if (fileOn) DocMaker.toolsJson().let { da ->
                         for (i in 0 until da.length()) arr.put(da.getJSONObject(i))
                     }
@@ -529,6 +557,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     for (i in 0 until mcpAgg.length()) arr.put(mcpAgg.getJSONObject(i))
                 }.takeIf { it.length() > 0 }
 
+                ServerProcessManager.appLog(
+                    "采样：" + (if (codeTask) "代码任务 → temp 0.3" else "普通对话 → temp 0.7") +
+                            " · top_p 0.9 · top_k 20 · repeat_penalty 1.05" +
+                            (if (codeTask) "（命中代码关键词）" else "")
+                )
                 ServerProcessManager.appLog(
                     "聊天：发送（" +
                             (if (cloud) "云端 ${AppSettings.chatCloudModel.ifBlank { "default" }}" else "本地") +
@@ -547,20 +580,30 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 } ?: emptySet()
                 var searchCount = 0
                 var todoCalls = 0
+                var sandboxCalls = 0
                 val searchCap = AppSettings.searchMaxCalls.let { if (it <= 0) Int.MAX_VALUE else it }
                 var loggedNoSearch = false
                 // 执行步骤时间线（思考/搜索/工具），落到消息上供 UI 展示
                 val steps = mutableListOf<ChatStore.Step>()
                 var thinkStartedAt = 0L
+                // 本轮思考正文：落到 step.detail 里，时间线才能看出「想到哪一步去调的工具」
+                val roundThink = StringBuilder()
                 fun syncSteps() {
                     appendToLastInline(sid) { it.copy(steps = steps.toList()) }
                 }
                 fun settleThink() {
                     if (thinkStartedAt > 0) {
                         val ms = System.currentTimeMillis() - thinkStartedAt
+                        val body = roundThink.toString().trim().replace(Regex("\\s+"), " ")
                         steps.add(
-                            ChatStore.Step("think", "思考了 ${String.format("%.1f", ms / 1000.0)} 秒", millis = ms)
+                            ChatStore.Step(
+                                "think",
+                                "思考了 ${String.format("%.1f", ms / 1000.0)} 秒",
+                                detail = body.take(600).ifBlank { null },
+                                millis = ms
+                            )
                         )
+                        roundThink.setLength(0)
                         thinkStartedAt = 0L
                         syncSteps()
                     }
@@ -569,6 +612,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
                 var apiMsgs = payloadMsgs
                 val usedTools = mutableListOf<String>()
+                var truncFix = 0
                 val searchSources = mutableListOf<WebSearch.Result>()
                 var timingNote: String? = null
 
@@ -592,9 +636,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     var deltaCount = 0
                     var roundChars = 0
+                    // 本轮正文：工具轮要把它随 assistant 消息一起回传给模型，
+                    // 否则模型看不到自己上一轮说了什么，等于每轮失忆重来
+                    val roundText = StringBuilder()
                     var firstDeltaMs = 0L
                     var serverStats: String? = null
                     var toolCalls: List<ChatClient.ToolCall> = emptyList()
+                    var finishReason = ""
                     // 正文开始后冻结思考卡：部分模型会在正文期间/之后仍吐 reasoning，
                     // 导致“回答完了思考还在滚”。首个内容 delta 到达即停止追加。
                     var contentStarted = false
@@ -612,9 +660,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         effort = thinkEffort(cloud),
                         // 本地生成上限：退化复读时不至于跑到撑满上下文
                         maxTokens = if (cloud) null else AppSettings.effectiveOut(AppSettings.selectedModelPath),
+                        codeTask = codeTask,
                         // 搜索配额用尽 / 多轮无正文 → 不再提供搜索工具（防止弱模型空转到轮数上限、永远不回答）
                         tools = if (forceNoTools || (searchAvailable && searchCount >= searchCap)) toolsNoSearch else toolsJson,
                         onToolCalls = { toolCalls = it },
+                        onFinish = { finishReason = it },
                         onTiming = { ttfb, firstToken ->
                             // 云端慢排查：ttfb vs 首token 分离，判断慢在网络还是在推理
                             if (cloud) {
@@ -625,22 +675,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         onDelta = { delta ->
                             // 停止后一律不再上屏（abort 断连前的在途分片也丢弃）
                             if (isGenerating(sid)) {
-                                if (!contentStarted && thinkStartedAt > 0) {
-                                    val secs = (System.currentTimeMillis() - thinkStartedAt) / 1000.0
-                                    steps.add(
-                                        ChatStore.Step(
-                                            "think",
-                                            "思考了 ${String.format("%.1f", secs)} 秒",
-                                            millis = System.currentTimeMillis() - thinkStartedAt
-                                        )
-                                    )
-                                    thinkStartedAt = 0L
-                                    syncSteps()
-                                }
+                                if (!contentStarted) settleThink()
                                 contentStarted = true
                                 deltaCount++
                                 abortDeltas++
                                 roundChars += delta.length
+                                roundText.append(delta)
                                 if (firstDeltaMs == 0L) firstDeltaMs = System.currentTimeMillis()
                                 val elapsed = (System.currentTimeMillis() - firstDeltaMs) / 1000.0
                                 if (elapsed > 0.3) {
@@ -669,6 +709,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 }
                                 else -> {
                                     if (thinkStartedAt == 0L) thinkStartedAt = System.currentTimeMillis()
+                                    roundThink.append(r)
                                     appendToLastInline(sid) {
                                         it.copy(reasoning = (it.reasoning ?: "") + r)
                                     }
@@ -705,6 +746,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
 
                     if (validCalls.isEmpty()) {
+                        // 撞到 max_tokens（finish_reason=length）→ 自动续写，而不是把半截代码当成品交付。
+                        // 截断正是「打开只有背景」的元凶：文件断在半行 JS 上。
+                        val partial = _messages.value.lastOrNull()?.content ?: ""
+                        if ((finishReason == "length" || finishReason == "max_tokens") &&
+                            truncFix < 2 && partial.isNotBlank()
+                        ) {
+                            truncFix++
+                            apiMsgs = apiMsgs +
+                                    ChatClient.ChatMessage("assistant", partial) +
+                                    ChatClient.ChatMessage(
+                                        "user",
+                                        "（上一条回答因输出长度上限被截断，停在半句上。请直接从中断处继续输出剩余内容，" +
+                                                "不要重复已经输出的部分，不要重新开头。）"
+                                    )
+                            ServerProcessManager.appLog("输出撞到 max_tokens，自动续写第 $truncFix 次")
+                            steps.add(ChatStore.Step("tool", "输出被截断，自动续写（第 $truncFix 次）"))
+                            syncSteps()
+                            continue
+                        }
                         // 最终回复：合并统计（含本次问答总耗时，从发送算起）
                         val usedSec = (System.currentTimeMillis() - sendStartedAt) / 1000.0
                         val timing = timingNote?.let { "$it · " } ?: ""
@@ -771,7 +831,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 )
                         )
                     }
-                    newMsgs.add(ChatClient.ChatMessage("assistant", null, toolCalls = asstCalls))
+                    newMsgs.add(
+                        ChatClient.ChatMessage(
+                            "assistant",
+                            roundText.toString().trim().take(1500).ifBlank { null },
+                            toolCalls = asstCalls
+                        )
+                    )
                         validCalls.forEach { tc ->
                         val result = runCatching {
                             if (tc.name == TodoTool.NAME) {
@@ -853,6 +919,27 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 syncSteps()
                                 ServerProcessManager.appLog("文件工具完成：$detail")
                                 r
+                            } else if (sandboxOn && tc.name == WebRunTool.NAME) {
+                                sandboxCalls++
+                                if (sandboxCalls > 6) {
+                                    "自检次数已达上限（6 次）。请直接给出当前最终版本的文件，" +
+                                            "并在正文中说明还有哪些未通过的检查项，不要再次调用本工具。"
+                                } else {
+                                    val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                    val label = args.optString("path").ifBlank { "内联代码" }
+                                    ServerProcessManager.appLog("沙箱自检 ${sandboxCalls}/6：$label")
+                                    steps.add(
+                                        ChatStore.Step(
+                                            "tool", "运行自检（第 ${sandboxCalls} 次）", label.take(80)
+                                        )
+                                    )
+                                    syncSteps()
+                                    val r = WebRunTool.execute(getApplication(), args)
+                                    ServerProcessManager.appLog(
+                                        "沙箱自检完成：" + (r.lineSequence().firstOrNull() ?: "")
+                                    )
+                                    r
+                                }
                             } else if (tc.name == "web_search") {
                                 val query = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                                     .optString("query")

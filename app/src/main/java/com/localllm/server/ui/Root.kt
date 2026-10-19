@@ -1,6 +1,10 @@
 package com.localllm.server.ui
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -23,8 +27,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 
@@ -115,19 +121,35 @@ fun Root(vm: MainViewModel) {
             }
         }
     ) { padding ->
-        val modifier = Modifier.padding(padding)
-        when (selected) {
-            0 -> {
-                val st by vm.serverState.collectAsStateWithLifecycle()
-                val title = com.localllm.server.core.AppSettings.aliasFor(st.modelPath)
-                    ?: (st.modelPath?.substringAfterLast('/') ?: "")
-                ChatScreen(chatVm, modifier, modelTitle = title)
+        Box(modifier = Modifier.fillMaxSize()) {
+            val modifier = Modifier.padding(padding)
+            when (selected) {
+                0 -> {
+                    val st by vm.serverState.collectAsStateWithLifecycle()
+                    val title = com.localllm.server.core.AppSettings.aliasFor(st.modelPath)
+                        ?: (st.modelPath?.substringAfterLast('/') ?: "")
+                    ChatScreen(chatVm, modifier, modelTitle = title)
+                }
+                1 -> StatusScreen(vm, modifier)
+                2 -> LogsScreen(vm, modifier)
+                3 -> ModelsScreen(vm, modifier)
+                4 -> DownloadScreen(vm, modifier)
+                5 -> SettingsScreen(vm, modifier)
             }
-            1 -> StatusScreen(vm, modifier)
-            2 -> LogsScreen(vm, modifier)
-            3 -> ModelsScreen(vm, modifier)
-            4 -> DownloadScreen(vm, modifier)
-            5 -> SettingsScreen(vm, modifier)
+            // 执行宿主：只负责跑自检，摆到屏幕外——既不会被标签页切换销毁，也不占版面、不挡触摸。
+            // 不能用它给用户看：探针接管了 requestAnimationFrame，页面会停在第一帧。
+            val sandboxHtml by com.localllm.server.core.HtmlSandbox.lastHtml.collectAsStateWithLifecycle()
+            if (sandboxHtml != null) {
+                Box(modifier = Modifier.align(Alignment.BottomStart)) {
+                    SandboxHost(
+                        Modifier
+                            .size(400.dp, 300.dp)
+                            .offset(x = (-6000).dp)
+                    )
+                }
+            }
+            // 预览摘要行放回聊天页内部（在输入框上方），避免和输入栏叠在一起；
+            // 执行宿主独立挂在上面，所以关掉/切页都不影响自检。
         }
     }
 }

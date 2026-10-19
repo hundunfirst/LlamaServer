@@ -1354,6 +1354,9 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             }
         }
 
+        // 运行预览摘要行：一行，紧贴输入框上方，点开是画中画弹窗
+        SandboxPanel()
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1596,9 +1599,11 @@ private fun MessageBubble(
                                             Column(Modifier.weight(1f)) {
                                                 Text(st.label, style = MaterialTheme.typography.bodySmall)
                                                 st.detail?.let { d ->
+                                                    // 思考正文给更长的首行预览，工具参数保持短
+                                                    val cap = if (st.type == "think") 64 else 36
                                                     Text(
                                                         if (detailOpen) d
-                                                        else d.take(36) + if (d.length > 36) "…" else "",
+                                                        else d.take(cap) + if (d.length > cap) "…" else "",
                                                         style = MaterialTheme.typography.labelSmall,
                                                         color = if (detailOpen)
                                                             MaterialTheme.colorScheme.onSurfaceVariant

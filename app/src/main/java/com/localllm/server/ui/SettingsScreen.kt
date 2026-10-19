@@ -251,6 +251,30 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             com.localllm.server.core.AppSettings.fileToolsEnabled = fileOn
         }
 
+        // ---- 代码自检（WebView 沙箱）----
+        var sandboxOn by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.webSandboxEnabled)
+        }
+        SectionHeader(
+            title = "代码自检（内置浏览器沙箱）",
+            help = "开启后模型可用 web_run：把生成的单文件网页放进内置 WebView 真的跑一次，" +
+                    "拿回语法/运行期错误（带行号）、是否死循环、canvas 是否真的画出了内容、画面是否在动，" +
+                    "然后照着错误自己修。\n\n" +
+                    "这是让弱模型写对代码的关键——它看不到运行结果就永远不会自我纠正。" +
+                    "生成的页面会以「运行预览」出现在聊天页底部，可以直接试玩。\n\n" +
+                    "范围：只覆盖浏览器能运行的单文件产物（HTML/CSS/JS/SVG/canvas/WebGL），" +
+                    "Python、shell 之类不在其中。自检期间预览面板会自动展开，占约 280dp 高度。",
+            titleStyle = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        QuickChips(
+            options = listOf("true" to "开启", "false" to "关闭"),
+            current = sandboxOn.toString()
+        ) { v ->
+            sandboxOn = v.toBoolean()
+            com.localllm.server.core.AppSettings.webSandboxEnabled = sandboxOn
+        }
+
         // ---- 任务清单工具 ----
         var todoOn by remember {
             mutableStateOf(com.localllm.server.core.AppSettings.todoToolEnabled)
@@ -524,13 +548,25 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         CompactField(
             value = settings.faMode,
             onValueChange = { v -> vm.updateSettings { it.copy(faMode = v) } },
-            label = "Flash Attention（空=自动；CPU解码慢时试「关闭」）",
+            label = "Flash Attention（空=自动；一般别关，会慢近一半）",
             modifier = Modifier.fillMaxWidth()
         )
         QuickChips(
             options = listOf("" to "自动", "on" to "开启", "off" to "关闭"),
             current = settings.faMode
         ) { v -> vm.updateSettings { it.copy(faMode = v) } }
+        // 实测（docs/TROUBLESHOOTING.md #25f）：0.5B -fa off 30 tok/s，自动 58 tok/s。
+        // 这个开关点错了没有任何外部症状，只会让人觉得「手机变慢了」，所以必须当场提醒。
+        if (settings.faMode == "off") {
+            Text(
+                "⚠ 实测：Flash Attention 关闭会掉约一半解码速度（0.5B：30 → 58 tok/s）。" +
+                        "解码是内存带宽瓶颈，关闭后注意力走非融合路径、KV 读取量放大，上下文越长越慢。" +
+                        "除排查兼容性问题外，建议改回「自动」。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 8.dp)
+            )
+        }
 
         Row(
             modifier = Modifier.fillMaxWidth(),
