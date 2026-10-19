@@ -168,8 +168,24 @@ object FileTools {
         return text
     }
 
-    private fun writeFile(context: Context, root: DocumentFile, path: String, content: String): String {
+    /** 弱模型常把自己的工具调用语法写进文件内容末尾，落盘前截掉 */
+    private val TOOL_MARKERS = listOf("</tool_call>", "<tool_call>", "<function=", "<parameter=")
+
+    private fun stripToolMarkup(content: String): String {
+        val cut = TOOL_MARKERS.map { content.indexOf(it) }
+            .filter { it >= 0 }
+            .minOrNull() ?: return content
+        return content.substring(0, cut).trimEnd()
+    }
+
+    private fun writeFile(context: Context, root: DocumentFile, path: String, raw: String): String {
         if (path.isBlank()) throw IllegalStateException("缺少 path 参数")
+        val content = stripToolMarkup(raw)
+        if (content.length != raw.length) {
+            ServerProcessManager.appLog(
+                "写入前剥掉尾部工具调用标记：${raw.length} → ${content.length} 字（$path）"
+            )
+        }
         if (content.length > MAX_WRITE_CHARS) {
             throw IllegalStateException("内容过大（${content.length} 字），超过 $MAX_WRITE_CHARS 上限，请拆分写入")
         }

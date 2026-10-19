@@ -69,10 +69,14 @@ object ChatClient {
         effort: String? = null,
         /** 本地生成上限：防止退化复读跑到撑满上下文（约几十分钟）；null=不设 */
         maxTokens: Int? = null,
+        /** 代码/工具类任务：压低温度，减少量化模型在语法层抽风的概率 */
+        codeTask: Boolean = false,
         /** OpenAI tools 数组；null/空则不注入 */
         tools: JSONArray? = null,
         /** 流结束后回调聚合的 tool_calls（无则空列表） */
         onToolCalls: (List<ToolCall>) -> Unit = {},
+        /** 流结束原因：stop / length（撞 max_tokens 截断）/ tool_calls 等 */
+        onFinish: (String) -> Unit = {},
         /** 耗时诊断：ttfbMs=首字节，firstTokenMs=首个内容增量（云端慢排查用） */
         onTiming: (ttfbMs: Long, firstTokenMs: Long?) -> Unit = { _, _ -> }
     ) = withContext(Dispatchers.IO) {
@@ -110,10 +114,14 @@ object ChatClient {
                 .put("model", model)
                 .put("stream", true)
                 .put("stream_options", JSONObject().put("include_usage", true))
-                // 默认采样：抑制小模型复读循环（客户端可自行覆盖时以后再开放）
-                .put("temperature", 0.7)
-                .put("top_p", 0.95)
-                .put("repeat_penalty", 1.15)
+                // 采样：代码任务压低温度。
+                // repeat_penalty 从 1.15 降到 1.05——1.15 会惩罚缩进、");"、"ctx." 这类
+                // 合法重复，代码越长伤得越明显；top_k=20 按 Qwen 官方推荐显式下发
+                // （不传就吃服务器默认的 40，分布更散）。
+                .put("temperature", if (codeTask) 0.3 else 0.7)
+                .put("top_p", 0.9)
+                .put("top_k", 20)
+                .put("repeat_penalty", 1.05)
                 .put("messages", arr)
             if (tools != null && tools.length() > 0) {
                 body.put("tools", tools)
@@ -138,6 +146,7 @@ object ChatClient {
             val tcId = mutableMapOf<Int, String>()
             val tcName = mutableMapOf<Int, String>()
             val tcArgs = mutableMapOf<Int, StringBuilder>()
+            var lastFinish = ""
             BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use { reader ->
                 var line: String?
                 while (reader.readLine().also { line = it } != null) {
@@ -161,7 +170,11 @@ object ChatClient {
                     }
                     val choices = obj.optJSONArray("choices") ?: continue
                     if (choices.length() == 0) continue
-                    val delta = choices.getJSONObject(0).optJSONObject("delta") ?: continue
+                    val choice = choices.getJSONObject(0)
+                    // finish_reason 在最后一个 chunk 上；length 表示被 max_tokens 截断
+                    val fr = if (choice.isNull("finish_reason")) "" else choice.optString("finish_reason")
+                    if (fr.isNotBlank()) lastFinish = fr
+                    val delta = choice.optJSONObject("delta") ?: continue
                     // 思考过程（thinking 模型）
                     if (!delta.isNull("reasoning_content")) {
                         val reason = delta.optString("reasoning_content")
@@ -207,6 +220,7 @@ object ChatClient {
                 )
             }
             onToolCalls(calls)
+            onFinish(lastFinish)
         } finally {
             if (activeConn === conn) activeConn = null
             conn.disconnect()
