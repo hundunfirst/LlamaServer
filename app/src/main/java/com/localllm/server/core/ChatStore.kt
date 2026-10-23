@@ -12,11 +12,19 @@ object ChatStore {
     private const val MAX_SESSIONS = 50
 
     /** 执行步骤（思考/搜索/工具），用于消息内的时间线可视化 */
+    /**
+     * args / ok 是给「工具调用可观测性」用的：原来只存名字和结果前 120 字，
+     * 排查「为什么没调对工具」时看不到参数，也不知道这次算不算失败。
+     */
     data class Step(
         val type: String,   // think / search / tool
         val label: String,
         val detail: String? = null,
-        val millis: Long = 0
+        val millis: Long = 0,
+        /** 调用参数（已截断），仅 tool 类型有值 */
+        val args: String? = null,
+        /** 该步是否成功；false 时界面标红 */
+        val ok: Boolean = true
     )
 
     /** 搜索来源（可点击跳转） */
@@ -174,7 +182,9 @@ object ChatStore {
                 type = o.optString("type"),
                 label = o.optString("label"),
                 detail = o.optString("detail").takeIf { it.isNotEmpty() && it != "null" },
-                millis = o.optLong("millis")
+                millis = o.optLong("millis"),
+                args = o.optString("args").takeIf { it.isNotEmpty() && it != "null" },
+                ok = if (o.has("ok")) o.optBoolean("ok", true) else true
             )
         }
     }
@@ -195,6 +205,8 @@ object ChatStore {
                             JSONObject().put("type", st.type).put("label", st.label)
                                 .put("detail", st.detail ?: JSONObject.NULL)
                                 .put("millis", st.millis)
+                                .put("args", st.args ?: JSONObject.NULL)
+                                .put("ok", st.ok)
                         )
                     }
                     o.put("steps", sArr)

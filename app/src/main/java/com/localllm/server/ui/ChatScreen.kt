@@ -824,14 +824,10 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 showSkills = false
             },
             onApplyChain = { chain ->
-                val prompt = com.localllm.server.core.AppSettings.chainPrompt(chain)
-                if (prompt.isBlank()) {
-                    Toast.makeText(context, "这条技能链里的技能都被删掉了，请重新配置", Toast.LENGTH_LONG).show()
-                } else {
-                    vm.setSessionSystemPrompt(prompt, chainId = chain.id)
-                    Toast.makeText(context, "已应用技能链：${chain.name}", Toast.LENGTH_SHORT).show()
-                    showSkills = false
-                }
+                // 走执行器：每步独立生成、失败可换方案，不再把各步提示词拼成 system prompt
+                vm.setSessionChain(chain.id)
+                Toast.makeText(context, "已应用技能链：${chain.name}（逐步执行）", Toast.LENGTH_SHORT).show()
+                showSkills = false
             },
             onClear = { vm.setSessionSystemPrompt(null) },
             appliedSkillId = cur?.appliedSkillId,
@@ -1722,17 +1718,37 @@ private fun MessageBubble(
                                                 modifier = Modifier.width(22.dp)
                                             )
                                             Column(Modifier.weight(1f)) {
-                                                Text(st.label, style = MaterialTheme.typography.bodySmall)
-                                                st.detail?.let { d ->
-                                                    // 思考正文给更长的首行预览，工具参数保持短
-                                                    val cap = if (st.type == "think") 64 else 36
+                                                Text(
+                                                    st.label,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = if (st.ok) MaterialTheme.colorScheme.onSurface
+                                                    else MaterialTheme.colorScheme.error
+                                                )
+                                                // 工具步：参数 + 结果都可展开。以前只存结果前 120 字、不存参数，
+                                                // 排查「为什么没调对工具」时只能翻日志。
+                                                val argsText = st.args
+                                                val hasBody = argsText != null || st.detail != null
+                                                if (hasBody) {
+                                                    val collapsed = when {
+                                                        argsText != null -> "参数 " + argsText.take(36)
+                                                        else -> st.detail!!.take(36)
+                                                    }
+                                                    val expanded = buildString {
+                                                        if (argsText != null) append("参数：").append(argsText)
+                                                        if (st.detail != null) {
+                                                            if (argsText != null) append("\n\n")
+                                                            append("结果：").append(st.detail)
+                                                        }
+                                                    }
                                                     Text(
-                                                        if (detailOpen) d
-                                                        else d.take(cap) + if (d.length > cap) "…" else "",
+                                                        if (detailOpen) expanded
+                                                        else collapsed + if (expanded.length > collapsed.length) "…" else "",
                                                         style = MaterialTheme.typography.labelSmall,
-                                                        color = if (detailOpen)
-                                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                                        else MaterialTheme.colorScheme.primary,
+                                                        color = when {
+                                                            detailOpen -> MaterialTheme.colorScheme.onSurfaceVariant
+                                                            !st.ok -> MaterialTheme.colorScheme.error
+                                                            else -> MaterialTheme.colorScheme.primary
+                                                        },
                                                         modifier = Modifier.clickable {
                                                             detailOpen = !detailOpen
                                                         }
@@ -2350,6 +2366,7 @@ private fun SkillDialog(
     var chains by remember { mutableStateOf(com.localllm.server.core.AppSettings.loadSkillChains()) }
     var editing by remember { mutableStateOf<com.localllm.server.core.Skill?>(null) }
     var isNew by remember { mutableStateOf(false) }
+    var fallbackEdit by remember { mutableStateOf<com.localllm.server.core.SkillChain?>(null) }
     var showChainBuilder by remember { mutableStateOf(false) }
 
     AlertDialog(
@@ -2393,6 +2410,16 @@ private fun SkillDialog(
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1
+                                )
+                            }
+                            TextButton(onClick = { fallbackEdit = c }) {
+                                val fbName = c.fallbackSkillId
+                                    ?.let { fid -> list.firstOrNull { it.id == fid }?.name }
+                                Text(
+                                    if (fbName != null) "备用：$fbName" else "设备用",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (fbName != null) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                             TextButton(onClick = {
@@ -2525,6 +2552,44 @@ private fun SkillDialog(
                 }) { Text("保存") }
             },
             dismissButton = { TextButton(onClick = { editing = null }) { Text("取消") } }
+        )
+    }
+
+    // 失败时改用的备用技能：某一步被判失败时，用它重跑那一步（执行器据此分支）
+    fallbackEdit?.let { ch ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { fallbackEdit = null },
+            title = { Text("失败时改用") },
+            text = {
+                Column {
+                    Text(
+                        "技能链某一步被判定失败时，用这个技能重跑该步；不设则失败即中止并说明卡在哪一步。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    list.forEach { sk ->
+                        TextButton(onClick = {
+                            val updated = chains.map {
+                                if (it.id == ch.id) it.copy(fallbackSkillId = sk.id) else it
+                            }
+                            chains = updated
+                            com.localllm.server.core.AppSettings.saveSkillChains(updated)
+                            fallbackEdit = null
+                        }) {
+                            Text(sk.name + if (ch.fallbackSkillId == sk.id) "　✓" else "")
+                        }
+                    }
+                    TextButton(onClick = {
+                        val updated = chains.map {
+                            if (it.id == ch.id) it.copy(fallbackSkillId = null) else it
+                        }
+                        chains = updated
+                        com.localllm.server.core.AppSettings.saveSkillChains(updated)
+                        fallbackEdit = null
+                    }) { Text("不设备用", color = MaterialTheme.colorScheme.error) }
+                }
+            },
+            confirmButton = { TextButton(onClick = { fallbackEdit = null }) { Text("关闭") } }
         )
     }
 }

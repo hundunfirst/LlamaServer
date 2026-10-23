@@ -330,10 +330,50 @@ object AppSettings {
         )
     }
 
+    /** 主题："system"（跟随系统）/ "light" / "dark" */
+    var themeMode: String
+        get() = prefs.getString("theme_mode", "system") ?: "system"
+        set(value) {
+            prefs.edit().putString("theme_mode", value).apply()
+            _themeMode.value = value
+        }
+
+    /**
+     * 主题变化流：Compose 侧靠它立即重组。
+     * 初始值必须在 prefs 初始化之后才能读，所以先留空、首次取用时兜底。
+     */
+    private val _themeMode = kotlinx.coroutines.flow.MutableStateFlow("")
+    val themeModeFlow: kotlinx.coroutines.flow.StateFlow<String>
+        get() {
+            if (_themeMode.value.isEmpty()) _themeMode.value = themeMode
+            return _themeMode
+        }
+
     /** 内置网页搜索开关（聊天顶栏 🔍）：开启后向模型注入 web_search 工具 */
     var webSearchEnabled: Boolean
         get() = prefs.getBoolean("web_search_enabled", false)
         set(value) = prefs.edit().putBoolean("web_search_enabled", value).apply()
+
+    /**
+     * MCP 工具注入策略："auto"（默认，工具多时按关键词/模型挑选几个）/"all"（全量注入，不裁剪）。
+     *
+     * 原来限制的理由是「工具多把 prompt 撑到几万 token、CPU 预填充要几分钟」——NPU 引擎之后
+     * 这条基本不成立（12B 实测预填充 3 秒 vs CPU 180 秒），所以给出关闭限制的选项。
+     * 默认仍是 auto：工具太多会降低小模型的选择准确率，这跟速度无关，是另一个问题。
+     */
+    var mcpToolMode: String
+        get() = prefs.getString("mcp_tool_mode", "auto") ?: "auto"
+        set(value) = prefs.edit().putString("mcp_tool_mode", value).apply()
+
+    /**
+     * 工具调用的最大轮次（每轮 = 一次完整生成 + 一次工具回传）。
+     * 原来是写死的 8 轮，多步任务（写文件 → 自检 → 改错 → 再自检）经常撞上限，
+     * 日志里表现为「轮次用尽，任务未收敛」。NPU 之后每轮更便宜，放宽更有意义。
+     * 上限不高仍有意义：模型陷进工具循环时，每多一轮就是一次完整生成。
+     */
+    var toolRoundLimit: Int
+        get() = prefs.getInt("tool_round_limit", 16).coerceIn(4, 40)
+        set(value) = prefs.edit().putInt("tool_round_limit", value.coerceIn(4, 40)).apply()
 
     /** 含图片轮次的联网搜索策略："block"（默认，禁止）/ "ask"（先征求同意）/ "allow" */
     var imageSearchPolicy: String
@@ -444,7 +484,9 @@ object AppSettings {
                 SkillChain(
                     o.optString("id").ifBlank { java.util.UUID.randomUUID().toString() },
                     o.optString("name").ifBlank { "技能链" },
-                    steps
+                    steps,
+                    // 失败时改用的备用技能；老数据没有这个字段，留空即可
+                    o.optString("fallbackSkillId").takeIf { it.isNotBlank() && it != "null" }
                 )
             }
         }.getOrDefault(emptyList())
@@ -458,6 +500,7 @@ object AppSettings {
             arr.put(
                 org.json.JSONObject()
                     .put("id", c.id).put("name", c.name).put("steps", steps)
+                    .put("fallbackSkillId", c.fallbackSkillId ?: org.json.JSONObject.NULL)
             )
         }
         skillChainsJson = arr.toString()
@@ -743,4 +786,15 @@ data class SysPreset(val id: String, val name: String, val text: String)
 data class Skill(val id: String, val name: String, val desc: String, val prompt: String)
 
 /** 技能链：按顺序执行多个技能 */
-data class SkillChain(val id: String, val name: String, val skillIds: List<String>)
+/**
+ * 技能链。原来的用法是把各步提示词拼成一段「第 1 步…第 2 步…」的提示词，
+ * 让模型在一次生成里按顺序做完——中间结果看不到，也无法真正分支。
+ * fallbackSkillId 用于新的执行器：某一步被判定为失败时，改用这个技能重跑该步。
+ */
+data class SkillChain(
+    val id: String,
+    val name: String,
+    val skillIds: List<String>,
+    /** 失败时改用的备用技能；null = 失败就中止并说明卡在哪一步 */
+    val fallbackSkillId: String? = null
+)

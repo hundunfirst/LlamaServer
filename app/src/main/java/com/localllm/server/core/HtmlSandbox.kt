@@ -44,6 +44,36 @@ object HtmlSandbox {
     private const val TICK_90 = "typeof window.__hubTick==='function'?window.__hubTick(90):-999"
     private const val TICK_30 = "typeof window.__hubTick==='function'?window.__hubTick(30):-999"
 
+    // 交互探测：收集可交互元素 + 提供点击/指纹比较。只做这件事，不改页面本身。
+    private const val INTERACT_INIT = """
+(function(){
+  window.__pkCand = Array.prototype.slice.call(document.querySelectorAll(
+    'button,[onclick],input[type=button],input[type=submit],input[type=range],input[type=checkbox],select,a[href=\""#\""]'
+  )).slice(0,4);
+  window.__probeCount = window.__pkCand.length;
+  window.__fp = function(){
+    var t = document.body ? (document.body.innerText || '') : '';
+    var n = document.querySelectorAll('*').length;
+    var s = 0;
+    document.querySelectorAll('[style]').forEach(function(e){ s += (e.getAttribute('style')||'').length; });
+    return t + '|' + n + '|' + s;
+  };
+  window.__probeDesc = function(i){
+    var e = window.__pkCand[i]; if(!e) return '#' + i;
+    var d = (e.innerText || e.value || e.id || e.tagName || '').toString().trim();
+    return d.slice(0,16) || e.tagName;
+  };
+  window.__probeClick = function(i){
+    var e = window.__pkCand[i]; if(!e) return 0;
+    window.__before = window.__fp();
+    try { e.click(); } catch(err) {}
+    return 1;
+  };
+  window.__probeChanged = function(){ return window.__fp() === window.__before ? 0 : 1; };
+  return 1;
+})()
+"""
+
     data class Report(
         val alive: Boolean,
         val errors: List<String>,
@@ -52,6 +82,8 @@ object HtmlSandbox {
         val animated: Boolean,
         val nodeCount: Int,
         val textPreview: String,
+        /** 静态/交互检查发现的可疑点：不一定是错误，但提示「能用」存疑 */
+        val warnings: List<String> = emptyList()
     ) {
         /** 给模型看的纯文本结论：错误优先，其次画面，最后 DOM。 */
         fun toToolText(): String {
@@ -83,6 +115,10 @@ object HtmlSandbox {
             }
             sb.append("画面：").append(if (animated) "在变化（循环在跑）" else "静止（0.4 秒内没有任何变化）").append('\n')
             sb.append("DOM 元素：").append(nodeCount).append(" 个\n")
+            if (warnings.isNotEmpty()) {
+                sb.append("可疑点（页面没崩，但这些地方可能不工作）：\n")
+                warnings.forEach { sb.append("  ⚠ ").append(it).append('\n') }
+            }
             if (textPreview.isNotBlank()) sb.append("可见文本：").append(textPreview).append('\n')
             sb.append('\n')
             // 解析期错误会让整段 script 一行都不执行，此时运行期错误还没机会出现
@@ -95,6 +131,9 @@ object HtmlSandbox {
                 sb.append("画面静止说明绘制循环没跑起来（检查 requestAnimationFrame / setInterval 是否真的调用了绘制函数）。")
             } else if (canvases.any { it.contains("已绘制 0") || it.contains("已绘制 -") }) {
                 sb.append("画布几乎空白：检查绘制坐标是否落在画布外、以及 canvas 的宽高是否设置了。")
+            } else if (warnings.isNotEmpty()) {
+                sb.append("页面能加载、没有报错，但上面的可疑点要逐个核实——")
+                sb.append("「没崩」不等于「能用」：按钮没反应、数字不刷新这类问题不会报错。")
             } else {
                 sb.append("看起来可以运行了。")
             }
@@ -265,7 +304,10 @@ object HtmlSandbox {
             }
             val ticked2 = evalOk(w, TICK_30)
             val p2 = if (ticked2) probe(w) else null // 第二次失败不算死，只影响动画判据
-            buildReport(p1, p2).also { _lastSummary.value = summarize(it) }
+            // 静态检查看「元素取到没用」，交互探测看「点了没反应」——两者互补，
+            // 因为「点了有局部变化但功能不对」只有静态检查能抓到。
+            val warns = staticWarnings(html) + interactionWarnings(w)
+            buildReport(p1, p2, warns).also { _lastSummary.value = summarize(it) }
         } finally {
             _running.value = false
         }
@@ -310,6 +352,56 @@ object HtmlSandbox {
     /** 只要「执行完了」这个事实；超时即判定卡死 */
     private suspend fun evalOk(w: WebView, js: String): Boolean = evalJs(w, js) != null
 
+    private fun jsStr(raw: String?): String? =
+        raw?.let { runCatching { (JSONTokener(it).nextValue() as? String) ?: it }.getOrNull() }
+
+    /**
+     * 静态检查：「取到了元素却再也没用过这个变量」。
+     * 这是最典型的「页面没报错但功能不工作」——实测番茄钟就是 `const timerEl = getElementById('timer')`
+     * 之后从没往 timerEl 写过，倒计时数字永远停在初始值，而所有报错检测都是干净的。
+     */
+    private fun staticWarnings(html: String): List<String> {
+        val out = mutableListOf<String>()
+        val decl = Regex(
+            """(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*document\.getElementById\(\s*['"]([^'"]+)['"]\s*\)"""
+        )
+        for (m in decl.findAll(html)) {
+            val name = m.groupValues[1]
+            val id = m.groupValues[2]
+            val rest = html.substring(m.range.last + 1)
+            val used = Regex("""\b${Regex.escape(name)}\b""").containsMatchIn(rest)
+            if (!used) {
+                out += "取到了元素 #$id，但之后再也没用过变量 $name —— 这块界面上可能永远是初始值" +
+                        "（例如倒计时数字不刷新、状态文字不变）"
+            }
+        }
+        return out.take(3)
+    }
+
+    /**
+     * 交互探测：逐个点可交互元素，比对点击前后的 DOM 指纹。
+     * 只能抓「点了完全没反应」这一类；点了有局部变化但功能不对（比如只改了状态文字、
+     * 数字仍不更新）它看不出来，那种要靠上面的静态检查。
+     */
+    private suspend fun interactionWarnings(w: WebView): List<String> {
+        val out = mutableListOf<String>()
+        evalJs(w, INTERACT_INIT) ?: return out
+        val n = jsStr(evalJs(w, "window.__probeCount||0"))?.toIntOrNull() ?: 0
+        var idx = 0
+        var checked = 0
+        while (idx < n && checked < 4) {
+            idx++; checked++
+            if (evalJs(w, "window.__probeClick(${idx - 1})") == null) break
+            delay(320)
+            val changed = jsStr(evalJs(w, "window.__probeChanged()")) == "1"
+            if (!changed) {
+                val desc = jsStr(evalJs(w, "window.__probeDesc(${idx - 1})")).orEmpty().ifBlank { "#$idx" }
+                out += "点击「$desc」后页面没有任何变化 —— 这个按钮/控件可能没接上处理逻辑"
+            }
+        }
+        return out.take(3)
+    }
+
     private suspend fun probe(w: WebView): JSONObject? {
         val raw = evalJs(w, PROBE_JS) ?: return null
         val text = runCatching {
@@ -318,7 +410,7 @@ object HtmlSandbox {
         return runCatching { JSONObject(text) }.getOrNull()
     }
 
-    private fun buildReport(p1: JSONObject, p2: JSONObject?): Report {
+    private fun buildReport(p1: JSONObject, p2: JSONObject?, warnings: List<String> = emptyList()): Report {
         // window.onerror 报的行号比 console 精确，优先用它；console 里那些非 JS 错误（资源加载）补在后面
         val merged = mutableListOf<String>()
         val fromJs = p1.optJSONArray("errs")
@@ -375,7 +467,8 @@ object HtmlSandbox {
             canvases = desc,
             animated = animated,
             nodeCount = p1.optInt("nodes"),
-            textPreview = p1.optString("text").replace("\n", " ").take(120)
+            textPreview = p1.optString("text").replace("\n", " ").take(120),
+            warnings = warnings
         )
     }
 

@@ -5,6 +5,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
 
 private val LightColors = lightColorScheme(
@@ -26,8 +28,15 @@ private val DarkColors = darkColorScheme(
 
 @Composable
 fun LlamaTheme(content: @Composable () -> Unit) {
+    // 跟随系统 / 强制浅色 / 强制深色，切换立即生效（不依赖 Activity 重建）
+    val mode by com.localllm.server.core.AppSettings.themeModeFlow.collectAsState()
+    val dark = when (mode) {
+        "dark" -> true
+        "light" -> false
+        else -> isSystemInDarkTheme()
+    }
     MaterialTheme(
-        colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors,
+        colorScheme = if (dark) DarkColors else LightColors,
         content = content
     )
 }

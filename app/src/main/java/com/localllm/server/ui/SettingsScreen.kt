@@ -275,6 +275,68 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             com.localllm.server.core.AppSettings.webSandboxEnabled = sandboxOn
         }
 
+        // ---- 主题 ----
+        var themeMode by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.themeMode)
+        }
+        SectionHeader(
+            title = "主题",
+            help = "跟随系统：由手机深色模式决定。浅色/深色：强制切换。切换立即生效，不用重启。",
+            titleStyle = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        QuickChips(
+            options = listOf("system" to "跟随系统", "light" to "浅色", "dark" to "深色"),
+            current = themeMode
+        ) { v ->
+            themeMode = v
+            com.localllm.server.core.AppSettings.themeMode = v
+        }
+
+        // ---- MCP 工具注入策略 ----
+        var mcpMode by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.mcpToolMode)
+        }
+        SectionHeader(
+            title = "MCP 工具注入策略",
+            help = "「按需挑选」(默认)：工具多于 24 个时按当前消息筛，只注入命中的几个——" +
+                    "这是为 CPU 预填充省时间，代价是模型有时看不到真正需要的那个工具。\n\n" +
+                    "「全部注入」：一个不裁，模型能看到所有工具。NPU 引擎的预填充很快（12B 实测 3 秒，" +
+                    "CPU 要 180 秒），所以速度上基本不是问题；但如果工具很多、模型又小，" +
+                    "它在几十个工具里挑错或编造工具名的概率会上升。\n\n" +
+                    "工具多又想可靠时，建议优先提高模型规模，而不是继续裁工具。",
+            titleStyle = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        QuickChips(
+            options = listOf("auto" to "按需挑选", "all" to "全部注入"),
+            current = mcpMode
+        ) { v ->
+            mcpMode = v
+            com.localllm.server.core.AppSettings.mcpToolMode = v
+        }
+
+        // ---- 工具调用轮次上限 ----
+        var roundLimit by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.toolRoundLimit.toString())
+        }
+        SectionHeader(
+            title = "工具调用轮次上限",
+            help = "每轮 = 一次完整生成 + 一次工具回传。多步任务（写文件 → 自检 → 改错 → 再自检）" +
+                    "很容易超过 8 轮，以前撞上限就停，日志里是「轮次用尽，任务未收敛」。\n\n" +
+                    "调高后长任务更容易一次做完；但模型如果陷进工具循环，每一轮都是完整生成，" +
+                    "会明显更耗电、更久。NPU 引擎下每轮更便宜，可以给大一些。",
+            titleStyle = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        QuickChips(
+            options = listOf("8" to "8 轮", "16" to "16 轮", "24" to "24 轮", "32" to "32 轮"),
+            current = roundLimit
+        ) { v ->
+            roundLimit = v
+            com.localllm.server.core.AppSettings.toolRoundLimit = v.toIntOrNull() ?: 16
+        }
+
         // ---- 纯净模式 ----
         var pureOn by remember {
             mutableStateOf(com.localllm.server.core.AppSettings.pureMode)

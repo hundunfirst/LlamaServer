@@ -1,4 +1,4 @@
-package com.localllm.server.ui
+﻿package com.localllm.server.ui
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
@@ -16,6 +16,7 @@ import com.localllm.server.core.OcrIntent
 import com.localllm.server.core.OcrTool
 import com.localllm.server.core.RepeatGuard
 import com.localllm.server.core.ServerProcessManager
+import com.localllm.server.core.SkillChain
 import com.localllm.server.core.ServerUiState
 import com.localllm.server.core.TodoTool
 import com.localllm.server.core.UrlFetch
@@ -153,6 +154,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      * 整个界面点不动、连新会话都切不过去，只能杀进程恢复。完整内容仍然写进日志。
      */
     private val MAX_ERROR_CHARS = 300
+
+    /** 技能链步骤的失败标志：只看行首，避免「没有错误」这类否定句误判 */
+    private val CHAIN_FAIL_MARKERS = listOf(
+        "错误：", "错误:", "失败：", "失败:", "无法完成", "无法继续", "执行失败", "超时"
+    )
     // 实测 26 个工具 ≈ 9.1K token（每个约 350），对 0.5B 来说 prefill 就是几分钟。
     // 小模型本来也用不好二三十个工具，收到 8 个是「首字时间 vs 可用性」的折中。
     private val MAX_TOOLS_PICKED = 8
@@ -415,6 +421,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             _generating.value = _generating.value + sid
             _error.value = null
             _lastStats.value = null
+            // 技能链走执行器：每步一次生成、失败可换方案。
+            // 旧实现是把各步提示词拼成一段「第 1 步…第 2 步…」让模型一口气做完，
+            // 中间结果看不到，也没有真正的条件分支。
+            val chain = _sessions.value.firstOrNull { it.id == sid }?.appliedChainId
+                ?.let { cid -> AppSettings.loadSkillChains().firstOrNull { it.id == cid } }
+            if (chain != null && goalText.isNotBlank()) {
+                runSkillChain(sid, chain, goalText)
+                return@launch
+            }
             // 模型“答完又想再答”（单次生成内二次思考）时自动截断本轮
             var autoStopped = false
             // 复读中断标记（正文里同一段反复出现；实测会把 file_write 的 JSON 撑爆）
@@ -674,7 +689,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // MCP 工具按需注入：工具多时（实测接到 67 个）全量注入会把 prompt 撑到几万 token，
                 // prefill 变成几分钟，小模型还会选错。按当前消息匹配名字/描述，命中的才注入；
                 // 一个都没命中时退回全量，保证不会因为猜不到而失去能力。
-                val mcpSel = if (mcpAgg.length() > MAX_TOOLS_FULL) {
+                //
+                // 但「预填充慢」这个理由在 NPU 上基本不成立了（实测 12B 预填充 3 秒 vs CPU 180 秒），
+                // 所以限制改成可关：设置里选「全量」就一个不裁，代价是工具选择准确率可能下降
+                // （这一条跟速度无关，小模型在几十个工具里挑错是另一个问题）。
+                val mcpAll = AppSettings.mcpToolMode == "all"
+                val mcpSel = if (mcpAll) {
+                    (0 until mcpAgg.length()).mapNotNull { mcpAgg.optJSONObject(it) }
+                } else if (mcpAgg.length() > MAX_TOOLS_FULL) {
                     // 两阶段：先让模型只从「名字+一句话描述」的清单里挑工具，
                     // 再把这些工具的完整 schema 注入主请求。清单约 1/8 体积，
                     // 换掉动辄 9K token 的全量注入。挑不出东西时退回关键词筛。
@@ -772,7 +794,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 最多 5 轮工具调用，防止模型死循环
                 // 注意：必须用 for + break——repeat 里的 return@repeat 是 continue 语义，
                 // 会导致「回答完成」后仍继续下一轮（历史 bug：同一问题最多被连答 5 遍）。
-                for (round in 0 until 8) { // 多步任务（todo）需要更多轮
+                // 轮次上限可配（设置里选），默认 16：多步任务（写文件→自检→改错→再自检）经常撞 8 轮上限，
+                // 日志表现为「轮次用尽，任务未收敛」。仍保留上限：模型陷进工具循环时每多一轮就是一次完整生成。
+                for (round in 0 until AppSettings.toolRoundLimit) {
                     ensureActive() // 停止/切换后不再进入下一轮
                     // 提前强制：已搜过但走到第4轮仍无正文 → 立即移除搜索工具，逼模型作答
                     val forceNoTools = searchAvailable && round >= 3 &&
@@ -1154,7 +1178,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                         }
                                     }
                                 }
-                                steps.add(ChatStore.Step("tool", "文件：${tc.name}", detail.take(120)))
+                                steps.add(
+                                    ChatStore.Step(
+                                        "tool", "文件：${tc.name}", detail.take(800),
+                                        args = args.toString().take(600),
+                                        ok = !r.trimStart().startsWith("错误")
+                                    )
+                                )
                                 syncSteps()
                                 ServerProcessManager.appLog("文件工具完成：$detail")
                                 r
@@ -1255,7 +1285,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     ?: throw IllegalStateException("未路由的工具：${tc.name}")
                                 ServerProcessManager.appLog("MCP 调用：${tc.name}")
                                 val r = McpHttpClient.callTool(route.first, null, route.second, args)
-                                steps.add(ChatStore.Step("tool", "调用工具：${tc.name}", r.take(120)))
+                                steps.add(
+                                    ChatStore.Step(
+                                        "tool", "调用工具：${tc.name}",
+                                        r.take(800),
+                                        args = args.toString().take(600),
+                                        ok = !r.trimStart().startsWith("错误")
+                                    )
+                                )
                                 syncSteps()
                                 r
                             }
@@ -1987,6 +2024,125 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         return ok.isSuccess && wrote
+    }
+
+    /**
+     * 技能链执行器：每步独立生成一次，上一步的输出作为下一步的输入，每步结果都可见。
+     *
+     * 与旧实现的根本区别：旧的是「一段提示词里的步骤清单」，模型必须在一口气生成里自己记住所有步骤，
+     * 中间结果既不展示也无法判断成败，所谓条件分支只能靠它自觉。这里每步都能判定成败，
+     * 失败时按 `fallbackSkillId` 换一个技能重跑这一步——这才是真正的分支。
+     *
+     * 失败判据刻意保守：只认行首的「错误：/失败：」这类明确声明，避免「没有错误」被误判成失败。
+     * 没有配备用技能时，失败就中止并把卡在哪一步说出来，不假装完成。
+     */
+    private suspend fun runSkillChain(sid: String, chain: SkillChain, goal: String) {
+        val skills = AppSettings.loadSkills().associateBy { it.id }
+        val steps = chain.skillIds.mapNotNull { skills[it] }
+        val fallback = chain.fallbackSkillId?.let { skills[it] }
+        if (steps.isEmpty()) {
+            _error.value = "这条技能链里的技能都被删掉了，请重新配置"
+            _generating.value = _generating.value - sid
+            return
+        }
+        val sys = AppSettings.activeSysPrompt().ifBlank { "你是一个严谨的中文助手，回答用中文。" }
+        val out = StringBuilder()
+        try {
+            var input = goal
+            for ((i, sk) in steps.withIndex()) {
+                ServerProcessManager.appLog("技能链 第 ${i + 1}/${steps.size} 步：${sk.name}")
+                val prompt = sk.prompt + "\n\n【输入】\n" + input
+                var text = runChainStep(sys, prompt)
+                var failed = looksLikeFailure(text)
+                if (failed && fallback != null) {
+                    ServerProcessManager.appLog("第 ${i + 1} 步判定失败，改用备用技能：${fallback.name}")
+                    val alt = runChainStep(
+                        sys,
+                        fallback.prompt + "\n\n【上一次尝试没能完成本步，请换一种可行做法重做】\n【输入】\n" + input
+                    )
+                    if (alt.isNotBlank() && !looksLikeFailure(alt)) {
+                        text = alt
+                        failed = false
+                    } else {
+                        appendToLastInline(sid) { m -> m.copy(content = out.toString().trim()) }
+                        out.append("### 第 ${i + 1} 步 · ").append(sk.name).append("（已尝试备用技能仍失败）\n")
+                        out.append(text.trim()).append("\n\n")
+                        appendToLastInline(sid) { m -> m.copy(content = out.toString().trim()) }
+                        _error.value = "第 ${i + 1} 步（${sk.name}）没能完成，技能链已中止"
+                        break
+                    }
+                }
+                out.append("### 第 ${i + 1} 步 · ").append(sk.name).append('\n')
+                out.append(text.trim()).append("\n\n")
+                appendToLastInline(sid) { m ->
+                    m.copy(
+                        content = out.toString().trim(),
+                        steps = m.steps + ChatStore.Step(
+                            "tool", "技能链第 ${i + 1} 步：${sk.name}",
+                            text.trim().take(400), 0, args = prompt.take(300), ok = !failed
+                        )
+                    )
+                }
+                persistProgress(sid)
+                if (failed) {
+                    _error.value = "第 ${i + 1} 步（${sk.name}）没能完成，技能链已中止"
+                    break
+                }
+                input = text.trim()
+            }
+            _lastStats.value = "技能链完成（${steps.size} 步）"
+        } catch (e: Exception) {
+            ServerProcessManager.appLog("技能链失败：${e.message}")
+            _error.value = friendlyError(e)
+        } finally {
+            _generating.value = _generating.value - sid
+            setProgress(sid, null)
+            persistSession(sid)
+        }
+    }
+
+    /** 跑一步：一次不带动工具的生成，返回完整文本 */
+    private suspend fun runChainStep(system: String, prompt: String): String {
+        val sb = StringBuilder()
+        val cloud = AppSettings.chatCloudEnabled && AppSettings.chatCloudUrl.isNotBlank()
+        ChatClient.chatStream(
+            port = AppSettings.port,
+            messages = listOf(
+                ChatClient.ChatMessage("system", system),
+                ChatClient.ChatMessage("user", prompt)
+            ),
+            apiToken = if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
+            onDelta = { d -> sb.append(d) },
+            baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
+            model = if (cloud) AppSettings.chatCloudModel.ifBlank { "local" } else "local"
+        )
+        return sb.toString()
+    }
+
+    /** 步骤失败判据：只认明确声明，避免把「没有错误」这类否定句判成失败 */
+    private fun looksLikeFailure(t: String): Boolean {
+        val s = t.trim()
+        if (s.isEmpty()) return true
+        val head = s.take(40)
+        if (CHAIN_FAIL_MARKERS.any { head.startsWith(it) }) return true
+        return s.contains("无法完成本步") || s.contains("无法继续执行本步")
+    }
+
+    /**
+     * 应用/清除技能链。链由执行器逐步驱动，所以不再把各步提示词写成会话的 system prompt。
+     */
+    fun setSessionChain(chainId: String?) {
+        val id = _activeId.value
+        _sessions.value = _sessions.value.map {
+            if (it.id == id) it.copy(
+                systemPrompt = null,
+                appliedSkillId = null,
+                appliedChainId = chainId,
+                updatedAt = System.currentTimeMillis()
+            ) else it
+        }
+        saveStore()
+        ServerProcessManager.appLog(if (chainId == null) "已清除技能链" else "已应用技能链（执行器模式）")
     }
 
     private fun friendlyError(e: Exception): String = when {
