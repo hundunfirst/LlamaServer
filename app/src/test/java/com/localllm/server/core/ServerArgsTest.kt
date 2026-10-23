@@ -27,7 +27,9 @@ class ServerArgsTest {
         apiTokenEnabled: Boolean = false,
         loraPath: String? = null,
         loraScale: Float = 1.0f,
-        loadMode: String = ""
+        loadMode: String = "",
+        slotSavePath: String? = null,
+        parallel: Int = 0
     ): Pair<List<String>, List<String>> = buildServerArgs(
         binaryPath = "/data/app/engines/cpu/llama-server",
         modelPath = "/data/models/a.gguf",
@@ -48,7 +50,9 @@ class ServerArgsTest {
         apiTokenEnabled = apiTokenEnabled,
         loraPath = loraPath,
         loraScale = loraScale,
-        loadMode = loadMode
+        loadMode = loadMode,
+        slotSavePath = slotSavePath,
+        parallel = parallel
     )
 
     @Test
@@ -100,6 +104,20 @@ class ServerArgsTest {
 
         val mmap = build(loadMode = "mmap").first
         assertEquals("mmap", mmap[mmap.indexOf("-lm") + 1])
+    }
+
+    @Test
+    fun `KV 存档目录与单 slot 参数按需下发`() {
+        // 默认不下发：没有存档目录时引擎就不该开着 save/restore 的口子
+        assertFalse(build().first.contains("--slot-save-path"))
+        assertFalse(build().first.contains("--parallel"))
+
+        val args = build(slotSavePath = "/data/user/0/x/files/kv", parallel = 1).first
+        assertEquals(
+            "/data/user/0/x/files/kv",
+            args[args.indexOf("--slot-save-path") + 1]
+        )
+        assertEquals("1", args[args.indexOf("--parallel") + 1])
     }
 
     @Test

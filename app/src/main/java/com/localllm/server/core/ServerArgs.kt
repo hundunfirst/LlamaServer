@@ -31,7 +31,11 @@ fun buildServerArgs(
     loraPath: String?,
     loraScale: Float,
     /** 模型加载模式："" = 引擎默认；"dio" = DirectIO（模型比内存大时绕开 page cache） */
-    loadMode: String = ""
+    loadMode: String = "",
+    /** 非空则下发 --slot-save-path，让 /slots 的 save/restore 有落盘目录（KV 跨重启持久化） */
+    slotSavePath: String? = null,
+    /** >0 则下发 --parallel；单 slot 让缓存与存档目标确定（本 App 一次只跑一条生成） */
+    parallel: Int = 0
 ): Pair<List<String>, List<String>> {
     val cmd = mutableListOf(
         binaryPath,
@@ -46,6 +50,14 @@ fun buildServerArgs(
     // dio（DirectIO）绕开 page cache、只读当前需要的权重块，是 MoE 大模型的救命开关
     if (loadMode.isNotEmpty()) {
         cmd += listOf("-lm", loadMode)
+    }
+    // 单 slot：缓存的命中位置与 /slots/0 的存档目标才确定
+    if (parallel > 0) {
+        cmd += listOf("--parallel", parallel.toString())
+    }
+    // KV 存档目录：POST /slots/0?action=save|restore 的文件落在这里
+    if (slotSavePath != null) {
+        cmd += listOf("--slot-save-path", slotSavePath)
     }
     if (threads > 0) {
         cmd += listOf("-t", threads.toString())

@@ -55,9 +55,24 @@ class ServerService : android.app.Service() {
             ACTION_STOP -> {
                 AppSettings.serverShouldRun = false
                 stopKeepAlive()
-                ServerProcessManager.stop()
-                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                val stopModel = AppSettings.serverModelPath
+                val stopPort = AppSettings.port
+                // 停止前先把 slot 的 KV 落盘：服务还活着才有机会存，destroy 之后就晚了。
+                // 存档最多十几秒，放 IO 线程阻塞；前台通知的收尾回主线程做。
+                scope.launch {
+                    if (stopModel != null) {
+                        ServerProcessManager.saveKvBlocking(
+                            stopModel, stopPort, AppSettings.effectiveCtx(stopModel)
+                        )
+                    }
+                    ServerProcessManager.stop()
+                    android.os.Handler(mainLooper).post {
+                        ServiceCompat.stopForeground(
+                            this@ServerService, ServiceCompat.STOP_FOREGROUND_REMOVE
+                        )
+                        stopSelf()
+                    }
+                }
                 return START_NOT_STICKY
             }
             ACTION_START -> {

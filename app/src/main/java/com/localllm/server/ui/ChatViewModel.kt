@@ -419,6 +419,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             var autoStopped = false
             // 复读中断标记（正文里同一段反复出现；实测会把 file_write 的 JSON 撑爆）
             var repetitionAborted = false
+            // 工具调用参数被写崩时的降级重试：catch 里拿不到 try 内的局部变量，这里先留出口。
+            // 一旦服务端因工具参数 JSON 不闭合返回 500，去掉 tools 重发一次，让用户至少拿到文字答案。
+            var turnSystem: String? = null
+            var turnHistory: List<ChatStore.Msg> = emptyList()
+            var turnHadTools = false
+            var toolJsonRetried = false
             // 心跳任务：每轮重置，必须先取消上一轮的，否则多个心跳同时写状态行，秒数会来回跳
             var heartbeat: kotlinx.coroutines.Job? = null
             var abortDeltas = 0
@@ -555,8 +561,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 //   没挂 mmproj（纯文本模型）→ 图发不了（它看不了），换成一句可操作的提示，
                 //     模型需要文字时自己调 ocr_image 工具做本地识别。
                 // 这样「用户明确要求识别文字」就成了明确触发，而不会被自动 OCR 抢在前面白跑一遍。
-                val visionReady = AppSettings.selectedMmprojPath
-                    ?.let { java.io.File(it).exists() } == true
+                //
+                // 判据看「服务实际在跑什么」而不是「设置里绑了什么」：投影器不匹配时服务会
+                // 自动去掉 --mmproj 重启，但设置里那条绑定还在——按设置判会把图片继续发过去，
+                // 服务端直接 500（image input is not supported - you may need to provide the mmproj）。
+                val svcState = ServerProcessManager.state.value
+                val visionReady = if (svcState.status == ServerUiState.Status.RUNNING) {
+                    svcState.runningMmproj?.let { java.io.File(it).exists() } == true
+                } else {
+                    AppSettings.selectedMmprojPath?.let { java.io.File(it).exists() } == true
+                }
                 // 显式指令优先：用户说了 OCR 相关的话，即使挂着视觉模型也**不传图**，
                 // 让 ocr_image 成为唯一通路。不然视觉模型会直接读图，把「用 OCR 识别」顶掉——
                 // 而用户要的往往正是 OCR 的逐字结果（表格数字、报错原文），不是视觉模型的概括。
@@ -574,6 +588,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val midSystems = history.filter { it.role == "system" && it.content.isNotBlank() }
                 val systemMerged = if (midSystems.isEmpty()) systemTextFull
                 else systemTextFull + "\n\n" + midSystems.joinToString("\n\n") { it.content }
+                turnSystem = systemMerged
+                turnHistory = history
                 val payloadMsgs = listOf(ChatClient.ChatMessage("system", systemMerged)) +
                         history.filter { it.role != "system" }.map { m ->
                             when {
@@ -682,6 +698,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     mcpSel.forEach { arr.put(it) }
                 }.takeIf { !AppSettings.pureMode && it.length() > 0 }
+                turnHadTools = toolsJson != null
                 // 搜索配额用尽后本轮请求不带 web_search：模型无工具可调，只能产出文本回答
                 val toolsNoSearch = org.json.JSONArray().also { arr ->
                     mcpSel.forEach { arr.put(it) }
@@ -1344,9 +1361,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         } else m
                     }
                 } else {
-                    // 日志保留原文（appendLog 内部按 1200 字截断），界面只显示截断后的短提示
-                    ServerProcessManager.appLog("聊天失败：${e.message ?: "请求失败"}")
-                    _error.value = friendlyError(e)
+                    val toolJsonBroke = e.message?.contains("Failed to parse tool call arguments as JSON") == true
+                    if (toolJsonBroke && turnHadTools && turnSystem != null && !toolJsonRetried) {
+                        toolJsonRetried = true
+                        ServerProcessManager.appLog("工具调用参数格式出错，去掉工具重发一次（降级为纯文字回答）")
+                        // 上一次写进消息里的是崩掉工具调用的碎片，清空后再重填，免得拼出乱七八糟的内容
+                        appendToLastInline(sid) { m ->
+                            if (m.role == "assistant") m.copy(content = "", steps = emptyList()) else m
+                        }
+                        val ok = runCatching { retryWithoutTools(sid, turnSystem!!, turnHistory) }
+                        if (ok.getOrDefault(false)) {
+                            _toast.value = "工具调用格式出错，已自动改用纯文字回答"
+                        } else {
+                            _error.value = friendlyError(e)
+                        }
+                    } else {
+                        // 日志保留原文（appendLog 内部按 1200 字截断），界面只显示截断后的短提示
+                        ServerProcessManager.appLog("聊天失败：${e.message ?: "请求失败"}")
+                        _error.value = friendlyError(e)
+                    }
                 }
             } finally {
                 val msgs = messagesOf(sid)
@@ -1917,6 +1950,43 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 setProgress(sid, null)
             }
         }
+    }
+
+    /**
+     * 工具调用参数被模型写崩（复读把 JSON 撑到不闭合）时服务端直接 500，整轮就废了。
+     * 这里去掉 tools 重发一次：模型通常能给纯文字答案，用户至少拿到结果。只试一次，失败仍报原错。
+     */
+    private suspend fun retryWithoutTools(
+        sid: String,
+        systemText: String,
+        history: List<ChatStore.Msg>
+    ): Boolean {
+        val cloud = AppSettings.chatCloudEnabled && AppSettings.chatCloudUrl.isNotBlank()
+        val msgs = listOf(
+            ChatClient.ChatMessage(
+                "system",
+                systemText + "\n\n【注意】上一次尝试里工具调用的参数格式出错，本次请直接用文字回答，不要调用任何工具。"
+            )
+        ) + history.filter { it.role != "system" && it.imageB64 == null }
+            .map { ChatClient.ChatMessage(it.role, it.content ?: "") }
+        var wrote = false
+        val ok = runCatching {
+            ChatClient.chatStream(
+                port = AppSettings.port,
+                messages = msgs,
+                apiToken = if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
+                onDelta = { d ->
+                    if (d.isNotEmpty()) {
+                        wrote = true
+                        appendToLastInline(sid) { it.copy(content = (it.content ?: "") + d) }
+                    }
+                },
+                baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
+                model = if (cloud) AppSettings.chatCloudModel.ifBlank { "local" } else "local",
+                tools = null
+            )
+        }
+        return ok.isSuccess && wrote
     }
 
     private fun friendlyError(e: Exception): String = when {

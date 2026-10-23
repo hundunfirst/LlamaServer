@@ -51,6 +51,10 @@ object ServerProcessManager {
      */
     private const val NPU_WARN_BYTES = 8L * 1024 * 1024 * 1024
 
+    /** KV 存档最多留几份、总量上限：ctx 越大单份越大，不设限会悄悄吃掉几十 GB */
+    private const val KV_MAX_FILES = 3
+    private const val KV_MAX_TOTAL_BYTES = 2L * 1024 * 1024 * 1024
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _state = MutableStateFlow(ServerUiState())
     val state: StateFlow<ServerUiState> = _state.asStateFlow()
@@ -80,6 +84,9 @@ object ServerProcessManager {
     /** MTP 退回只做一次，避免反复试 */
     @Volatile
     private var specDisabledUsed = false
+
+    /** mmproj 不匹配只重试一次，避免反复重启 */
+    private var mmprojRetryUsed = false
 
     /** 上下文过大 → 自动减半重试一次 */
     private fun degradeCtxAndRestart(
@@ -128,6 +135,52 @@ object ServerProcessManager {
     private fun specFailed(): Boolean = synchronized(logBuffer) {
         logBuffer.any {
             it.contains("failed to create MTP context") || it.contains("doesn't contain MTP layers")
+        }
+    }
+
+    /**
+     * mmproj 与主模型不匹配。触发场景：`effectiveMmproj()` 在模型没单独绑定时会回落到全局投影器，
+     * 于是给纯文本模型挂上视觉投影，加载阶段直接失败——用户看到的是「启动失败」，看不出是投影器的问题。
+     */
+    private fun mmprojFailed(): Boolean = synchronized(logBuffer) {
+        logBuffer.any {
+            it.contains("mmproj 与主模型架构不匹配") ||
+                    it.contains("mismatch between text model") ||
+                    it.contains("you may be using wrong mmproj") ||
+                    it.contains("failed to load multimodal model")
+        }
+    }
+
+    /** mmproj 不匹配 → 去掉投影器重试一次（模型本身能用，只是没视觉） */
+    private fun degradeMmprojAndRestart(
+        modelPath: String, port: Int, ctxSize: Int, threads: Int, ngl: Int,
+        lanEnabled: Boolean, apiToken: String, cacheTypeK: String, cacheTypeV: String,
+        specType: String, faMode: String, apiTokenEnabled: Boolean,
+        displayHost: String, prismEngine: Boolean, specDisabled: Boolean
+    ): Boolean {
+        synchronized(this) {
+            if (mmprojRetryUsed) return false
+            mmprojRetryUsed = true
+            appendLog("多模态投影与主模型不匹配，去掉 --mmproj 重试（模型本身可用，只是没有视觉能力）")
+            restartPending = true
+            killCurrentQuiet()
+            _state.value = ServerUiState(
+                status = ServerUiState.Status.STARTING,
+                host = displayHost,
+                port = port,
+                modelPath = modelPath,
+                runningMmproj = null,
+                message = "投影器不匹配，已去掉投影器重试…"
+            )
+            scope.launch {
+                kotlinx.coroutines.delay(500)
+                start(
+                    modelPath, port, ctxSize, threads, ngl, lanEnabled, apiToken,
+                    cacheTypeK, cacheTypeV, specType, null, faMode, apiTokenEnabled, prismEngine,
+                    specDisabled = specDisabled
+                )
+            }
+            return true
         }
     }
 
@@ -245,6 +298,7 @@ object ServerProcessManager {
             degradedRetryUsed = false
             ctxDegradeUsed = false
             specDisabledUsed = false
+            mmprojRetryUsed = false
             restartPending = false
             portConflict = false
             memBlocked = false
@@ -420,10 +474,18 @@ object ServerProcessManager {
                 )
                 return
             }
+            // KV 存档目录：先建好再传给引擎，否则 --slot-save-path 指向不存在的目录会被拒
+            val kvPath = kvDir()?.let { d ->
+                runCatching { d.mkdirs() }
+                if (d.isDirectory) d.absolutePath else null
+            }
             val cmd = buildCommand(
                 binary, modelPath, bindHost, port, ctxEff, threads, effNgl, lanEnabled, apiToken,
                 cacheTypeK, cacheTypeV, specEffective, mmprojPath, faMode, apiTokenEnabled,
-                npuDevice = if (npu) NPU_DEVICE else null
+                npuDevice = if (npu) NPU_DEVICE else null,
+                slotSavePath = kvPath,
+                // 单 slot：本 App 一次只跑一条生成，多 slot 只会让缓存命中与存档目标漂移
+                parallel = 1
             )
             appendLog("启动: ${cmd.joinToString(" ")}")
 
@@ -521,6 +583,16 @@ object ServerProcessManager {
                         )
                         return@launch
                     }
+                    // 投影器与模型不匹配 → 去掉 --mmproj 重试一次。放在最前面：
+                    // 这种情况是加载阶段就失败，后面那些「减 ctx / 减 ngl」的重试都救不了。
+                    if (mmprojPath != null && mmprojFailed() &&
+                        degradeMmprojAndRestart(
+                            modelPath, port, ctxEff, threads, ngl, lanEnabled, apiToken,
+                            cacheTypeK, cacheTypeV, specType, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
+                        )
+                    ) {
+                        return@launch
+                    }
                     // MTP 被引擎拒绝 → 去掉投机参数重试一次（用户不该看到这次失败）
                     if (specEffective == "draft-mtp" && specFailed() &&
                         degradeSpecAndRestart(
@@ -592,6 +664,8 @@ object ServerProcessManager {
                             modelPath = modelPath
                         )
                         appendLog("健康检查通过，服务就绪")
+                        // 有上次的 KV 存档就恢复，省掉整段预填充（模型或 ctx 变了文件名不同，自然不会命中）
+                        restoreKv(port, modelPath, ctxEff)
                         return@launch
                     }
                 }
@@ -677,7 +751,10 @@ object ServerProcessManager {
         faMode: String,
         apiTokenEnabled: Boolean = false,
         /** 非空则走 Hexagon NPU（传 "HTP0"），会追加 --device */
-        npuDevice: String? = null
+        npuDevice: String? = null,
+        /** KV 存档目录与并发 slot 数（跨重启持久化用） */
+        slotSavePath: String? = null,
+        parallel: Int = 0
     ): List<String> {
         // 参数拼装的纯逻辑在 buildServerArgs 里（可单测），这里只负责把 Android 侧的状态喂进去
         val loraPath = AppSettings.effectiveLora(modelPath)
@@ -690,6 +767,8 @@ object ServerProcessManager {
             threads = threads,
             ngl = ngl,
             npuDevice = npuDevice,
+            slotSavePath = slotSavePath,
+            parallel = parallel,
             lanEnabled = lanEnabled,
             apiToken = apiToken,
             cacheTypeK = cacheTypeK,
@@ -850,6 +929,94 @@ object ServerProcessManager {
     /** 字节 → 「x.x GB」，只用于给人看的提示 */
     private fun gib(bytes: Long): String =
         String.format("%.1f GB", bytes / 1024.0 / 1024.0 / 1024.0)
+
+    // ---- KV 跨重启持久化 ----
+    // 预填充的代价每次启动只付一次（实测：同前缀重发 0.18 s、重启服务才丢）。
+    // 把 slot 的 KV 存到磁盘，就能把「每次启动付一次」变成「只在模型或 ctx 变化时付」。
+    // 文件体积跟 ctx 成正比（12B/16K 可能几百 MB），所以必须限量。
+
+    /** KV 存档目录：与 logs.txt 同级，都在 app 私有 files/ 下 */
+    private fun kvDir(): File? = logFile?.parentFile?.let { File(it, "kv") }
+
+    /** 存档名由「模型文件名 + ctx」决定：换模型或改 ctx 自然不复用，避免错配 */
+    private fun kvFileName(modelPath: String, ctx: Int): String {
+        val base = File(modelPath).nameWithoutExtension
+            .replace(Regex("[^A-Za-z0-9._-]"), "_")
+            .take(48)
+        return "slot0-$base-c$ctx.bin"
+    }
+
+    /** 存档清理：最多保留 MAX 个，且总量不超过 MAX_TOTAL；超出按最久未用删除 */
+    private fun pruneKvDir(dir: File) {
+        val files = dir.listFiles { f -> f.isFile && f.name.startsWith("slot0-") && f.name.endsWith(".bin") }
+            ?.sortedBy { it.lastModified() } ?: return
+        var total = files.sumOf { it.length() }
+        val victims = files.toMutableList()
+        while (victims.size > KV_MAX_FILES || total > KV_MAX_TOTAL_BYTES) {
+            val v = victims.removeFirstOrNull() ?: break
+            total -= v.length()
+            runCatching { v.delete() }
+            appendLog("KV 存档清理：删除 ${v.name}（${v.length() / 1024 / 1024} MB）")
+        }
+    }
+
+    /** 调一次 /slots 的 action 接口；失败只记日志，不影响启动/停止 */
+    private fun slotAction(port: Int, action: String, fileName: String, timeoutMs: Int): Boolean {
+        return try {
+            val conn = java.net.URL("http://127.0.0.1:$port/slots/0?action=$action")
+                .openConnection() as java.net.HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = timeoutMs
+            conn.readTimeout = timeoutMs
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            val body = org.json.JSONObject().put("filename", fileName).toString()
+            conn.outputStream.use { it.write(body.toByteArray()) }
+            val code = conn.responseCode
+            conn.inputStream?.close()
+            code in 200..299
+        } catch (e: Exception) {
+            appendLog("KV ${if (action == "save") "存档" else "恢复"}失败：${e.message}")
+            false
+        }
+    }
+
+    /**
+     * 停止服务前把 slot 的 KV 落盘。同步阻塞（最多十几秒）——调用方必须在线程池里调，
+     * 不能放主线程；也不能放协程外，因为 destroy 之后就没机会了。
+     */
+    fun saveKvBlocking(modelPath: String, port: Int, ctx: Int) {
+        val dir = kvDir() ?: return
+        if (process?.isAlive != true) return
+        runCatching { dir.mkdirs() }
+        val name = kvFileName(modelPath, ctx)
+        val t0 = System.currentTimeMillis()
+        if (slotAction(port, "save", name, 15_000)) {
+            val mb = File(dir, name).length() / 1024 / 1024
+            appendLog("KV 已存档：$name（${mb} MB，用时 ${System.currentTimeMillis() - t0} ms）")
+            pruneKvDir(dir)
+        }
+    }
+
+    /** 健康检查通过后尝试恢复上次的 KV：命中就省掉整段预填充 */
+    private fun restoreKv(port: Int, modelPath: String, ctx: Int) {
+        val dir = kvDir() ?: return
+        val name = kvFileName(modelPath, ctx)
+        val f = File(dir, name)
+        if (!f.exists()) return
+        val sizeMb = f.length() / 1024 / 1024
+        val t0 = System.currentTimeMillis()
+        if (slotAction(port, "restore", name, 20_000)) {
+            appendLog("KV 已恢复：$name（${sizeMb} MB，用时 ${System.currentTimeMillis() - t0} ms），本次可跳过预填充")
+            runCatching { f.setLastModified(System.currentTimeMillis()) }
+        } else {
+            // 存档和当前配置对不上就删掉，否则每次启动都要失败一次。
+            // 实测这一种：存档里含图片 token，而这次没挂 mmproj →
+            //   "Cannot restore media tokens without an mmproj"
+            runCatching { f.delete() }
+            appendLog("KV 存档与当前配置不兼容，已删除：$name")
+        }
+    }
 
     /** 常见引擎日志的中文映射（纯字符串替换，无性能影响；原文附在后面便于排障） */
     private fun translateLine(line: String): String {
