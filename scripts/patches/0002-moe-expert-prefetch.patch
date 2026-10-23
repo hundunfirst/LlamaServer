@@ -1,0 +1,91 @@
+﻿diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
+index ab82e3d6c..66609b354 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.c
++++ b/ggml/src/ggml-cpu/ggml-cpu.c
+@@ -16,6 +16,10 @@
+ #include "common.h"
+ #include "tiled/tiled.h"
+ 
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++
+ #if defined(_MSC_VER) || defined(__MINGW32__)
+ #include <malloc.h> // using malloc.h with MSC/MINGW
+ #elif !defined(__FreeBSD__) && !defined(__NetBSD__) && !defined(__OpenBSD__)
+@@ -1473,6 +1477,64 @@ UseGgmlGemm2:;
+ 
+ // ggml_compute_forward_mul_mat_id
+ 
++// Ask the kernel to read ahead the expert weights this op will touch. Only useful when
++// the expert tensors are lazily mapped (LLAMA_LAZY_TENSORS): then each expert slice is
++// faulted in as 4 KiB pages, which is far slower than one bulk read per expert.
++// Gated by LLAMA_LAZY_PREFETCH, so default behavior is unchanged.
++static void ggml_prefetch_moe_experts(
++        const struct ggml_tensor * src0, const struct ggml_tensor * ids, int64_t n_as) {
++    static int enabled = -1;
++    if (enabled < 0) {
++        enabled = getenv("LLAMA_LAZY_PREFETCH") != NULL ? 1 : 0;
++    }
++    if (!enabled || src0 == NULL || ids == NULL || src0->data == NULL || ids->data == NULL) {
++        return;
++    }
++    if (ids->type != GGML_TYPE_I32 || src0->nb[2] <= 0 || n_as <= 0 || n_as > 4096) {
++        return;
++    }
++
++    const int64_t n = ggml_nelements(ids);
++    if (n <= 0) {
++        return;
++    }
++
++    const size_t stride = (size_t) src0->nb[2];
++    if (stride == 0) {
++        return;
++    }
++
++    // Cap what one call asks for. Page cache is reclaimable, but asking for the whole
++    // expert set of a 35B model at once evicts everything else.
++    const size_t max_bytes = 512u * 1024u * 1024u;
++    int64_t limit = (int64_t) (max_bytes / stride);
++    if (limit <= 0 || limit > n) {
++        limit = n;
++    }
++
++    bool seen_stack[512];
++    bool * seen = n_as <= 512 ? seen_stack : (bool *) calloc((size_t) n_as, sizeof(bool));
++    if (seen == NULL) {
++        return;
++    }
++    memset(seen, 0, (size_t) n_as * sizeof(bool));
++
++    const int32_t * idata = (const int32_t *) ids->data;
++    char * base = (char *) src0->data;
++    for (int64_t i = 0; i < limit; ++i) {
++        const int32_t e = idata[i];
++        if (e < 0 || (int64_t) e >= n_as || seen[e]) {
++            continue;
++        }
++        seen[e] = true;
++        posix_madvise(base + (size_t) e * stride, stride, POSIX_MADV_WILLNEED);
++    }
++
++    if (seen != seen_stack) {
++        free(seen);
++    }
++}
++
+ #define MMID_MATRIX_ROW(row_id, i1) matrix_rows[(row_id)*ids->ne[0]*ids->ne[1] + (i1)]
+ 
+ struct mmid_row_mapping {
+@@ -1585,6 +1647,10 @@ static void ggml_compute_forward_mul_mat_id(
+     const int n_ids = ids->ne[0]; // n_expert_used
+     const int n_as  = ne02;       // n_expert
+ 
++    if (ith == 0) {
++        ggml_prefetch_moe_experts(src0, ids, n_as);
++    }
++
+     void * wdata_cur = params->wdata;
+ 
+     if (src1->type != vec_dot_type) {

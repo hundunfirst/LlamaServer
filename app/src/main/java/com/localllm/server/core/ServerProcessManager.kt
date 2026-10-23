@@ -41,6 +41,16 @@ object ServerProcessManager {
     /** NPU 引擎下发的设备名（ggml-hexagon 注册的默认单会话） */
     private const val NPU_DEVICE = "HTP0"
 
+    /** MoE 按需读模式下允许的最大上下文：权重已占满内存，KV 再大就会 OOM */
+    private const val LAZY_MAX_CTX = 8192
+
+    /**
+     * DSP 侧能接受多大模型：只用来提示，不拦截。已知 3 GB 的 4B 能跑（13 tok/s）、
+     * 5 GB 的 9B 能跑，14.4 GB 的 35B 会闪退；8 GB 以上属于「大概率不行」。
+     * 中间档（12B 左右）没有实测，交给用户自己试。
+     */
+    private const val NPU_WARN_BYTES = 8L * 1024 * 1024 * 1024
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _state = MutableStateFlow(ServerUiState())
     val state: StateFlow<ServerUiState> = _state.asStateFlow()
@@ -105,10 +115,12 @@ object ServerProcessManager {
         }
     }
 
-    /** 仅识别 GPU/显存相关的分配失败（范围过宽会误伤正常启动） */
+    /** 仅识别设备侧（GPU 显存 / NPU 会话）的分配失败（范围过宽会误伤正常启动） */
     private fun allocFailed(): Boolean = synchronized(logBuffer) {
         logBuffer.any {
-            it.contains("GPU 显存分配失败") || it.contains("failed to allocate OpenCL buffer")
+            it.contains("GPU 显存分配失败") || it.contains("failed to allocate OpenCL buffer") ||
+                    // Hexagon：DSP 侧放不下时表现为会话打不开或缓冲分配失败
+                    it.contains("failed to open session") || it.contains("hexagon") && it.contains("failed to allocate")
         }
     }
 
@@ -176,8 +188,11 @@ object ServerProcessManager {
         synchronized(this) {
             if (degradedRetryUsed || ngl <= 0) return false
             degradedRetryUsed = true
-            val newNgl = maxOf(ngl / 2, 0)
-            appendLog("检测到显存/内存分配失败，自动降级重启：ngl=$ngl → $newNgl")
+            // NPU 下停在 1 层：减到 0 会被上面的 effNgl 顶回 99，等于原地打转。
+            // GPU 下可以减到 0（意味着切回纯 CPU 引擎）。
+            val floor = if (AppSettings.npuEnabled) 1 else 0
+            val newNgl = maxOf(ngl / 2, floor)
+            appendLog("检测到显存/内存分配失败，自动降级重启：ngl=$ngl → $newNgl（NPU 下调小 ngl = 少放几层到 DSP）")
             restartPending = true
             killCurrentQuiet() // 必须先杀掉旧进程，否则重试 start() 会因"已有进程"直接返回，卡死在启动中
             _state.value = ServerUiState(
@@ -238,11 +253,55 @@ object ServerProcessManager {
                 logBuffer.clear()
                 _logLines.value = emptyList()
             }
+            // —— 先判模型，再选引擎 ——
+            // 模型体积既决定能不能卸载到 NPU/GPU，也决定要不要走「专家按需读」。
+            // 顺序错了会出真问题：按需读的补丁目前只编进了 cpu/opencl 引擎，
+            // 曾经因为先选引擎，35B 被送进 htp（没有补丁）——日志说"按需读已启用"，
+            // 实际完全没生效（仍是 0.2 t/s），而且 14.4GB 塞不进 DSP，直接闪退。
+            if (!File(modelPath).exists()) {
+                _state.value = ServerUiState(status = ServerUiState.Status.ERROR, message = "模型文件不存在: $modelPath")
+                return
+            }
+            val needBytes = File(modelPath).length() + (mmprojPath?.let { File(it).length() } ?: 0L)
+            val totalBytes = BinaryInstaller.totalBytes()
+            // 主模型校验：草稿/投影器/适配器当主模型加载必定失败，这里直接拦下说清楚原因
+            val gi = GgufInspector.inspectBlocking(File(modelPath))
+            if (!gi.isLoadableAsModel) {
+                appendLog("错误：${gi.warning}")
+                _state.value = ServerUiState(
+                    status = ServerUiState.Status.ERROR,
+                    message = gi.warning ?: "这个文件不能作为主模型加载"
+                )
+                return
+            }
+            // MoE 且模型明显大于内存 → 专家权重值得按需读
+            val lazyExperts = gi.expertCount > 0 && totalBytes > 0 &&
+                    needBytes > (totalBytes * 0.5).toLong()
+            // 不再替用户决定用哪个引擎。实测 12B 在 NPU 上预填充 3 秒、CPU 要 180 秒，
+            // 差距 60 倍——把大模型强行赶回 CPU 是拿最慢的那条路换稳定，代价太大。
+            // 用户开了 NPU 就用 NPU，起不起得来由引擎自己报。
             val npu = AppSettings.npuEnabled
-            // NPU 在这套参数里等同于 GPU，靠 -ngl 决定卸载范围，所以强制拉满
-            val effNgl = if (npu) 99 else ngl
+            // NPU 层数：以前写死 99，等于把最激进的档位钉死（HTP0 不上报显存，--fit 用不了，
+            // 所以只能显式给）。现在尊重设置里的 ngl，方便二分出 DSP 真能容纳的上限。
+            val effNgl = when {
+                npu -> if (ngl > 0) ngl else 99
+                else -> ngl
+            }
             val useGpu = effNgl > 0 && !npu
+            // DSP 内存有限：只提示，不拦截、不改用户的引擎选择
+            if (npu && needBytes > NPU_WARN_BYTES) {
+                appendLog(
+                    "提示：模型约 ${gib(needBytes)}，超过 DSP 常见可用容量（约 ${gib(NPU_WARN_BYTES)}）。" +
+                            "若启动失败或闪退，把设置里的 ngl 调小（相当于只把部分层放到 NPU），或关掉「Hexagon NPU」。"
+                )
+            }
             val engineMode = BinaryInstaller.modeFor(useGpu, prismEngine, npu)
+            // 按需读的补丁已编进 cpu / opencl / htp 三套引擎（prism 是另一条 fork，没有）。
+            // 按最终选中的引擎判，避免日志撒谎：说已启用、实际没生效。
+            val lazyUsable = lazyExperts &&
+                    (engineMode == BinaryInstaller.MODE_CPU ||
+                            engineMode == BinaryInstaller.MODE_OPENCL ||
+                            engineMode == BinaryInstaller.MODE_HTP)
             val engineDir = try {
                 BinaryInstaller.ensureInstalled(engineMode)
             } catch (e: Exception) {
@@ -263,44 +322,54 @@ object ServerProcessManager {
                 _state.value = ServerUiState(status = ServerUiState.Status.ERROR, message = "引擎不完整，请重装 APP")
                 return
             }
-            if (!File(modelPath).exists()) {
-                _state.value = ServerUiState(status = ServerUiState.Status.ERROR, message = "模型文件不存在: $modelPath")
-                return
-            }
-            // 内存闸：模型 + 投影器超过物理内存的 85% 就拒绝启动。
+            // 内存闸：模型 + 投影器超过物理内存的 85% 就拒绝启动（按需读的 MoE 除外——它只读激活的专家）。
             // 判据用「物理总量」而不是「当前可用量」：可用量随后台 App 波动，拿它做阈值会误拦
             // 本来能跑的模型（比如可用量掉到 4GB 时把 3.7GB 的 4B 拦掉）。
             // 不拦的后果实测过：35B（14.44GB）在 15.44GB 内存的机器上一路 mmap + 分配，
             // 把系统内存吃穿，OOM 直接把手机带进重启。
-            val needBytes = File(modelPath).length() + (mmprojPath?.let { File(it).length() } ?: 0L)
-            val totalBytes = BinaryInstaller.totalBytes()
-            if (totalBytes > 0 && needBytes > (totalBytes * 0.85).toLong()) {
-                memBlocked = true
-                val msg = "内存不足：模型约 ${gib(needBytes)}，本机内存 ${gib(totalBytes)}。" +
-                        "加载它会吃穿内存导致系统重启，已拦下。请换更小的模型或更低的量化。"
-                appendLog("错误：$msg")
-                _state.value = ServerUiState(status = ServerUiState.Status.ERROR, message = msg)
-                return
-            }
-            // 主模型校验：草稿/投影器/适配器当主模型加载必定失败，这里直接拦下说清楚原因
-            val gi = GgufInspector.inspectBlocking(File(modelPath))
-            if (!gi.isLoadableAsModel) {
-                appendLog("错误：${gi.warning}")
-                _state.value = ServerUiState(
-                    status = ServerUiState.Status.ERROR,
-                    message = gi.warning ?: "这个文件不能作为主模型加载"
+            if (totalBytes > 0 && !lazyUsable && needBytes > (totalBytes * 0.85).toLong()) {
+                if (!AppSettings.allowOverMemory) {
+                    memBlocked = true
+                    val msg = "内存不足：模型约 ${gib(needBytes)}，本机内存 ${gib(totalBytes)}。" +
+                            "加载它会吃穿内存导致系统重启，已拦下。请换更小的模型或更低的量化；" +
+                            "确实要试可以在「设置 → 服务设置」打开「允许超出内存的模型」。"
+                    appendLog("错误：$msg")
+                    _state.value = ServerUiState(status = ServerUiState.Status.ERROR, message = msg)
+                    return
+                }
+                appendLog(
+                    "警告：模型约 ${gib(needBytes)} 超过本机内存 ${gib(totalBytes)} 的 85%，" +
+                            "但已按设置放行（可能会触发系统 OOM 重启，风险自担）。"
                 )
-                return
             }
-            // 引擎 × 打包门控：PrismML 打包（三元量化 + 哈达玛变换）只有 prism 引擎认得。
-            // 以前这种情况要等加载阶段炸，报错还看不出原因，这里直接说清该切哪里。
+            if (lazyUsable) {
+                appendLog(
+                    "MoE 按需读已启用：${gi.expertCount} 个专家的权重不再整份预读，只按缺页取，" +
+                            "并对当前激活的专家做整块预读。速度仍受存储限制，但不会吃穿内存。"
+                )
+            }
+            // 按需读把权重挪出了常驻内存，但 KV cache 仍要全额分配：14GB 权重 + 64K 上下文
+            // 在这台机器上依然会吃穿。实测 8192 够日常对话，要更大得用户显式接受风险。
+            val ctxEff = if (lazyUsable && ctxSize > LAZY_MAX_CTX) {
+                appendLog(
+                    "MoE 按需读模式下上下文限制为 $LAZY_MAX_CTX（原设置 $ctxSize）：" +
+                            "权重已经占满内存，留不出更多 KV 空间。"
+                )
+                LAZY_MAX_CTX
+            } else ctxSize
+            // 引擎 × 打包门控：PrismML 打包（三元量化 + 哈达玛变换）只有 prism 引擎能读。
+            // 这条不是猜测——实测上游引擎在解析 GGUF 阶段就拒绝：
+            //   gguf_init_from_reader: tensor 'token_embd.weight' has invalid ggml type 142. should be in [0, 43)
+            // 而且 cpu / opencl / htp 都是上游构建，换后端一样拒绝，所以直接拦下并说清。
             if (GgufInspector.isPrismPacked(File(modelPath)) && engineMode != BinaryInstaller.MODE_PRISM) {
                 val how = when {
-                    npu -> "当前开着 Hexagon NPU，NPU 后端不认这种三元打包——请关掉 NPU 后再用 prism 引擎启动"
-                    useGpu -> "当前 ngl=$ngl 走 GPU 引擎，而 prism 引擎没有 GPU 后端——把 ngl 设为 0 再启动"
-                    else -> "请到「设置 → 服务设置」打开「Bonsai 优化引擎（PrismML fork）」"
+                    npu || useGpu ->
+                        "当前走的是 " + (if (npu) "NPU" else "GPU") + " 引擎，两者都是上游构建、解析 GGUF 就会拒绝。" +
+                                "请打开「Bonsai 优化引擎（PrismML fork）」并把 ngl 设为 0"
+                    else -> "请打开「Bonsai 优化引擎（PrismML fork）」"
                 }
-                val msg = "这个模型是 PrismML 打包（三元量化），只有 prism 引擎能加载：$how"
+                val msg = "这个模型的张量类型是 PrismML 私有的（实测 type 142，不在上游支持的 0–43 内），" +
+                        "只有 prism 引擎能读：$how。"
                 appendLog("错误：$msg")
                 _state.value = ServerUiState(status = ServerUiState.Status.ERROR, message = msg)
                 return
@@ -352,7 +421,7 @@ object ServerProcessManager {
                 return
             }
             val cmd = buildCommand(
-                binary, modelPath, bindHost, port, ctxSize, threads, effNgl, lanEnabled, apiToken,
+                binary, modelPath, bindHost, port, ctxEff, threads, effNgl, lanEnabled, apiToken,
                 cacheTypeK, cacheTypeV, specEffective, mmprojPath, faMode, apiTokenEnabled,
                 npuDevice = if (npu) NPU_DEVICE else null
             )
@@ -374,6 +443,14 @@ object ServerProcessManager {
             // 报却只是找不到设备，极难往这块想。
             if (npu) {
                 pb.environment()["ADSP_LIBRARY_PATH"] = engineDir.absolutePath
+            }
+            // MoE 按需读：让引擎把名字含 "exps" 的张量排除出 init_mappings 的整份预读
+            // （llama.cpp 里 prefetch 是硬编码 true，不排除就会对 14GB 文件发 WILLNEED）；
+            // 再让 mul_mat_id 对当前激活的专家做整块预读，把 4KB 缺页换成大块 I/O。
+            // 两个变量都依赖 scripts/patches/ 里的补丁，所以按 lazyUsable 判（引擎没补丁就不设）。
+            if (lazyUsable) {
+                pb.environment()["LLAMA_LAZY_TENSORS"] = "exps"
+                pb.environment()["LLAMA_LAZY_PREFETCH"] = "1"
             }
 
             _state.value = ServerUiState(
@@ -447,7 +524,7 @@ object ServerProcessManager {
                     // MTP 被引擎拒绝 → 去掉投机参数重试一次（用户不该看到这次失败）
                     if (specEffective == "draft-mtp" && specFailed() &&
                         degradeSpecAndRestart(
-                            modelPath, port, ctxSize, threads, ngl, lanEnabled, apiToken,
+                            modelPath, port, ctxEff, threads, ngl, lanEnabled, apiToken,
                             cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine
                         )
                     ) {
@@ -456,7 +533,7 @@ object ServerProcessManager {
                     // 上下文过大 → 先减半重试（优先于 ngl 降级）
                     if (ctxFailed() &&
                         degradeCtxAndRestart(
-                            modelPath, port, ctxSize, threads, ngl, lanEnabled, apiToken,
+                            modelPath, port, ctxEff, threads, ngl, lanEnabled, apiToken,
                             cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
                         )
                     ) {
@@ -464,9 +541,9 @@ object ServerProcessManager {
                     }
                     // GPU 分配失败导致的崩溃 → 自动降级重启。
                     // NPU 下不降级：Hexagon 没有「少卸载几层」这种退路，减半 ngl 只会得到半吊子配置。
-                    if (!npu && ngl > 0 && allocFailed() &&
+                    if (ngl > 0 && allocFailed() &&
                         degradeAndRestart(
-                            modelPath, port, ctxSize, threads, ngl, lanEnabled, apiToken,
+                            modelPath, port, ctxEff, threads, ngl, lanEnabled, apiToken,
                             cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
                         )
                     ) {
@@ -499,9 +576,9 @@ object ServerProcessManager {
                     if (checkHealth(healthHost, port)) {
                         // 就绪即校验：若加载阶段发生过显存分配失败（进程可能仍存活），立即降级重启。
                         // NPU 下同样不降级（见上面的说明）。
-                        if (!npu && ngl > 0 && allocFailed() &&
+                        if (ngl > 0 && allocFailed() &&
                             degradeAndRestart(
-                                modelPath, port, ctxSize, threads, ngl, lanEnabled, apiToken,
+                                modelPath, port, ctxEff, threads, ngl, lanEnabled, apiToken,
                                 cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
                             )
                         ) {

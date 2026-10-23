@@ -580,6 +580,34 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             loadMode = v
             com.localllm.server.core.AppSettings.loadMode = v
         }
+
+        // ---- 允许超出内存的模型（逃生阀）----
+        var allowOver by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.allowOverMemory)
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("允许超出内存的模型", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "默认关闭。关闭时，模型超过本机内存 85% 会被直接拦下——那种启动大概率把内存吃穿、" +
+                            "触发系统 OOM 重启。打开后可强行启动，用于实验（例如试 35B 在 NPU 上的表现）," +
+                            "风险自担。立即生效。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = allowOver,
+                onCheckedChange = { v ->
+                    allowOver = v
+                    com.localllm.server.core.AppSettings.allowOverMemory = v
+                }
+            )
+        }
         CompactField(
             value = settings.cacheTypeK,
             onValueChange = { v -> vm.updateSettings { it.copy(cacheTypeK = v) } },

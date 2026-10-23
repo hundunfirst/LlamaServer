@@ -163,7 +163,17 @@ use_direct_io = (load_mode == DIRECT_IO);
 
 ## 已知限制
 
-- 只吃 Q4_0 / IQ4_NL / Q4_K 这类量化；PrismML 三元打包（PQ2_0 / PTQ1_0）用不了，
-  启动前的引擎×打包门控会拦下并提示关掉 NPU。
+- 只吃 Q4_0 / IQ4_NL / Q4_K 这类量化。
+- **PrismML 三元打包（PQ2_0 / PTQ1_0）在任何上游引擎上都不行，不只是 NPU。**
+  实测（`Ternary-Bonsai-2-2B-PQ2_0` + 上游 cpu 引擎）：
+
+  ```
+  E gguf_init_from_reader: tensor 'token_embd.weight' has invalid ggml type 142. should be in [0, 43)
+  E llama_model_load: error loading model
+  ```
+
+  PrismML 的三元类型 id 是 142（PQ2_0）/ 143（PTQ1_0），上游只认 0–43，在**解析 GGUF 阶段**就拒绝。
+  cpu / opencl / htp 都是上游构建，所以换后端结果一样；只有 prism 引擎能读。
+  失败是干净的（加载报错退出，不崩、不出乱码），因此启动前的打包门控可以直接拦下并说清该切哪里。
 - 适合 ≤9B；35B 级 MoE 走不了 NPU。
 - 上游标注该后端为 experimental。

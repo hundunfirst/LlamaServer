@@ -24,6 +24,24 @@ foreach ($p in @($cmake, $ninja, $strip, $py, "$root\llama.cpp\CMakeLists.txt"))
     if (-not (Test-Path $p)) { throw "缺少: $p （对照 docs/ENVIRONMENT.md 修正）" }
 }
 
+# ---- 本地补丁 ----
+# llama.cpp/ 是不入库的独立克隆，重新克隆后这些改动会丢，所以必须在构建前重新应用。
+# 目前只有一条：把 MoE 专家张量标记为按需读（LLAMA_LAZY_TENSORS），
+# 让比内存大的 MoE 模型只读当前激活的专家。见 docs/MOE_LAZY_EXPERTS.md。
+$patchDir = "$root\scripts\patches"
+if (Test-Path $patchDir) {
+    foreach ($p in (Get-ChildItem $patchDir -Filter *.patch | Sort-Object Name)) {
+        & git -C "$root\llama.cpp" apply --check --reverse $p.FullName 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "== [patch] 已应用，跳过: $($p.Name)"
+            continue
+        }
+        & git -C "$root\llama.cpp" apply $p.FullName
+        if ($LASTEXITCODE -ne 0) { throw "补丁应用失败: $($p.Name)（llama.cpp 可能不是预期的提交）" }
+        Write-Host "== [patch] 已应用: $($p.Name)"
+    }
+}
+
 function Build-Engine {
     param([string]$Name, [string[]]$CmakeArgs)
     $build = "$root\llama.cpp\build-android-$Name"

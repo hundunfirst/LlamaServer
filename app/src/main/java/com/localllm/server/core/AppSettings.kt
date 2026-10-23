@@ -203,6 +203,15 @@ object AppSettings {
         get() = prefs.getString("load_mode", "") ?: ""
         set(value) = prefs.edit().putString("load_mode", value).apply()
 
+    /**
+     * 允许启动超过物理内存 85% 的模型（默认关）。
+     * 内存闸的意义是挡住「必然把系统吃穿 → OOM 重启」的启动，但它不该替用户否决实验：
+     * 想试 35B 在 NPU 上的预填充速度，就得让他试。真出事是用户自己选的。
+     */
+    var allowOverMemory: Boolean
+        get() = prefs.getBoolean("allow_over_memory", false)
+        set(value) = prefs.edit().putBoolean("allow_over_memory", value).apply()
+
     var specType: String
         get() = prefs.getString("spec_type", "none") ?: "none"
         set(value) = prefs.edit().putString("spec_type", value).apply()
