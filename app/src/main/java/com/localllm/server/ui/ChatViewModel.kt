@@ -1,4 +1,4 @@
-﻿package com.localllm.server.ui
+package com.localllm.server.ui
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
@@ -17,6 +17,7 @@ import com.localllm.server.core.OcrTool
 import com.localllm.server.core.RepeatGuard
 import com.localllm.server.core.ServerProcessManager
 import com.localllm.server.core.SkillChain
+import com.localllm.server.core.SkillChainFlow
 import com.localllm.server.core.ServerUiState
 import com.localllm.server.core.TodoTool
 import com.localllm.server.core.UrlFetch
@@ -659,6 +660,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
                 // HTTP MCP 多服务器：聚合已启用服务器的工具（mcp__服务器__工具 前缀防冲突），并记录路由
                 val mcpRoute = mutableMapOf<String, Pair<String, String>>() // 完整名 → (url, 原始工具名)
+                // 本消息内每个 MCP 工具连续失败次数：够了就拦住，不让模型拿着同样的调用反复烧 token
+                val mcpFailures = mutableMapOf<String, Int>()
                 val mcpAgg = org.json.JSONArray()
                 AppSettings.loadMcpServers().filter { it.enabled && !AppSettings.pureMode }.forEach { s ->
                     val prefix = "mcp__" + s.name.map { c -> if (c.isLetterOrDigit()) c else '_' }
@@ -1283,25 +1286,54 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                                 val route = mcpRoute[tc.name]
                                     ?: throw IllegalStateException("未路由的工具：${tc.name}")
-                                ServerProcessManager.appLog("MCP 调用：${tc.name}")
-                                val r = McpHttpClient.callTool(route.first, null, route.second, args)
-                                steps.add(
-                                    ChatStore.Step(
-                                        "tool", "调用工具：${tc.name}",
-                                        r.take(800),
-                                        args = args.toString().take(600),
-                                        ok = !r.trimStart().startsWith("错误")
-                                    )
-                                )
-                                syncSteps()
-                                r
+                                val failedBefore = mcpFailures[tc.name] ?: 0
+                                if (failedBefore >= 2) {
+                                    ServerProcessManager.appLog("MCP：${tc.name} 本消息已失败 $failedBefore 次，不再调用")
+                                    "工具「${route.second}」本消息内已经失败 $failedBefore 次，不要再调用它；" +
+                                            "请改用其他工具，或基于已有信息直接回答。"
+                                } else {
+                                    ServerProcessManager.appLog("MCP 调用：${tc.name}")
+                                    runCatching { McpHttpClient.callTool(route.first, null, route.second, args) }
+                                        .fold(
+                                            onSuccess = { r ->
+                                                mcpFailures.remove(tc.name)
+                                                steps.add(
+                                                    ChatStore.Step(
+                                                        "tool", "调用工具：${tc.name}",
+                                                        r.take(800),
+                                                        args = args.toString().take(600),
+                                                        ok = true
+                                                    )
+                                                )
+                                                syncSteps()
+                                                ServerProcessManager.appLog("MCP 完成：${tc.name}")
+                                                r
+                                            },
+                                            onFailure = { e ->
+                                                if (e is kotlinx.coroutines.CancellationException) throw e
+                                                // 失败也要落成可见的一步，否则界面上一片正常、实际什么都没发生
+                                                mcpFailures[tc.name] = failedBefore + 1
+                                                val msg = McpHttpClient.explain(route.second, e)
+                                                ServerProcessManager.appLog(
+                                                    "MCP 失败：${tc.name} — ${msg.lineSequence().first()}"
+                                                )
+                                                steps.add(
+                                                    ChatStore.Step(
+                                                        "tool", "调用工具：${tc.name}",
+                                                        msg.take(800),
+                                                        args = args.toString().take(600),
+                                                        ok = false
+                                                    )
+                                                )
+                                                syncSteps()
+                                                msg
+                                            }
+                                        )
+                                }
                             }
                         }.getOrElse { e ->
                             ServerProcessManager.appLog("工具失败：${tc.name} — ${e.message}")
                             "工具执行失败：${e.message}"
-                        }
-                        if (!result.startsWith("工具执行失败") && tc.name != "web_search") {
-                            ServerProcessManager.appLog("MCP 完成：${tc.name}")
                         }
                         newMsgs.add(ChatClient.ChatMessage("tool", result, toolCallId = tc.id))
                     }
@@ -2038,24 +2070,39 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      */
     private suspend fun runSkillChain(sid: String, chain: SkillChain, goal: String) {
         val skills = AppSettings.loadSkills().associateBy { it.id }
-        val steps = chain.skillIds.mapNotNull { skills[it] }
+        // 保留链条里的原始位置（含已删除技能留下的空洞），否则分支里的步号会整体错位
+        val stepSkills = chain.skillIds.map { skills[it] }
         val fallback = chain.fallbackSkillId?.let { skills[it] }
-        if (steps.isEmpty()) {
+        if (stepSkills.all { it == null }) {
             _error.value = "这条技能链里的技能都被删掉了，请重新配置"
             _generating.value = _generating.value - sid
             return
         }
         val sys = AppSettings.activeSysPrompt().ifBlank { "你是一个严谨的中文助手，回答用中文。" }
         val out = StringBuilder()
+        val limit = SkillChainFlow.visitLimit(stepSkills.size)
+        var executed = 0
         try {
             var input = goal
-            for ((i, sk) in steps.withIndex()) {
-                ServerProcessManager.appLog("技能链 第 ${i + 1}/${steps.size} 步：${sk.name}")
+            var index = 0
+            while (index != SkillChainFlow.END) {
+                val sk = stepSkills.getOrNull(index)
+                if (sk == null) {
+                    index = SkillChainFlow.followingIndex(index, stepSkills.size)
+                    continue
+                }
+                executed++
+                if (executed > limit) {
+                    _error.value = "技能链跳转次数超过上限（$limit 次），已中止——可能在几步之间来回跳，请检查条件设置"
+                    ServerProcessManager.appLog("技能链：跳转次数超限（$limit），中止")
+                    break
+                }
+                ServerProcessManager.appLog("技能链 第 ${index + 1} 步：${sk.name}")
                 val prompt = sk.prompt + "\n\n【输入】\n" + input
                 var text = runChainStep(sys, prompt)
                 var failed = looksLikeFailure(text)
                 if (failed && fallback != null) {
-                    ServerProcessManager.appLog("第 ${i + 1} 步判定失败，改用备用技能：${fallback.name}")
+                    ServerProcessManager.appLog("第 ${index + 1} 步判定失败，改用备用技能：${fallback.name}")
                     val alt = runChainStep(
                         sys,
                         fallback.prompt + "\n\n【上一次尝试没能完成本步，请换一种可行做法重做】\n【输入】\n" + input
@@ -2065,32 +2112,40 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         failed = false
                     } else {
                         appendToLastInline(sid) { m -> m.copy(content = out.toString().trim()) }
-                        out.append("### 第 ${i + 1} 步 · ").append(sk.name).append("（已尝试备用技能仍失败）\n")
+                        out.append("### 第 ${index + 1} 步 · ").append(sk.name).append("（已尝试备用技能仍失败）\n")
                         out.append(text.trim()).append("\n\n")
                         appendToLastInline(sid) { m -> m.copy(content = out.toString().trim()) }
-                        _error.value = "第 ${i + 1} 步（${sk.name}）没能完成，技能链已中止"
+                        _error.value = "第 ${index + 1} 步（${sk.name}）没能完成，技能链已中止"
                         break
                     }
                 }
-                out.append("### 第 ${i + 1} 步 · ").append(sk.name).append('\n')
+                val branch = SkillChainFlow.matchedBranch(index, text, chain)
+                val nextIndex = SkillChainFlow.nextIndex(index, text, chain)
+                out.append("### 第 ${index + 1} 步 · ").append(sk.name).append('\n')
                 out.append(text.trim()).append("\n\n")
+                if (branch != null) {
+                    val where = branch.gotoStep?.let { "第 ${it + 1} 步" } ?: "结束整条链"
+                    out.append("（输出命中「").append(branch.contains).append("」→ 跳转到").append(where).append("）\n\n")
+                    ServerProcessManager.appLog("第 ${index + 1} 步命中「${branch.contains}」→ $where")
+                }
                 appendToLastInline(sid) { m ->
                     m.copy(
                         content = out.toString().trim(),
                         steps = m.steps + ChatStore.Step(
-                            "tool", "技能链第 ${i + 1} 步：${sk.name}",
+                            "tool", "技能链第 ${index + 1} 步：${sk.name}",
                             text.trim().take(400), 0, args = prompt.take(300), ok = !failed
                         )
                     )
                 }
                 persistProgress(sid)
                 if (failed) {
-                    _error.value = "第 ${i + 1} 步（${sk.name}）没能完成，技能链已中止"
+                    _error.value = "第 ${index + 1} 步（${sk.name}）没能完成，技能链已中止"
                     break
                 }
                 input = text.trim()
+                index = nextIndex
             }
-            _lastStats.value = "技能链完成（${steps.size} 步）"
+            _lastStats.value = "技能链完成（执行 $executed 步）"
         } catch (e: Exception) {
             ServerProcessManager.appLog("技能链失败：${e.message}")
             _error.value = friendlyError(e)

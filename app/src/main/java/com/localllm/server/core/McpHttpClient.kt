@@ -32,10 +32,34 @@ object McpHttpClient {
         val inputSchema: JSONObject
     )
 
+    /**
+     * 失败归因。分类的意义不是给日志看，而是决定「要不要重试」和「告诉模型下一步做什么」：
+     * 连不上和超时是两回事，参数写错和工具自身报错也是两回事，模型据此才知道该换工具还是改参数。
+     */
+    enum class FailureKind(val label: String) {
+        UNREACHABLE("服务器不可达"),
+        TIMEOUT("调用超时"),
+        SERVER("服务器内部错误"),
+        AUTH("鉴权失败"),
+        BAD_ARGS("参数不被接受"),
+        TOOL("工具自身报错"),
+        PROTOCOL("协议异常"),
+        UNKNOWN("调用异常")
+    }
+
+    class McpException(
+        val kind: FailureKind,
+        val detail: String,
+        /** 同样参数再调一次是否可能成功（网络抖动/5xx/空响应才算） */
+        val retryable: Boolean = false,
+        val httpCode: Int? = null
+    ) : Exception("${kind.label}：$detail")
+
     private val rpcId = AtomicInteger(1)
 
     private const val CONNECT_TIMEOUT_MS = 8_000
     private const val READ_TIMEOUT_MS = 20_000
+    private const val RETRY_DELAY_MS = 500L
     private const val PROTO_NEW = "2025-06-18"
     private const val PROTO_OLD = "2024-11-05"
 
@@ -50,20 +74,23 @@ object McpHttpClient {
     /** 拉取工具列表。url 形如 http://192.168.1.5:8787/mcp */
     suspend fun listTools(url: String, token: String? = null): List<McpTool> =
         withContext(Dispatchers.IO) {
-            val resp = withRetry(url, token) {
-                rpc(
-                    url = url,
-                    token = token,
-                    body = JSONObject()
-                        .put("jsonrpc", "2.0")
-                        .put("id", rpcId.getAndIncrement())
-                        .put("method", "tools/list")
-                        .put("params", JSONObject())
-                )
+            val resp = guarded {
+                withTransientRetry {
+                    withRetry(url, token) {
+                        rpc(
+                            url = url,
+                            token = token,
+                            body = JSONObject()
+                                .put("jsonrpc", "2.0")
+                                .put("id", rpcId.getAndIncrement())
+                                .put("method", "tools/list")
+                                .put("params", JSONObject())
+                        )
+                    }
+                }
             }
             if (resp.has("error")) {
-                val err = resp.getJSONObject("error")
-                throw IllegalStateException("工具列表获取失败：${err.optString("message", err.toString())}")
+                throw rpcError("工具列表获取失败", resp.getJSONObject("error"))
             }
             // JSON-RPC 约定：工具数组在 result.tools（兜底兼容顶层 tools 的非标准实现）
             val tools = resp.optJSONObject("result")?.optJSONArray("tools")
@@ -81,25 +108,26 @@ object McpHttpClient {
             }
         }
 
-    /** 调用一个工具，返回结果文本（content[].text 拼接）。错误抛 IllegalStateException。 */
+    /** 调用一个工具，返回结果文本（content[].text 拼接）。错误抛 [McpException]。 */
     suspend fun callTool(url: String, token: String?, name: String, arguments: JSONObject): String =
         withContext(Dispatchers.IO) {
-            val resp = withRetry(url, token) {
-                rpc(
-                    url = url,
-                    token = token,
-                    body = JSONObject()
-                        .put("jsonrpc", "2.0")
-                        .put("id", rpcId.getAndIncrement())
-                        .put("method", "tools/call")
-                        .put("params", JSONObject().put("name", name).put("arguments", arguments))
-                )
+            val resp = guarded {
+                withTransientRetry {
+                    withRetry(url, token) {
+                        rpc(
+                            url = url,
+                            token = token,
+                            body = JSONObject()
+                                .put("jsonrpc", "2.0")
+                                .put("id", rpcId.getAndIncrement())
+                                .put("method", "tools/call")
+                                .put("params", JSONObject().put("name", name).put("arguments", arguments))
+                        )
+                    }
+                }
             }
             if (resp.has("error")) {
-                val err = resp.getJSONObject("error")
-                throw IllegalStateException(
-                    "工具 $name 执行失败：${err.optString("message", err.toString())}"
-                )
+                throw rpcError("工具 $name 执行失败", resp.getJSONObject("error"))
             }
             val result = resp.optJSONObject("result") ?: resp
             val content = result.optJSONArray("content") ?: JSONArray()
@@ -114,10 +142,89 @@ object McpHttpClient {
                 }
             }
             if (result.optBoolean("isError") == true) {
-                throw IllegalStateException("工具 $name 报告错误：${sb.take(500)}")
+                throw McpException(FailureKind.TOOL, sb.toString().take(500).ifBlank { "工具报告错误但没给原因" })
             }
             sb.toString().ifBlank { "(工具无返回内容)" }
         }
+
+    /**
+     * 给模型看的失败说明：说清是哪一类问题 + 下一步能做什么。
+     * 直接把异常原文塞回去，模型看到「HTTP 500」只会拿同样的参数再试一遍。
+     */
+    fun explain(name: String, e: Throwable): String {
+        val f = classify(e)
+        val advice = when (f.kind) {
+            FailureKind.UNREACHABLE ->
+                "这个服务器现在连不上，同样参数再调一次不会有不同结果：请改用其他工具，或直接基于已有信息回答，" +
+                        "并在回答里说明该服务没连上。"
+            FailureKind.TIMEOUT ->
+                "已经自动重试过一次仍然超时。可以把请求拆小一点再试一次，或者换其他方式完成这件事。"
+            FailureKind.SERVER ->
+                "已自动重试过一次，服务器仍然报错——不是参数写法的问题，原样重调不会有不同结果。"
+            FailureKind.AUTH ->
+                "令牌或权限不对，本次不要再调用这个服务器的任何工具，直接告诉用户去检查 MCP 配置。"
+            FailureKind.BAD_ARGS ->
+                "按上面的原因修正参数后可以再调用一次；连续两次同样报错说明这个工具不接受这种用法，换别的路子。"
+            FailureKind.TOOL ->
+                "这是工具自己报的错，换一组参数可能就能成功；同一个工具连续两次失败就不要再试了。"
+            FailureKind.PROTOCOL ->
+                "已重试过一次。再失败就换工具，或直接回答。"
+            FailureKind.UNKNOWN ->
+                "同样参数再失败一次就换其他方式完成，不要反复重试同一个调用。"
+        }
+        return "工具「$name」调用失败（${f.kind.label}）：${f.detail}\n→ $advice"
+    }
+
+    /** 异常 → 归因。纯函数，便于单测。 */
+    internal fun classify(e: Throwable): McpException = when (e) {
+        is McpException -> e
+        is java.net.SocketTimeoutException ->
+            McpException(FailureKind.TIMEOUT, "读取超时（${READ_TIMEOUT_MS / 1000}s）", retryable = true)
+        is java.net.ConnectException ->
+            McpException(FailureKind.UNREACHABLE, "连接被拒绝，服务可能没启动")
+        is java.net.UnknownHostException ->
+            McpException(FailureKind.UNREACHABLE, "地址解析不了：${e.message.orEmpty()}")
+        is java.net.NoRouteToHostException ->
+            McpException(FailureKind.UNREACHABLE, "网络不可达")
+        is javax.net.ssl.SSLException ->
+            McpException(FailureKind.PROTOCOL, "TLS 握手失败：${e.message.orEmpty()}")
+        is java.net.SocketException ->
+            McpException(FailureKind.UNREACHABLE, "连接中断：${e.message.orEmpty()}")
+        else -> McpException(FailureKind.UNKNOWN, (e.message ?: e.javaClass.simpleName).take(300))
+    }
+
+    /** 把这一层所有异常收成 [McpException]，调用方不用再猜异常类型 */
+    private fun <T> guarded(block: () -> T): T =
+        try {
+            block()
+        } catch (e: McpException) {
+            throw e
+        } catch (e: Exception) {
+            throw classify(e)
+        }
+
+    /** 瞬时故障（超时 / 5xx / 空响应）自动重试一次；连不上不重试——服务没起来，再等 8 秒也没用 */
+    private fun <T> withTransientRetry(block: () -> T): T =
+        try {
+            block()
+        } catch (e: McpException) {
+            if (!e.retryable) throw e
+            Thread.sleep(RETRY_DELAY_MS)
+            block()
+        }
+
+    /** JSON-RPC error 对象 → 带归因的异常（code 决定是参数问题还是工具问题） */
+    private fun rpcError(prefix: String, err: JSONObject): McpException {
+        val msg = err.optString("message", err.toString()).take(300)
+        val code = err.optInt("code", 0)
+        val kind = when (code) {
+            -32602 -> FailureKind.BAD_ARGS          // invalid params
+            -32601 -> FailureKind.PROTOCOL          // method not found：服务端没这个工具
+            -32603, -32000 -> FailureKind.TOOL      // internal / server error
+            else -> FailureKind.TOOL
+        }
+        return McpException(kind, "$prefix：$msg", httpCode = null)
+    }
 
     /** 工具列表 → OpenAI tools 数组 */
     fun toOpenAiTools(tools: List<McpTool>): JSONArray {
@@ -164,8 +271,7 @@ object McpHttpClient {
                 resp = doInitialize(url, token, proto)
             }
             if (resp.has("error")) {
-                val err = resp.getJSONObject("error")
-                throw IllegalStateException("初始化失败：${err.optString("message", err.toString())}")
+                throw rpcError("初始化失败", resp.getJSONObject("error"))
             }
             val sid = lastSessionId
             // notifications/initialized：无 id，202 空响应均可
@@ -190,15 +296,15 @@ object McpHttpClient {
                         .put("capabilities", JSONObject())
                         .put("clientInfo", JSONObject().put("name", "LlamaServer").put("version", "0.3.0"))
                 )
-        ) ?: throw IllegalStateException("initialize 空响应")
+        ) ?: throw McpException(FailureKind.PROTOCOL, "initialize 空响应", retryable = true)
 
     /** 先握手，执行 rpc；HTTP 404（会话过期）时重新握手并重试一次 */
     private fun <T> withRetry(url: String, token: String?, block: () -> T): T {
         ensureSession(url, token)
         return try {
             block()
-        } catch (e: IllegalStateException) {
-            if (e.message?.startsWith("HTTP 404") == true) {
+        } catch (e: McpException) {
+            if (e.httpCode == 404) {
                 invalidate(url)
                 ensureSession(url, token)
                 block()
@@ -214,7 +320,7 @@ object McpHttpClient {
     private fun rpc(url: String, token: String?, body: JSONObject): JSONObject {
         val sess = sessions[url.trim()]
         return postRpc(url, token, sess?.sessionId, body, proto = sess?.proto)
-            ?: throw IllegalStateException("空响应")
+            ?: throw McpException(FailureKind.PROTOCOL, "空响应", retryable = true)
     }
 
     private fun postRpc(
@@ -248,12 +354,12 @@ object McpHttpClient {
             conn.getHeaderField("Mcp-Session-Id")?.let { if (it.isNotBlank()) lastSessionId = it }
             if (code !in 200..299) {
                 val err = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-                throw IllegalStateException("HTTP $code：${err.take(300)}")
+                throw httpFailure(code, err)
             }
             val raw = conn.inputStream.bufferedReader().use { it.readText() }
             if (raw.isBlank()) {
                 if (allowEmpty) return null
-                throw IllegalStateException("空响应")
+                throw McpException(FailureKind.PROTOCOL, "空响应", retryable = true)
             }
             return parseResponse(raw)
         } finally {
@@ -261,10 +367,23 @@ object McpHttpClient {
         }
     }
 
+    /** HTTP 状态码 → 归因。404 单独留标记，会话过期要靠它触发重新握手。 */
+    internal fun httpFailure(code: Int, body: String): McpException {
+        val detail = "HTTP $code" + if (body.isBlank()) "" else "：${body.take(300)}"
+        return when (code) {
+            401, 403 -> McpException(FailureKind.AUTH, detail, httpCode = code)
+            404 -> McpException(FailureKind.PROTOCOL, detail, httpCode = code)
+            400, 405, 406, 415, 422 -> McpException(FailureKind.BAD_ARGS, detail, httpCode = code)
+            408, 429 -> McpException(FailureKind.SERVER, detail, retryable = true, httpCode = code)
+            in 500..599 -> McpException(FailureKind.SERVER, detail, retryable = true, httpCode = code)
+            else -> McpException(FailureKind.PROTOCOL, detail, httpCode = code)
+        }
+    }
+
     /** 单 JSON 对象或 SSE 帧都能吃；SSE 取最后一个含 result/error 的 data 帧 */
     internal fun parseResponse(raw: String): JSONObject {
         val trimmed = raw.trim()
-        if (trimmed.isEmpty()) throw IllegalStateException("空响应")
+        if (trimmed.isEmpty()) throw McpException(FailureKind.PROTOCOL, "空响应", retryable = true)
         if (trimmed.startsWith("{")) return JSONObject(trimmed)
         // text/event-stream：逐行找 data:
         var last: JSONObject? = null
@@ -278,6 +397,8 @@ object McpHttpClient {
                 if (obj.has("result") || obj.has("error")) last = obj
             }
         }
-        return last ?: throw IllegalStateException("响应中没有 JSON-RPC 帧：${trimmed.take(200)}")
+        return last ?: throw McpException(
+            FailureKind.PROTOCOL, "响应里没有 JSON-RPC 帧：${trimmed.take(200)}", retryable = true
+        )
     }
 }

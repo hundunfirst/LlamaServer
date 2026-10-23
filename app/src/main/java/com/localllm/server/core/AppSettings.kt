@@ -486,10 +486,27 @@ object AppSettings {
                     o.optString("name").ifBlank { "技能链" },
                     steps,
                     // 失败时改用的备用技能；老数据没有这个字段，留空即可
-                    o.optString("fallbackSkillId").takeIf { it.isNotBlank() && it != "null" }
+                    o.optString("fallbackSkillId").takeIf { it.isNotBlank() && it != "null" },
+                    loadChainBranches(o, steps.size)
                 )
             }
         }.getOrDefault(emptyList())
+    }
+
+    /** 分支条件存在独立的数组里，老数据没有这一段 → 空表；越界的目标直接丢掉 */
+    private fun loadChainBranches(o: org.json.JSONObject, stepCount: Int): Map<Int, ChainBranch> {
+        val arr = o.optJSONArray("branches") ?: return emptyMap()
+        val out = mutableMapOf<Int, ChainBranch>()
+        for (i in 0 until arr.length()) {
+            val b = arr.optJSONObject(i) ?: continue
+            val step = b.optInt("step", -1)
+            val kw = b.optString("contains").trim()
+            if (step !in 0 until stepCount || kw.isEmpty()) continue
+            val goto = if (b.isNull("goto")) null else b.optInt("goto", -1)
+                .takeIf { it in 0 until stepCount }
+            out[step] = ChainBranch(kw, goto)
+        }
+        return out
     }
 
     fun saveSkillChains(list: List<SkillChain>) {
@@ -497,10 +514,19 @@ object AppSettings {
         list.forEach { c ->
             val steps = org.json.JSONArray()
             c.skillIds.forEach { steps.put(it) }
+            val branches = org.json.JSONArray()
+            c.branches.forEach { (step, b) ->
+                branches.put(
+                    org.json.JSONObject()
+                        .put("step", step).put("contains", b.contains)
+                        .put("goto", b.gotoStep ?: org.json.JSONObject.NULL)
+                )
+            }
             arr.put(
                 org.json.JSONObject()
                     .put("id", c.id).put("name", c.name).put("steps", steps)
                     .put("fallbackSkillId", c.fallbackSkillId ?: org.json.JSONObject.NULL)
+                    .put("branches", branches)
             )
         }
         skillChainsJson = arr.toString()
@@ -796,5 +822,22 @@ data class SkillChain(
     val name: String,
     val skillIds: List<String>,
     /** 失败时改用的备用技能；null = 失败就中止并说明卡在哪一步 */
-    val fallbackSkillId: String? = null
+    val fallbackSkillId: String? = null,
+    /** 步骤序号（0-based）→ 分支条件：这一步的输出命中关键词就改道 */
+    val branches: Map<Int, ChainBranch> = emptyMap()
 )
+
+/**
+ * 一步之后的改道条件：输出包含 [contains] 时，跳到第 [gotoStep] 步（0-based）；
+ * [gotoStep] 为 null 表示到此结束（提前完工）。
+ *
+ * 关键词是「包含」关系而不是等值比较——模型每次的措辞都不一样，等值永远匹配不上。
+ */
+data class ChainBranch(val contains: String, val gotoStep: Int?) {
+    /** 输出里是否出现关键词：忽略大小写。模型每次措辞都不一样，关键词只能按「包含」匹配 */
+    fun matches(output: String): Boolean {
+        val kw = contains.trim()
+        if (kw.isEmpty()) return false
+        return output.contains(kw, ignoreCase = true)
+    }
+}

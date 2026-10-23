@@ -1375,7 +1375,6 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
         // 老会话（升级前只存了 prompt 文本）回退到按文本反查技能链、技能。
         val activeSetup = remember(sessions, activeId) {
             val s = sessions.find { it.id == activeId } ?: return@remember null
-            val cur = s.systemPrompt ?: return@remember null
             val skills = AppSettings.loadSkills()
             val chains = AppSettings.loadSkillChains()
 
@@ -1388,10 +1387,14 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             fun skillSetup(sk: com.localllm.server.core.Skill) =
                 ActiveSetup("⚡ 技能：" + sk.name, sk.desc)
 
+            // 技能链由执行器逐步驱动，不再往 systemPrompt 里写提示词，
+            // 所以结构化来源必须先查——否则 systemPrompt 为空就把横幅整个挡掉了
             s.appliedChainId?.let { id -> chains.firstOrNull { it.id == id } }
                 ?.let { return@remember chainSetup(it) }
             s.appliedSkillId?.let { id -> skills.firstOrNull { it.id == id } }
                 ?.let { return@remember skillSetup(it) }
+
+            val cur = s.systemPrompt ?: return@remember null
             skills.firstOrNull { it.prompt == cur }?.let { return@remember skillSetup(it) }
             chains.firstOrNull { AppSettings.chainPrompt(it) == cur }?.let { return@remember chainSetup(it) }
             ActiveSetup("📝 本会话专用指令", "${cur.length} 字，可在此取消")
@@ -2367,6 +2370,7 @@ private fun SkillDialog(
     var editing by remember { mutableStateOf<com.localllm.server.core.Skill?>(null) }
     var isNew by remember { mutableStateOf(false) }
     var fallbackEdit by remember { mutableStateOf<com.localllm.server.core.SkillChain?>(null) }
+    var branchEdit by remember { mutableStateOf<com.localllm.server.core.SkillChain?>(null) }
     var showChainBuilder by remember { mutableStateOf(false) }
 
     AlertDialog(
@@ -2420,6 +2424,15 @@ private fun SkillDialog(
                                     style = MaterialTheme.typography.labelSmall,
                                     color = if (fbName != null) MaterialTheme.colorScheme.primary
                                     else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            TextButton(onClick = { branchEdit = c }) {
+                                Text(
+                                    if (c.branches.isEmpty()) "条件"
+                                    else "条件·${c.branches.size}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (c.branches.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant
+                                    else MaterialTheme.colorScheme.primary
                                 )
                             }
                             TextButton(onClick = {
@@ -2592,6 +2605,138 @@ private fun SkillDialog(
             confirmButton = { TextButton(onClick = { fallbackEdit = null }) { Text("关闭") } }
         )
     }
+
+    // 结果分支：某一步输出命中关键词就改道（跳步或提前结束）
+    branchEdit?.let { ch ->
+        ChainBranchDialog(
+            chain = ch,
+            skills = list,
+            onDismiss = { branchEdit = null },
+            onSave = { updated ->
+                chains = chains.map { if (it.id == ch.id) it.copy(branches = updated) else it }
+                com.localllm.server.core.AppSettings.saveSkillChains(chains)
+                branchEdit = null
+            }
+        )
+    }
+}
+
+/**
+ * 分支条件编辑。与「失败改用备用技能」互补：那个管失败，这个管「做出来了、但该换条路」。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ChainBranchDialog(
+    chain: com.localllm.server.core.SkillChain,
+    skills: List<com.localllm.server.core.Skill>,
+    onDismiss: () -> Unit,
+    onSave: (Map<Int, com.localllm.server.core.ChainBranch>) -> Unit
+) {
+    var branches by remember { mutableStateOf(chain.branches) }
+    var open by remember { mutableStateOf(-1) }
+    val names = chain.skillIds.map { id ->
+        skills.firstOrNull { it.id == id }?.name ?: "（技能已删除）"
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("分支条件") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    "某一步的输出里出现关键词时改道：跳到别的步，或直接结束整条链。不配就按顺序往下走。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                names.forEachIndexed { i, nm ->
+                    val b = branches[i]
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(
+                                Modifier
+                                    .weight(1f)
+                                    .clickable { open = if (open == i) -1 else i }
+                            ) {
+                                Text("第 ${i + 1} 步 · $nm", style = MaterialTheme.typography.bodySmall)
+                                Text(
+                                    if (b == null) "无条件，顺序继续"
+                                    else "含「${b.contains}」→ " +
+                                            (b.gotoStep?.let { "第 ${it + 1} 步" } ?: "结束整条链"),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (b == null) MaterialTheme.colorScheme.onSurfaceVariant
+                                    else MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            TextButton(onClick = { open = if (open == i) -1 else i }) {
+                                Text(
+                                    if (open == i) "收起" else "编辑",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
+                        if (open == i) {
+                            var kw by remember(i, b?.contains) { mutableStateOf(b?.contains ?: "") }
+                            // -2 = 还没选；-1 = 结束整条链；≥0 = 跳到该步
+                            var target by remember(i, b?.gotoStep) {
+                                mutableStateOf(b?.let { it.gotoStep ?: -1 } ?: -2)
+                            }
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                CompactField(
+                                    value = kw,
+                                    onValueChange = { kw = it },
+                                    label = "关键词（出现在这一步的输出里）",
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Text("命中后：", style = MaterialTheme.typography.labelSmall)
+                                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    FilterChip(
+                                        selected = target == -1,
+                                        onClick = { target = -1 },
+                                        label = {
+                                            Text("结束整条链", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                    )
+                                    names.indices.filter { it != i }.forEach { t ->
+                                        FilterChip(
+                                            selected = target == t,
+                                            onClick = { target = t },
+                                            label = {
+                                                Text("第 ${t + 1} 步", style = MaterialTheme.typography.labelSmall)
+                                            }
+                                        )
+                                    }
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    TextButton(
+                                        enabled = kw.isNotBlank() && target != -2,
+                                        onClick = {
+                                            branches = branches + (i to com.localllm.server.core.ChainBranch(
+                                                kw.trim(),
+                                                if (target >= 0) target else null
+                                            ))
+                                            open = -1
+                                        }
+                                    ) { Text("保存这一步") }
+                                    if (b != null) {
+                                        TextButton(onClick = {
+                                            branches = branches - i
+                                            open = -1
+                                        }) { Text("清除条件", color = MaterialTheme.colorScheme.error) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    HorizontalDivider(thickness = 0.5.dp)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(branches) }) { Text("完成") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }
 
 /** 新建技能链：按点击顺序加入技能（至少 2 个） */
