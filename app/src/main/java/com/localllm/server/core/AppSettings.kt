@@ -179,6 +179,30 @@ object AppSettings {
         get() = prefs.getBoolean("prism_engine", false)
         set(value) = prefs.edit().putBoolean("prism_engine", value).apply()
 
+    /**
+     * 是否用 Hexagon NPU 引擎（高通 SoC 专用）。
+     * 打开后强制 ngl=99 并走 `--device HTP0`：在这套参数里 NPU 相当于 GPU，靠 -ngl 决定卸载范围。
+     * 优先级最高，会盖掉 GPU 与 prism 两个开关（NPU 引擎包里不带 OpenCL 后端）。
+     * 8 Elite Gen 5 走 HTP v81（实测），老一些的芯片是 v73/v75/v79，包里四档 skel 都带。
+     */
+    var npuEnabled: Boolean
+        get() = prefs.getBoolean("npu_engine", false)
+        set(value) = prefs.edit().putBoolean("npu_engine", value).apply()
+
+    /**
+     * 模型加载模式（llama.cpp 的 `-lm`）："" = auto（默认，能用 mmap 就用 mmap）、
+     * "mmap"、"dio"（DirectIO）、"mlock"、"mmap+mlock"。
+     *
+     * 机制（`llama-model-loader.cpp:560`）：只有 MMAP/MMAP_MLOCK/AUTO 才 `use_mmap = true`；
+     * `dio` 会关掉 mmap 并把权重读进已分配内存。所以：
+     * - 模型**大于**内存时只有 auto/mmap 能跑（靠按需换页），选 dio 会直接内存不足；
+     * - 模型**装得下**但 mmap 抖动严重时，dio 可能更快。
+     * 竞品那种「35B 在 12GB 上跑」的专家流式是自研 native 加载器，不是这个开关。
+     */
+    var loadMode: String
+        get() = prefs.getString("load_mode", "") ?: ""
+        set(value) = prefs.edit().putString("load_mode", value).apply()
+
     var specType: String
         get() = prefs.getString("spec_type", "none") ?: "none"
         set(value) = prefs.edit().putString("spec_type", value).apply()
@@ -301,11 +325,6 @@ object AppSettings {
     var webSearchEnabled: Boolean
         get() = prefs.getBoolean("web_search_enabled", false)
         set(value) = prefs.edit().putBoolean("web_search_enabled", value).apply()
-
-    /** 图片处理方式："auto"（有多模态直读、否则 OCR）/ "vision" / "ocr" */
-    var imageInputMode: String
-        get() = prefs.getString("image_input_mode", "auto") ?: "auto"
-        set(value) = prefs.edit().putString("image_input_mode", value).apply()
 
     /** 含图片轮次的联网搜索策略："block"（默认，禁止）/ "ask"（先征求同意）/ "allow" */
     var imageSearchPolicy: String
@@ -509,6 +528,15 @@ object AppSettings {
         get() = prefs.getBoolean("web_sandbox_enabled", true)
         set(value) = prefs.edit().putBoolean("web_sandbox_enabled", value).apply()
 
+    /**
+     * 纯净模式：不注入任何工具，纯对话。
+     * 工具 schema 是 prompt 体积的大头（几十个 MCP 工具可达 9K token），
+     * 只是聊天时把工具全关掉，prefill 能快一个量级。
+     */
+    var pureMode: Boolean
+        get() = prefs.getBoolean("pure_mode", false)
+        set(value) = prefs.edit().putBoolean("pure_mode", value).apply()
+
     /** 已弹窗提示过的更新版本（避免每次启动重复提示） */
     var lastPromptedUpdateVersion: String
         get() = prefs.getString("last_prompted_update", "") ?: ""
@@ -628,6 +656,28 @@ object AppSettings {
     var selectedMmprojPath: String?
         get() = prefs.getString("selected_mmproj", null)
         set(value) = prefs.edit().putString("selected_mmproj", value).apply()
+
+    /** 保活：服务在位时持有 PARTIAL_WAKE_LOCK，屏幕关闭后不被 Doze 冻结。默认开 */
+    var keepAwakeEnabled: Boolean
+        get() = prefs.getBoolean("keep_awake_enabled", true)
+        set(value) = prefs.edit().putBoolean("keep_awake_enabled", value).apply()
+
+    /**
+     * 服务是否处于「应该在跑」的状态。
+     * 进程被系统杀掉后 Service 会被重建（此时 intent 为 null），靠这个标记区分
+     * 「用户主动启动过」和「用户已经主动停止」——后者不该自己复活。
+     */
+    var serverShouldRun: Boolean
+        get() = prefs.getBoolean("server_should_run", false)
+        set(value) = prefs.edit().putBoolean("server_should_run", value).apply()
+
+    /**
+     * 上次下发给服务的模型路径，复活时用。
+     * 不复用 selectedModelPath：用户可以启动一个并非当前选中的模型。
+     */
+    var serverModelPath: String?
+        get() = prefs.getString("server_model_path", null)
+        set(value) = prefs.edit().putString("server_model_path", value).apply()
 
     /** 模型别名表：绝对路径 → 用户起的显示名（JSON 对象） */
     private var aliasMap: Map<String, String>

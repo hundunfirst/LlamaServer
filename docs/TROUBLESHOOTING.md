@@ -300,7 +300,8 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
 ### #26 OCR 数字/小数识别误差 [APP]
 - **现象**：表格类截图里个别金额小数点丢失（如 `7177.50` → `717750`）。
 - **原因**：ML Kit 对小字号数字的固有误差；已做「原图识别 + 坐标重建行 + 放大灰度预处理」降低概率。
-- **建议**：关键金额人工核对；或改用「图片处理方式 = 多模态直读」让视觉模型读表格。
+- **建议**：关键金额人工核对；或给模型挂上 mmproj（视觉模型直读图片），让它读表格原文——
+  纯文本模型只能走 `ocr_image` 工具，误差就是 ML Kit 的上限。
 
 ### #27 build-engine.ps1 在 configure 阶段 «假失败» [构建]
 - **现象**：脚本刚打印 `== [configure] cpu ==` 就抛 `NativeCommandError: CMAKE_BUILD_TYPE=Release`，但手动执行同一条 cmake 命令 `$LASTEXITCODE=0` 成功。

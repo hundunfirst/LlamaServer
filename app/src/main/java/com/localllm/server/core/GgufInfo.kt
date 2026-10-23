@@ -53,6 +53,8 @@ data class GgufInfo(
 object ModelTags {
     data class Tag(val label: String, val detail: String)
 
+    // 注意：这张表对应 ggml_type 枚举（张量类型），用来看某层张量是什么格式。
+    // 它**不是** general.file_type 的枚举——两套前 10 项碰巧相同，第 11 项起完全不同。
     private val QUANT = mapOf(
         0 to "F32", 1 to "F16", 2 to "Q4_0", 3 to "Q4_1", 6 to "Q5_0", 7 to "Q5_1", 8 to "Q8_0",
         9 to "Q8_1", 10 to "Q2_K", 11 to "Q3_K", 12 to "Q4_K", 13 to "Q5_K", 14 to "Q6_K", 15 to "Q8_K",
@@ -60,6 +62,16 @@ object ModelTags {
         21 to "IQ3_S", 22 to "IQ2_S", 23 to "IQ4_XS", 26 to "I32", 28 to "F64", 29 to "IQ1_M",
         30 to "BF16", 34 to "TQ1_0", 35 to "TQ2_0", 39 to "MXFP4", 40 to "NVFP4", 41 to "Q1_0",
         42 to "Q2_0", 142 to "PQ2_0", 143 to "PTQ1_0"
+    )
+
+    // general.file_type 用的是 llama_ftype 枚举，比张量类型更细（能分 Q4_K_S / Q4_K_M）
+    private val FTYPE = mapOf(
+        0 to "F32", 1 to "F16", 2 to "Q4_0", 3 to "Q4_1", 6 to "Q5_0", 7 to "Q5_1", 8 to "Q8_0",
+        9 to "Q8_1", 10 to "Q2_K", 11 to "Q3_K_S", 12 to "Q3_K_M", 13 to "Q3_K_L",
+        14 to "Q4_K_S", 15 to "Q4_K_M", 16 to "Q5_K_S", 17 to "Q5_K_M", 18 to "Q6_K",
+        19 to "Q2_K_S", 20 to "IQ3_XS", 21 to "IQ3_XXS", 22 to "IQ1_S", 23 to "IQ4_NL",
+        24 to "IQ3_S", 25 to "IQ3_M", 26 to "IQ2_S", 27 to "IQ2_M", 28 to "IQ4_XS",
+        29 to "IQ1_M", 30 to "BF16"
     )
 
     /** 全量标签（详情弹窗用） */
@@ -79,9 +91,20 @@ object ModelTags {
             )
         }
         deep?.let { d ->
-            if (d.embedType >= 0) {
-                val q = QUANT[d.embedType] ?: "type${d.embedType}"
-                out += Tag("量化 $q", "token_embd.weight 张量类型 = $q（${d.embedType}）")
+            // 官方量化看 general.file_type。不能拿 token_embd 的张量类型当整体量化：
+            // Q4_K_M 量化时 embedding 常被保留成 Q6_K，会导致整卡显示成 Q6（实测踩过）。
+            val official = FTYPE[d.fileType]
+            when {
+                official != null -> out += Tag(
+                    "量化 $official",
+                    "general.file_type = ${d.fileType}（$official）"
+                )
+                d.embedType >= 0 -> {
+                    val q = QUANT[d.embedType] ?: "type${d.embedType}"
+                    val why = if (d.fileType < 0) "general.file_type 缺失"
+                    else "general.file_type = ${d.fileType} 不在标准表内（三元包等自定义类型）"
+                    out += Tag("量化 $q", "$why，回退用 token_embd.weight 张量类型 = $q")
+                }
             }
             if (d.hasMtp) {
                 out += Tag("MTP", "自带 <arch>.nextn_predict_layers > 0，可用 --spec-type draft-mtp")
@@ -157,7 +180,9 @@ object GgufInspector {
     data class GgufDeep(
         /** 自带 MTP（<arch>.nextn_predict_layers > 0），决定能否 --spec-type draft-mtp */
         val hasMtp: Boolean = false,
-        /** token_embd.weight 的张量类型，用作量化标签；-1 = 没读到 */
+        /** general.file_type（llama_ftype 枚举）：模型整体量化的官方声明；-1 = 没读到 */
+        val fileType: Int = -1,
+        /** token_embd.weight 的张量类型，仅在 fileType 缺失/非标准时兜底；-1 = 没读到 */
         val embedType: Int = -1,
         /** chat_template 里声明了工具调用 */
         val hasTools: Boolean = false,
@@ -168,7 +193,13 @@ object GgufInspector {
         /** 模板认 thinking_budget（预算式） */
         val hasThinkingBudget: Boolean = false,
         /** 模板认 reasoning_effort（等级式：low/medium/high） */
-        val hasReasoningEffort: Boolean = false
+        val hasReasoningEffort: Boolean = false,
+        /**
+         * PrismML 打包（头部带 prism.hadamard.* 元数据）：三元量化 + 哈达玛变换，
+         * 上游 llama.cpp 读不懂。实测这类包的 general.file_type 是缺失的，
+         * 所以判据只能用元数据指纹，不能靠量化类型。
+         */
+        val hasPrismPack: Boolean = false
     )
 
     private const val DEEP_SCAN_BYTES = 24 * 1024 * 1024
@@ -186,9 +217,20 @@ object GgufInspector {
     /** 只要 MTP 判断时用这个（启动前会调） */
     fun hasMtpHead(file: File): Boolean = deepInfo(file).hasMtp
 
+    /**
+     * 模型是否是 PrismML 打包（头部带 prism.hadamard.* 元数据）。
+     * 这种包只有 prism 引擎认得；上游 llama.cpp 会在加载阶段失败、报错还看不出原因。
+     * 判据用元数据指纹而不是量化类型——实测这类包的 general.file_type 是缺失的。
+     */
+    fun isPrismPacked(file: File): Boolean = deepInfo(file).hasPrismPack
+
     private val NEXTN = ".nextn_predict_layers".toByteArray(Charsets.US_ASCII)
+    private val FILETYPE = "general.file_type".toByteArray(Charsets.US_ASCII)
     private val EMBD = "token_embd.weight".toByteArray(Charsets.US_ASCII)
     private val TPL = "tokenizer.chat_template".toByteArray(Charsets.US_ASCII)
+
+    /** PrismML 打包指纹：这些包必带 prism.hadamard.* 元数据 */
+    private val PRISM_MARK = "prism.hadamard.".toByteArray(Charsets.US_ASCII)
 
     private fun scanDeep(file: File): GgufDeep {
         if (!file.isFile || file.length() < 32) return GgufDeep()
@@ -211,6 +253,26 @@ object GgufInspector {
                 val t = readU32(head, typeAt)
                 val v = readU32(head, typeAt + 4)          // 层数都是小整数，取低 32 位足够
                 if ((t in 4L..5L || t == 10L || t == 11L) && v > 0) hasMtp = true
+            }
+            from = at + 1
+        }
+
+        // 官方量化标签：general.file_type。键名后面紧跟 u32 值类型，再 u32 取值。
+        var fileType = -1
+        from = 0
+        while (true) {
+            val at = indexOf(head, FILETYPE, from)
+            if (at < 0) break
+            val p = at + FILETYPE.size
+            if (p + 8 <= head.size) {
+                val vt = readU32(head, p)
+                if (vt in 0L..12L) {
+                    val v = readU32(head, p + 4)
+                    if (v in 0L..255L) {
+                        fileType = v.toInt()
+                        break
+                    }
+                }
             }
             from = at + 1
         }
@@ -261,9 +323,10 @@ object GgufInspector {
                 }
             }
         }
+        val hasPrismPack = indexOf(head, PRISM_MARK, 0) >= 0
         return GgufDeep(
-            hasMtp, embedType, hasTools, hasThinking,
-            hasEnableThinking, hasThinkingBudget, hasReasoningEffort
+            hasMtp, fileType, embedType, hasTools, hasThinking,
+            hasEnableThinking, hasThinkingBudget, hasReasoningEffort, hasPrismPack
         )
     }
 

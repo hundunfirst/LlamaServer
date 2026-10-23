@@ -275,6 +275,28 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             com.localllm.server.core.AppSettings.webSandboxEnabled = sandboxOn
         }
 
+        // ---- 纯净模式 ----
+        var pureOn by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.pureMode)
+        }
+        SectionHeader(
+            title = "纯净模式（不注入任何工具）",
+            help = "开启后不向模型提供任何工具：不注入内置工具，也不连接 MCP 服务器。" +
+                    "工具定义是 prompt 里最占地方的部分——接了 50 多个 MCP 工具时能到 9K token，" +
+                    "小模型光处理输入就要几分钟。纯聊天/问答时打开它，首字时间会明显变快。\n\n" +
+                    "代价：模型不能读写文件、不能联网搜索、不能跑自检、不能调用 MCP。" +
+                    "需要它动手干活时记得关掉。",
+            titleStyle = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        QuickChips(
+            options = listOf("true" to "开启", "false" to "关闭"),
+            current = pureOn.toString()
+        ) { v ->
+            pureOn = v.toBoolean()
+            com.localllm.server.core.AppSettings.pureMode = pureOn
+        }
+
         // ---- 任务清单工具 ----
         var todoOn by remember {
             mutableStateOf(com.localllm.server.core.AppSettings.todoToolEnabled)
@@ -294,24 +316,9 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             com.localllm.server.core.AppSettings.todoToolEnabled = todoOn
         }
 
-        // ---- 图片处理方式（多模态直读 vs 本地 OCR）----
-        var imgMode by remember {
-            mutableStateOf(com.localllm.server.core.AppSettings.imageInputMode)
-        }
-        SectionHeader(
-            title = "图片处理方式",
-            help = "自动：有多模态（mmproj）就直读图片，否则用内置 OCR 抽文字（OCR 不上传图片，更省更快）；" +
-                    "多模态：始终把图片交给视觉模型；OCR：始终本地识别文字后再提问。立即生效。",
-            titleStyle = MaterialTheme.typography.bodyLarge,
-            modifier = Modifier.padding(top = 8.dp)
-        )
-        QuickChips(
-            options = listOf("auto" to "自动", "vision" to "多模态直读", "ocr" to "OCR 提取文字"),
-            current = imgMode
-        ) { v ->
-            imgMode = v
-            com.localllm.server.core.AppSettings.imageInputMode = v
-        }
+        // 图片处理不再有「自动 / 多模态 / OCR」档位：
+        // 挂了 mmproj 的模型直接看图；纯文本模型由 ocr_image 工具按需识别文字。
+        // 用户一句「识别这张图的文字」就是触发条件，不需要全局开关。
 
         // ---- 图片轮的联网搜索策略（隐私）----
         var imgPolicy by remember {
@@ -515,6 +522,64 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 onCheckedChange = { v -> vm.updateSettings { it.copy(prismEngineEnabled = v) } }
             )
         }
+
+        // ---- Hexagon NPU 引擎 ----
+        var npuOn by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.npuEnabled)
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Hexagon NPU（高通专用）", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "走 DSP 做推理，比 GPU/CPU 快很多（本机实测 0.8B Q4_K_M：预填充 2491 tok/s、解码 69 tok/s）。" +
+                            "打开后强制 ngl=99 并走 --device HTP0，会盖掉 GPU 与 Prism 两个开关。" +
+                            "NPU 只吃 Q4_0/IQ4_NL/Q4_K 这类量化，三元打包（PQ2_0）用不了。保存后重启服务生效。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = npuOn,
+                onCheckedChange = { v ->
+                    npuOn = v
+                    com.localllm.server.core.AppSettings.npuEnabled = v
+                }
+            )
+        }
+
+        // ---- 模型加载模式（llama.cpp -lm）----
+        var loadMode by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.loadMode)
+        }
+        Text(
+            "模型加载模式",
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        Text(
+            "「自动」(mmap) 是唯一能让模型大于内存还能跑的模式——权重留在文件映射里，按需换页。" +
+                    "「直接读(dio)」会关闭 mmap、把权重读进内存，只在「模型装得下但系统太忙、mmap 抖得厉害」时才更快；" +
+                    "模型大于内存时选它会直接内存不足（实测会触发系统重启）。" +
+                    "「锁内存」会强制把模型常驻，内存不够别碰。改动在下次启动服务时生效。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        QuickChips(
+            options = listOf(
+                "" to "自动(默认)",
+                "dio" to "直接读(dio)",
+                "mmap" to "mmap",
+                "mlock" to "锁内存"
+            ),
+            current = loadMode
+        ) { v ->
+            loadMode = v
+            com.localllm.server.core.AppSettings.loadMode = v
+        }
         CompactField(
             value = settings.cacheTypeK,
             onValueChange = { v -> vm.updateSettings { it.copy(cacheTypeK = v) } },
@@ -584,6 +649,33 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             Switch(
                 checked = settings.lanEnabled,
                 onCheckedChange = { v -> vm.updateSettings { it.copy(lanEnabled = v) } }
+            )
+        }
+
+        // ---- 保活：屏幕关闭后保持服务 ----
+        var keepAwake by remember {
+            mutableStateOf(com.localllm.server.core.AppSettings.keepAwakeEnabled)
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("屏幕关闭后保持运行", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "持有唤醒锁，避免 Doze 把推理服务冻结（否则息屏后局域网访问会断）。" +
+                            "代价是耗电增加。改动在下次启动服务时生效。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = keepAwake,
+                onCheckedChange = { v ->
+                    keepAwake = v
+                    com.localllm.server.core.AppSettings.keepAwakeEnabled = v
+                }
             )
         }
 

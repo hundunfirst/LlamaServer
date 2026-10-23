@@ -24,6 +24,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -115,6 +116,9 @@ fun LogsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                         line,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp,
+                        // 兜底：万一还有超长行漏过入库截断，也不让它把排版拖死
+                        maxLines = 12,
+                        overflow = TextOverflow.Ellipsis,
                         color = if (isError) MaterialTheme.colorScheme.error
                         else MaterialTheme.colorScheme.onSurface
                     )

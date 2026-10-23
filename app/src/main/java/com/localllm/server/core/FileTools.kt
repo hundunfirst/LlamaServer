@@ -16,9 +16,10 @@ object FileTools {
     const val TOOL_LIST = "file_list"
     const val TOOL_READ = "file_read"
     const val TOOL_WRITE = "file_write"
+    const val TOOL_PATCH = "file_patch"
     const val TOOL_GREP = "file_grep"
 
-    val NAMES = setOf(TOOL_LIST, TOOL_READ, TOOL_WRITE, TOOL_GREP)
+    val NAMES = setOf(TOOL_LIST, TOOL_READ, TOOL_WRITE, TOOL_PATCH, TOOL_GREP)
 
     private const val MAX_READ_BYTES = 200 * 1024
     private const val MAX_WRITE_CHARS = 400_000
@@ -78,6 +79,19 @@ object FileTools {
             )
             put(
                 fn(
+                    TOOL_PATCH, "把文件里的一段原文替换成新内容（改错、补功能时优先用它）。" +
+                            "old 必须在文件里唯一出现；找不到或匹配到多段都会失败并提示原因。" +
+                            "不要用 file_write 整份重写来改一两行——那样每轮都要重吐全文，慢且容易改坏已对的部分。",
+                    JSONObject().put("path", pathProp)
+                        .put("old", JSONObject().put("type", "string")
+                            .put("description", "要被替换的原文片段（含原有缩进，需唯一匹配）"))
+                        .put("new", JSONObject().put("type", "string")
+                            .put("description", "替换后的新内容；空串表示删除这一段")),
+                    listOf("path", "old", "new")
+                )
+            )
+            put(
+                fn(
                     TOOL_GREP, "在授权目录内按关键字搜索文本文件",
                     JSONObject().put("pattern", JSONObject().put("type", "string")
                         .put("description", "要搜索的关键字")),
@@ -97,6 +111,10 @@ object FileTools {
             TOOL_LIST -> listFiles(root, args.optString("path"))
             TOOL_READ -> readFile(context, root, args.optString("path"))
             TOOL_WRITE -> writeFile(context, root, args.optString("path"), args.optString("content"))
+            TOOL_PATCH -> patchFile(
+                context, root, args.optString("path"),
+                args.optString("old"), args.optString("new")
+            )
             TOOL_GREP -> grepFiles(context, root, args.optString("pattern"))
             else -> throw IllegalStateException("未知文件工具：$name")
         }
@@ -213,6 +231,82 @@ object FileTools {
             it.write(content.toByteArray(Charsets.UTF_8))
         } ?: throw IllegalStateException("无法写入文件")
         return "已写入 ${if (existing != null) "（覆盖）" else ""}$path ，${content.length} 字"
+    }
+
+    /**
+     * 局部替换。要求 old 在文件里**唯一**出现：
+     * 找不到 → 让它先 file_read 确认实际内容（弱模型常凭记忆写 old，缩进/空格对不上）；
+     * 多处匹配 → 让它把上下文扩长，否则会改错地方。
+     */
+    private fun patchFile(
+        context: Context, root: DocumentFile, path: String, old: String, new: String
+    ): String {
+        if (path.isBlank()) throw IllegalStateException("缺少 path 参数")
+        if (old.isEmpty()) throw IllegalStateException("缺少 old 参数（要替换的原文）")
+        val f = find(root, path) ?: throw IllegalStateException("文件不存在：$path")
+        if (!f.isFile) throw IllegalStateException("不是文件：$path")
+        if (f.length() > MAX_READ_BYTES) {
+            throw IllegalStateException("文件过大（${f.length()} B），超过 $MAX_READ_BYTES B 上限")
+        }
+        val text = context.contentResolver.openInputStream(f.uri)?.use {
+            it.readBytes().toString(Charsets.UTF_8)
+        } ?: throw IllegalStateException("无法读取文件")
+
+        var start = text.indexOf(old)
+        var end = if (start >= 0) start + old.length else -1
+        if (start < 0) {
+            // 容错：弱模型抄多行片段时常常缩进/行尾空格对不上，精确匹配必然失败。
+            // 这里忽略每行首尾空白再找一次，唯一命中就映射回原文件的真实区间。
+            val norm = StringBuilder()
+            val map = ArrayList<Int>(text.length)
+            var oi = 0
+            while (true) {
+                val nl = text.indexOf('\n', oi)
+                val lineEnd = if (nl < 0) text.length else nl
+                val line = text.substring(oi, lineEnd)
+                var a = 0
+                var b = line.length
+                while (a < b && line[a].isWhitespace()) a++
+                while (b > a && line[b - 1].isWhitespace()) b--
+                for (k in a until b) {
+                    norm.append(line[k]); map.add(oi + k)
+                }
+                norm.append('\n'); map.add(lineEnd)
+                if (nl < 0) break
+                oi = nl + 1
+            }
+            val normOld = old.split('\n').joinToString("\n") { it.trim() }.trim('\n')
+            val ni = norm.indexOf(normOld)
+            if (ni >= 0 && norm.indexOf(normOld, ni + 1) < 0 && normOld.isNotEmpty()) {
+                start = map[ni]
+                val lastIdx = ni + normOld.length - 1
+                end = map[minOf(lastIdx, map.size - 1)] + 1
+                ServerProcessManager.appLog("file_patch：精确匹配失败，按忽略缩进的方式匹配成功（第 ${
+                    text.substring(0, start).count { it == '\n' } + 1
+                } 行）")
+            }
+        }
+        if (start < 0) {
+            throw IllegalStateException(
+                "在 $path 里找不到要替换的原文。old 请只取**单行**里一段足够唯一的短片段" +
+                        "（不要跨多行、不要带整行缩进），确认后再试。"
+            )
+        }
+        if (text.indexOf(old, start + 1) >= 0 && end == start + old.length) {
+            throw IllegalStateException(
+                "原文在 $path 里出现不止一次，无法确定改哪一处。请把 old 扩成足够长的上下文使其唯一。"
+            )
+        }
+        val updated = text.substring(0, start) + new + text.substring(end)
+        if (updated.length > MAX_WRITE_CHARS) {
+            throw IllegalStateException("替换后内容过大（${updated.length} 字），超过 $MAX_WRITE_CHARS 上限")
+        }
+        context.contentResolver.openOutputStream(f.uri, "wt")?.use {
+            it.write(updated.toByteArray(Charsets.UTF_8))
+        } ?: throw IllegalStateException("无法写入文件")
+        val line = text.substring(0, start).count { it == '\n' } + 1
+        return "已替换 $path 第 $line 行附近（old ${old.length} 字 → new ${new.length} 字），" +
+                "文件现 ${updated.length} 字"
     }
 
     private fun grepFiles(context: Context, root: DocumentFile, pattern: String): String {

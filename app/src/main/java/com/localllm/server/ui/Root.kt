@@ -136,10 +136,11 @@ fun Root(vm: MainViewModel) {
                 4 -> DownloadScreen(vm, modifier)
                 5 -> SettingsScreen(vm, modifier)
             }
-            // 执行宿主：只负责跑自检，摆到屏幕外——既不会被标签页切换销毁，也不占版面、不挡触摸。
-            // 不能用它给用户看：探针接管了 requestAnimationFrame，页面会停在第一帧。
-            val sandboxHtml by com.localllm.server.core.HtmlSandbox.lastHtml.collectAsStateWithLifecycle()
-            if (sandboxHtml != null) {
+            // 执行宿主：只负责跑自检，摆到屏幕外——不会被标签页切换销毁，也不占版面、不挡触摸。
+            // 只在自检进行中挂载：常驻的离屏 WebView 在切后台几分钟后，其渲染表面可能被
+            // 重新合成到内容区，表现为整页白屏（实测踩过，底栏正常、无崩溃）。
+            val sandboxRunning by com.localllm.server.core.HtmlSandbox.running.collectAsStateWithLifecycle()
+            if (sandboxRunning) {
                 Box(modifier = Modifier.align(Alignment.BottomStart)) {
                     SandboxHost(
                         Modifier

@@ -121,7 +121,9 @@ object ChatClient {
                 .put("temperature", if (codeTask) 0.3 else 0.7)
                 .put("top_p", 0.9)
                 .put("top_k", 20)
-                .put("repeat_penalty", 1.05)
+                // 复读与语法的折中：1.15 会惩罚缩进、");" 这类合法重复、伤代码；
+                // 1.05 又压不住「同一段文本重复上百遍」的复读（实测把工具调用 JSON 撑爆）。
+                .put("repeat_penalty", 1.10)
                 .put("messages", arr)
             if (tools != null && tools.length() > 0) {
                 body.put("tools", tools)

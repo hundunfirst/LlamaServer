@@ -28,6 +28,20 @@ object ChatStore {
     /** 由文件工具生成的文件（内容截断保存，供聊天内预览） */
     data class GenFile(val path: String, val content: String)
 
+    /**
+     * 中断后续跑用的任务快照。
+     * 只存「现状」不存「过程」——模型看历史也记不住自己上一轮怎么想的，
+     * 与其重放几十 k token，不如告诉它目标、当前报错、已做到哪一步。
+     */
+    data class TaskState(
+        val goal: String = "",
+        /** 最后一次工具/自检的错误摘要；null = 没有报错 */
+        val lastError: String? = null,
+        val rounds: Int = 0,
+        /** 被手动停止或进程中断（false = 正常跑完，不显示「继续」） */
+        val stopped: Boolean = false
+    )
+
     data class Msg(
         val role: String,
         val content: String,
@@ -36,7 +50,8 @@ object ChatStore {
         val steps: List<Step> = emptyList(),
         val sources: List<Source> = emptyList(),
         val todos: List<Todo> = emptyList(),
-        val genFiles: List<GenFile> = emptyList()
+        val genFiles: List<GenFile> = emptyList(),
+        val task: TaskState? = null
     )
 
     data class Session(
@@ -93,7 +108,16 @@ object ChatStore {
                         steps = parseSteps(m.optJSONArray("steps")),
                         sources = parseSources(m.optJSONArray("sources")),
                         todos = parseTodos(m.optJSONArray("todos")),
-                        genFiles = parseGenFiles(m.optJSONArray("genFiles"))
+                        genFiles = parseGenFiles(m.optJSONArray("genFiles")),
+                        task = m.optJSONObject("task")?.let { t ->
+                            TaskState(
+                                goal = t.optString("goal"),
+                                lastError = t.optString("lastError")
+                                    .takeIf { it.isNotEmpty() && it != "null" },
+                                rounds = t.optInt("rounds"),
+                                stopped = t.optBoolean("stopped")
+                            )
+                        }
                     )
                 }
                 Session(
@@ -174,6 +198,15 @@ object ChatStore {
                         )
                     }
                     o.put("steps", sArr)
+                }
+                if (m.task != null) {
+                    o.put(
+                        "task",
+                        JSONObject().put("goal", m.task.goal)
+                            .put("lastError", m.task.lastError ?: JSONObject.NULL)
+                            .put("rounds", m.task.rounds)
+                            .put("stopped", m.task.stopped)
+                    )
                 }
                 if (m.genFiles.isNotEmpty()) {
                     val gArr = JSONArray()

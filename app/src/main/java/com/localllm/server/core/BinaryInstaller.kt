@@ -4,19 +4,24 @@ import android.content.Context
 import java.io.File
 
 /**
- * 引擎安装器，三种模式（都从 assets 按需释放到 files/engines/<mode>/）：
+ * 引擎安装器，四种模式（都从 assets 按需释放到 files/engines/<mode>/）：
  * - cpu    ：上游 llama.cpp，纯 CPU
  * - opencl ：上游 llama.cpp，带 OpenCL GPU 后端（ngl>0 时使用）
  * - prism  ：PrismML fork（纯 CPU），支持 PQ2_0 / PTQ1_0 等 PrismML 打包的 Bonsai 模型
  *            只有设置里「Bonsai 优化引擎」打开且 ngl=0 时才用；GPU 模式一律走 opencl（该 fork 无 OpenCL 后端）
+ * - htp    ：上游 llama.cpp + Hexagon NPU 后端（libggml-hexagon.so + 四档 DSP skel）。
+ *            设置里「Hexagon NPU」打开时优先，强制 ngl=99 并走 `--device HTP0`；
+ *            包里故意不含 libggml-opencl.so，避免它去枚举 Adreno GPU（TROUBLESHOOTING #19）
  */
 object BinaryInstaller {
-    private const val VERSION = "4"
+    // 5：htp 引擎补上 libggml-opencl.so（构建产物的硬依赖），需要强制重新释放
+    private const val VERSION = "5"
     private const val ASSET_ROOT = "engines"
 
     const val MODE_CPU = "cpu"
     const val MODE_OPENCL = "opencl"
     const val MODE_PRISM = "prism"
+    const val MODE_HTP = "htp"
 
     private lateinit var appContext: Context
 
@@ -24,8 +29,12 @@ object BinaryInstaller {
         appContext = context.applicationContext
     }
 
-    /** 按 ngl 与开关挑引擎：GPU 优先（prism 没有 GPU 后端），否则按开关在 prism / cpu 中选 */
-    fun modeFor(useGpu: Boolean, prism: Boolean): String = when {
+    /**
+     * 按开关挑引擎：NPU 优先级最高（它在这套参数里当 GPU 使，-ngl 决定卸载范围），
+     * 其次 GPU，最后按 prism 开关在 prism / cpu 中选。
+     */
+    fun modeFor(useGpu: Boolean, prism: Boolean, npu: Boolean = false): String = when {
+        npu -> MODE_HTP
         useGpu -> MODE_OPENCL
         prism -> MODE_PRISM
         else -> MODE_CPU
@@ -40,6 +49,16 @@ object BinaryInstaller {
         val am = appContext.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
         val mi = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
         return mi.availMem
+    }
+
+    /**
+     * 物理内存总量（字节）。判断「这个模型是不是根本不可能装下」要用总量，
+     * 不能用可用量——可用量随后台 App 波动，拿它当阈值会把本来能跑的模型误拦。
+     */
+    fun totalBytes(): Long {
+        val am = appContext.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val mi = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+        return mi.totalMem
     }
 
     fun ensureInstalled(useGpu: Boolean): File =

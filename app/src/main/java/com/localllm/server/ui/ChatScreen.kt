@@ -82,6 +82,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -468,6 +469,9 @@ private fun inlineMd(s: String): androidx.compose.ui.text.AnnotatedString =
 @Composable
 fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: String = "") {
     val messages by vm.messages.collectAsStateWithLifecycle()
+    // 只给最近一个被中断的任务显示续跑入口：否则每中断一次就多一个按钮，
+    // 而旧的点了也只会去续跑最新那个，容易误解
+    val lastStoppedIdx = messages.indexOfLast { it.role == "assistant" && it.task?.stopped == true }
     val input by vm.input.collectAsStateWithLifecycle()
     val streaming by vm.streaming.collectAsStateWithLifecycle()
     val generating by vm.generating.collectAsStateWithLifecycle()
@@ -514,6 +518,31 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
         if (uri != null) {
             val mime = context.contentResolver.getType(uri) ?: ""
             if (mime.startsWith("image/")) vm.attachImage(uri) else vm.attachFile(uri)
+        }
+    }
+
+    // 导出生成的文件：走系统保存对话框，位置和文件名由用户定。
+    // 比直接塞 Download 更可靠——工作目录里的文件可能被系统清理搬进回收站。
+    var exportGenFile by remember {
+        mutableStateOf<com.localllm.server.core.ChatStore.GenFile?>(null)
+    }
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("*/*")
+    ) { uri ->
+        val gf = exportGenFile
+        exportGenFile = null
+        if (uri != null && gf != null) {
+            runCatching {
+                context.contentResolver.openOutputStream(uri)?.use {
+                    it.write(gf.content.toByteArray(Charsets.UTF_8))
+                } ?: throw IllegalStateException("无法写入目标文件")
+            }.onSuccess {
+                Toast.makeText(
+                    context, "已导出 ${gf.path.substringAfterLast('/')}", Toast.LENGTH_SHORT
+                ).show()
+            }.onFailure {
+                Toast.makeText(context, "导出失败：${it.message}", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -772,7 +801,14 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 }) { Text("复制") }
             },
             dismissButton = {
-                TextButton(onClick = { previewGenFile = null }) { Text("关闭") }
+                Row {
+                    TextButton(onClick = {
+                        exportGenFile = gf
+                        // 带上原文件名（含扩展名），系统对话框会据此预填
+                        exportLauncher.launch(gf.path.substringAfterLast('/'))
+                    }) { Text("导出") }
+                    TextButton(onClick = { previewGenFile = null }) { Text("关闭") }
+                }
             }
         )
     }
@@ -923,6 +959,35 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             val curUrl = com.localllm.server.core.AppSettings.chatCloudUrl.trim().removeSuffix("/")
             cloudPresets.value.find { it.url.trim().removeSuffix("/") == curUrl }?.name ?: "自定义"
         } else "本地"
+        // 拉取该预设 /v1/models 并落到预设里：电脑端换了模型、云端上新都能自动发现，
+        // 不用再去设置里手敲名字（手敲容易和接口对不上，还会一直停在旧名字上）
+        val channelScope = androidx.compose.runtime.rememberCoroutineScope()
+        fun refreshPresetModels(p: com.localllm.server.core.AppSettings.CloudPreset) {
+            channelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                val ids = try {
+                    com.localllm.server.core.OpenAiCompat.fetchModels(p.url, p.key)
+                } catch (e: Throwable) {
+                    com.localllm.server.core.ServerProcessManager.appLog(
+                        "拉取模型列表失败：${p.name} — ${e.message}"
+                    )
+                    emptyList<String>()
+                }
+                if (ids.isEmpty()) return@launch
+                val updated = com.localllm.server.core.AppSettings.loadCloudPresets().map { pr ->
+                    if (pr.id != p.id) pr
+                    else {
+                        val old = pr.models.associateBy { it.id }
+                        pr.copy(models = ids.map { id ->
+                            old[id] ?: com.localllm.server.core.AppSettings.CloudModel(id)
+                        })
+                    }
+                }
+                com.localllm.server.core.AppSettings.saveCloudPresets(updated)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    cloudPresets.value = updated
+                }
+            }
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -936,6 +1001,10 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 TextButton(onClick = {
                     cloudPresets.value = com.localllm.server.core.AppSettings.loadCloudPresets()
                     channelMenuOpen = true
+                    // 打开菜单时顺手刷新当前渠道的模型列表（PC 换了模型也能发现）
+                    val curUrl = com.localllm.server.core.AppSettings.chatCloudUrl.trim().removeSuffix("/")
+                    cloudPresets.value.firstOrNull { it.url.trim().removeSuffix("/") == curUrl }
+                        ?.let { refreshPresetModels(it) }
                 }) {
                     Text(
                         activePresetName,
@@ -956,14 +1025,64 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                         }
                     )
                     cloudPresets.value.forEach { p ->
+                        val isActive = cloudOn && p.url.trim().removeSuffix("/") ==
+                                com.localllm.server.core.AppSettings.chatCloudUrl.trim().removeSuffix("/")
                         DropdownMenuItem(
-                            text = { Text("${p.name} · ${p.model.ifBlank { "未选模型" }}") },
+                            text = {
+                                Column {
+                                    Text(
+                                        p.name + if (isActive) "（当前）" else "",
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    Text(
+                                        p.url,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1
+                                    )
+                                }
+                            },
                             onClick = {
                                 com.localllm.server.core.AppSettings.activateCloudPreset(p)
                                 channelMenuOpen = false
                             }
                         )
+                        // 该渠道下的模型直接列出来选，完整名字换行显示，不用点进输入框看
+                        p.models.forEach { m ->
+                            val picked = isActive && p.model == m.id
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(
+                                            (if (picked) "✓ " else "　 ") + m.id,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            maxLines = 2
+                                        )
+                                        if (m.label.isNotBlank()) {
+                                            Text(
+                                                m.label,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    com.localllm.server.core.AppSettings.activateCloudPreset(
+                                        p.copy(model = m.id)
+                                    )
+                                    channelMenuOpen = false
+                                }
+                            )
+                        }
                     }
+                    DropdownMenuItem(
+                        text = { Text("刷新模型列表") },
+                        onClick = {
+                            cloudPresets.value.forEach { refreshPresetModels(it) }
+                        }
+                    )
                 }
             }
             Row {
@@ -1170,6 +1289,8 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 error!!,
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
+                // 兜底：错误文本可能夹着引擎吐回的原始响应体，别让它把排版拖死
+                maxLines = 6,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
         }
@@ -1207,6 +1328,8 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                     thinking = thinking,
                     showStats = (!isUser && i == messages.lastIndex && lastStats != null),
                     stats = lastStats ?: "",
+                    onResumeTask = { vm.resumeStoppedTask(i) },
+                    showResume = i == lastStoppedIdx,
                     menuOpen = menuIndex == i,
                     onMenuOpen = { menuIndex = i },
                     onMenuClose = { menuIndex = null },
@@ -1441,7 +1564,9 @@ private fun MessageBubble(
     onDelete: () -> Unit,
     onSpeak: () -> Unit = {},
     onOpenGenFile: (com.localllm.server.core.ChatStore.GenFile) -> Unit = {},
-    onReadText: () -> Unit = {}
+    onReadText: () -> Unit = {},
+    onResumeTask: () -> Unit = {},
+    showResume: Boolean = false
 ) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
@@ -1617,6 +1742,15 @@ private fun MessageBubble(
                                         }
                                     }
                                 }
+                            }
+                        }
+                        // 被打断的任务：给一个续跑入口。续跑用任务快照重建指令，不重放历史
+                        if (!isUser && showResume && msg.task?.stopped == true) {
+                            androidx.compose.material3.OutlinedButton(
+                                onClick = onResumeTask,
+                                modifier = Modifier.padding(top = 6.dp, bottom = 6.dp)
+                            ) {
+                                Text("继续这个任务", style = MaterialTheme.typography.labelLarge)
                             }
                         }
                         // 思考过程（DeepSeek 风格折叠卡，默认收起）

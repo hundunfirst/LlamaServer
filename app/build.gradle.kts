@@ -110,6 +110,9 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
+    // JVM 单测：参数拼装等纯逻辑（gradlew :app:testDebugUnitTest）
+    testImplementation("junit:junit:4.13.2")
+
     // OCR：ML Kit 中文文字识别（bundled 离线模型，无需 GMS 在线下载）
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
 
