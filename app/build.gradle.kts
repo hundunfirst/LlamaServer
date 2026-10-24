@@ -1,4 +1,4 @@
-﻿plugins {
+plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
 }
@@ -25,8 +25,8 @@ android {
         // untrusted_app_28 仍允许，Termux（targetSdk=28）在 Android 17 上同样依赖该域。
         // 若未来改用 JNI/fork 进程内方案，可再提升 targetSdk。
         targetSdk = 28
-        versionCode = 11
-        versionName = "0.3.8"
+        versionCode = 12
+        versionName = "0.3.9"
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -112,6 +112,8 @@ dependencies {
 
     // JVM 单测：参数拼装等纯逻辑（gradlew :app:testDebugUnitTest）
     testImplementation("junit:junit:4.13.2")
+    // android.jar 里的 org.json 只有 stub，单测调到就抛 "Stub!"；给测试补一份真实实现
+    testImplementation("org.json:json:20240303")
 
     // OCR：ML Kit 中文文字识别（bundled 离线模型，无需 GMS 在线下载）
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
