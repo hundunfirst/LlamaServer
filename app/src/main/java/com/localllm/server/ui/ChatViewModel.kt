@@ -1313,7 +1313,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                                 if (e is kotlinx.coroutines.CancellationException) throw e
                                                 // 失败也要落成可见的一步，否则界面上一片正常、实际什么都没发生
                                                 mcpFailures[tc.name] = failedBefore + 1
-                                                val msg = McpHttpClient.explain(route.second, e)
+                                                // 同批工具名传进去：缺工作区/会话这类错要能点名「先调哪个」
+                                                val msg = McpHttpClient.explain(
+                                                    route.second, e, mcpRoute.values.map { it.second }
+                                                )
                                                 ServerProcessManager.appLog(
                                                     "MCP 失败：${tc.name} — ${msg.lineSequence().first()}"
                                                 )

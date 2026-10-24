@@ -69,4 +69,24 @@ class McpFailureTest {
         val msg = McpHttpClient.explain("x", IllegalArgumentException("weird"))
         assertTrue(msg.contains(McpHttpClient.FailureKind.UNKNOWN.label))
     }
+
+    @Test
+    fun `工具结构化错误会变成点名到具体工具的建议`() {
+        val info = McpToolError.Info(
+            code = "WORKSPACE_NOT_FOUND", message = "Workspace not found.",
+            argument = null, badValue = null, allowedValues = emptyList(),
+            recoverable = false, retrySameArguments = false
+        )
+        val e = McpHttpClient.McpException(
+            McpHttpClient.FailureKind.TOOL,
+            McpToolError.summarize(info, "Workspace not found."),
+            toolError = info
+        )
+        val msg = McpHttpClient.explain(
+            "mt_apk_list", e, listOf("mt_apk_list", "mt_apk_workspace_open")
+        )
+        assertTrue("要保留错误码：$msg", msg.contains("WORKSPACE_NOT_FOUND"))
+        assertTrue("要点名先调哪个工具：$msg", msg.contains("mt_apk_workspace_open"))
+        assertTrue("要有下一步段：$msg", msg.contains("→"))
+    }
 }

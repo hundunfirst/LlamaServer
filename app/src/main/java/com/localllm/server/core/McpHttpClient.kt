@@ -52,7 +52,9 @@ object McpHttpClient {
         val detail: String,
         /** 同样参数再调一次是否可能成功（网络抖动/5xx/空响应才算） */
         val retryable: Boolean = false,
-        val httpCode: Int? = null
+        val httpCode: Int? = null,
+        /** 工具返回的结构化错误（有的话），用来生成「下一步做什么」的建议 */
+        val toolError: McpToolError.Info? = null
     ) : Exception("${kind.label}：$detail")
 
     private val rpcId = AtomicInteger(1)
@@ -60,6 +62,8 @@ object McpHttpClient {
     private const val CONNECT_TIMEOUT_MS = 8_000
     private const val READ_TIMEOUT_MS = 20_000
     private const val RETRY_DELAY_MS = 500L
+    private const val TOOL_HINT =
+        "这是工具自己报的错，换一组参数可能就能成功；同一个工具连续两次失败就不要再试了。"
     private const val PROTO_NEW = "2025-06-18"
     private const val PROTO_OLD = "2024-11-05"
 
@@ -142,7 +146,15 @@ object McpHttpClient {
                 }
             }
             if (result.optBoolean("isError") == true) {
-                throw McpException(FailureKind.TOOL, sb.toString().take(500).ifBlank { "工具报告错误但没给原因" })
+                // 工具的错误载荷常常是结构化 JSON，先压成一句人话再回传（见 McpToolError）
+                val raw = sb.toString()
+                val info = McpToolError.parse(raw)
+                throw McpException(
+                    FailureKind.TOOL,
+                    if (info != null) McpToolError.summarize(info, raw)
+                    else raw.take(500).ifBlank { "工具报告错误但没给原因" },
+                    toolError = info
+                )
             }
             sb.toString().ifBlank { "(工具无返回内容)" }
         }
@@ -150,10 +162,18 @@ object McpHttpClient {
     /**
      * 给模型看的失败说明：说清是哪一类问题 + 下一步能做什么。
      * 直接把异常原文塞回去，模型看到「HTTP 500」只会拿同样的参数再试一遍。
+     *
+     * [peers] 是同一批可用的工具名（原始名，不带服务器前缀），用来在「缺前置上下文」时
+     * 点名该先调哪个工具。
      */
-    fun explain(name: String, e: Throwable): String {
+    fun explain(name: String, e: Throwable, peers: List<String> = emptyList()): String {
         val f = classify(e)
-        val advice = when (f.kind) {
+        val toolAdvice = when (f.kind) {
+            FailureKind.TOOL ->
+                f.toolError?.let { McpToolError.advice(it, name, peers) } ?: TOOL_HINT
+            else -> null
+        }
+        val advice = toolAdvice ?: when (f.kind) {
             FailureKind.UNREACHABLE ->
                 "这个服务器现在连不上，同样参数再调一次不会有不同结果：请改用其他工具，或直接基于已有信息回答，" +
                         "并在回答里说明该服务没连上。"
@@ -165,8 +185,7 @@ object McpHttpClient {
                 "令牌或权限不对，本次不要再调用这个服务器的任何工具，直接告诉用户去检查 MCP 配置。"
             FailureKind.BAD_ARGS ->
                 "按上面的原因修正参数后可以再调用一次；连续两次同样报错说明这个工具不接受这种用法，换别的路子。"
-            FailureKind.TOOL ->
-                "这是工具自己报的错，换一组参数可能就能成功；同一个工具连续两次失败就不要再试了。"
+            FailureKind.TOOL -> TOOL_HINT
             FailureKind.PROTOCOL ->
                 "已重试过一次。再失败就换工具，或直接回答。"
             FailureKind.UNKNOWN ->
