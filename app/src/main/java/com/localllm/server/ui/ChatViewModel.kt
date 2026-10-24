@@ -955,12 +955,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     )
 
                     // 工具调用过滤（实测：弱模型答完会幻觉/再发 tool_call 引发假的第二轮）：
-                    // ① 本轮正文已成形（≥60字）→ 答后调用一律忽略，直接收尾；
+                    // ① 本轮正文已成形（≥60字）→ 答后调用多半是幻觉，忽略；但清单没做完、或正文
+                    //    写的是「接下来…」这类进度说明时，这条调用是真正的下一步，必须执行
+                    //    （历史 bug：卡在这里把 mt_apk_delete_target 丢掉，任务正文写完就结束、清单停在 1/5）；
                     // ② 只执行真实注入过的工具名，幻觉工具直接忽略。
+                    val unfinishedTodos = _messages.value.lastOrNull()?.todos
+                        ?.any { it.status != "completed" } == true
+                    val keepTrailing = ToolLoopPolicy.keepTrailingCalls(unfinishedTodos, roundText.toString())
                     val validCalls = when {
-                        roundChars >= 60 && toolCalls.isNotEmpty() -> {
+                        roundChars >= 60 && toolCalls.isNotEmpty() && !keepTrailing -> {
                             ServerProcessManager.appLog(
-                                "正文已完整（$roundChars 字），忽略答后工具调用：" +
+                                "正文已完整（$roundChars 字）且没在推进中，忽略答后工具调用：" +
                                         toolCalls.joinToString { it.name } + "，本轮结束"
                             )
                             emptyList()
