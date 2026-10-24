@@ -322,19 +322,20 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         }
         SectionHeader(
             title = "工具调用轮次上限",
-            help = "每轮 = 一次完整生成 + 一次工具回传。多步任务（写文件 → 自检 → 改错 → 再自检）" +
-                    "很容易超过 8 轮，以前撞上限就停，日志里是「轮次用尽，任务未收敛」。\n\n" +
-                    "调高后长任务更容易一次做完；但模型如果陷进工具循环，每一轮都是完整生成，" +
-                    "会明显更耗电、更久。NPU 引擎下每轮更便宜，可以给大一些。",
+            help = "每轮 = 一次完整生成 + 一次工具回传。默认「不限」：任务做到模型自己不再调工具为止，\n" +
+                    "想中途停下点停止按钮即可。\n\n" +
+                    "以前默认 8~16 轮的理由是「每多一轮就是一次完整生成」——那是 CPU 时代的账。" +
+                    "NPU 上每轮便宜一个数量级，次数上限反而成了任务做不完的主因（日志里是「轮次用尽，任务未收敛」）。\n\n" +
+                    "仍然可以设成有限轮次：模型如果陷进工具循环，每一轮都是完整生成，耗电和耗时都会明显增加。",
             titleStyle = MaterialTheme.typography.bodyLarge,
             modifier = Modifier.padding(top = 8.dp)
         )
         QuickChips(
-            options = listOf("8" to "8 轮", "16" to "16 轮", "24" to "24 轮", "32" to "32 轮"),
+            options = listOf("0" to "不限", "16" to "16 轮", "32" to "32 轮", "64" to "64 轮"),
             current = roundLimit
         ) { v ->
             roundLimit = v
-            com.localllm.server.core.AppSettings.toolRoundLimit = v.toIntOrNull() ?: 16
+            com.localllm.server.core.AppSettings.toolRoundLimit = v.toIntOrNull() ?: 0
         }
 
         // ---- 纯净模式 ----

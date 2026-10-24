@@ -366,14 +366,18 @@ object AppSettings {
         set(value) = prefs.edit().putString("mcp_tool_mode", value).apply()
 
     /**
-     * 工具调用的最大轮次（每轮 = 一次完整生成 + 一次工具回传）。
-     * 原来是写死的 8 轮，多步任务（写文件 → 自检 → 改错 → 再自检）经常撞上限，
-     * 日志里表现为「轮次用尽，任务未收敛」。NPU 之后每轮更便宜，放宽更有意义。
-     * 上限不高仍有意义：模型陷进工具循环时，每多一轮就是一次完整生成。
+     * 工具调用的最大轮次（每轮 = 一次完整生成 + 一次工具回传）；0 = 不限制。
+     *
+     * 原来写死 8 轮，后来做成 16 轮上限。这套上限的理由是「每多一轮就是一次完整生成」——
+     * 那是 CPU 时代的账：NPU 上每轮成本低一个数量级，次数上限反而成了任务做不完的主因，
+     * 日志里表现为「轮次用尽，任务未收敛」。所以默认改为不限制：由模型自己不再调工具来结束，
+     * 中途想停就点停止（[com.localllm.server.ui.ChatViewModel.stopGenerating]）。
+     *
+     * prefs 用了新 key：老安装里存着 8/16，沿用旧 key 会让新默认值对老设备不生效。
      */
     var toolRoundLimit: Int
-        get() = prefs.getInt("tool_round_limit", 16).coerceIn(4, 40)
-        set(value) = prefs.edit().putInt("tool_round_limit", value.coerceIn(4, 40)).apply()
+        get() = prefs.getInt("tool_round_limit_v2", 0).coerceIn(0, 500)
+        set(value) = prefs.edit().putInt("tool_round_limit_v2", value.coerceIn(0, 500)).apply()
 
     /** 含图片轮次的联网搜索策略："block"（默认，禁止）/ "ask"（先征求同意）/ "allow" */
     var imageSearchPolicy: String

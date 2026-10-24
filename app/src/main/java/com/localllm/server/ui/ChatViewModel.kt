@@ -20,6 +20,7 @@ import com.localllm.server.core.SkillChain
 import com.localllm.server.core.SkillChainFlow
 import com.localllm.server.core.ServerUiState
 import com.localllm.server.core.TodoTool
+import com.localllm.server.core.ToolLoopPolicy
 import com.localllm.server.core.UrlFetch
 import com.localllm.server.core.WebRunTool
 import com.localllm.server.core.WebSearch
@@ -660,8 +661,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
                 // HTTP MCP 多服务器：聚合已启用服务器的工具（mcp__服务器__工具 前缀防冲突），并记录路由
                 val mcpRoute = mutableMapOf<String, Pair<String, String>>() // 完整名 → (url, 原始工具名)
-                // 本消息内每个 MCP 工具连续失败次数：够了就拦住，不让模型拿着同样的调用反复烧 token
-                val mcpFailures = mutableMapOf<String, Int>()
+                // 本消息内每个 MCP 工具「同一组参数」连续失败的次数：够了就拦住，
+                // 不让模型拿着同样的调用反复烧 token。换了参数就重新计数——那是在按建议往前走。
+                val mcpFailures = mutableMapOf<String, Pair<String, Int>>()
                 val mcpAgg = org.json.JSONArray()
                 AppSettings.loadMcpServers().filter { it.enabled && !AppSettings.pureMode }.forEach { s ->
                     val prefix = "mcp__" + s.name.map { c -> if (c.isLetterOrDigit()) c else '_' }
@@ -753,6 +755,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 var searchCount = 0
                 var todoCalls = 0
                 var sandboxCalls = 0
+                // 上一次自检的报错指纹：两次一模一样 = 没有进展（代替「最多 6 次」的计数上限）
+                var lastSandboxErrors: String? = null
                 val searchCap = AppSettings.searchMaxCalls.let { if (it <= 0) Int.MAX_VALUE else it }
                 var loggedNoSearch = false
                 // 执行步骤时间线（思考/搜索/工具），落到消息上供 UI 展示
@@ -794,12 +798,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val searchSources = mutableListOf<WebSearch.Result>()
                 var timingNote: String? = null
 
-                // 最多 5 轮工具调用，防止模型死循环
                 // 注意：必须用 for + break——repeat 里的 return@repeat 是 continue 语义，
                 // 会导致「回答完成」后仍继续下一轮（历史 bug：同一问题最多被连答 5 遍）。
-                // 轮次上限可配（设置里选），默认 16：多步任务（写文件→自检→改错→再自检）经常撞 8 轮上限，
-                // 日志表现为「轮次用尽，任务未收敛」。仍保留上限：模型陷进工具循环时每多一轮就是一次完整生成。
-                for (round in 0 until AppSettings.toolRoundLimit) {
+                // 默认不限（设置里可设成有限轮次）：NPU 上每轮成本低一个数量级，次数上限反而成了任务做不完的主因。
+                // 正常结束靠模型自己不再调工具（下面的 break），中途想停靠停止按钮。
+                val roundCap = ToolLoopPolicy.roundCap(AppSettings.toolRoundLimit)
+                for (round in 0 until roundCap) {
                     ensureActive() // 停止/切换后不再进入下一轮
                     // 提前强制：已搜过但走到第4轮仍无正文 → 立即移除搜索工具，逼模型作答
                     val forceNoTools = searchAvailable && round >= 3 &&
@@ -974,7 +978,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         // 截断正是「打开只有背景」的元凶：文件断在半行 JS 上。
                         val partial = _messages.value.lastOrNull()?.content ?: ""
                         if ((finishReason == "length" || finishReason == "max_tokens") &&
-                            truncFix < 2 && partial.isNotBlank()
+                            truncFix < 8 && partial.isNotBlank()
                         ) {
                             truncFix++
                             apiMsgs = apiMsgs +
@@ -1193,40 +1197,49 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 r
                             } else if (sandboxOn && tc.name == WebRunTool.NAME) {
                                 sandboxCalls++
-                                if (sandboxCalls > 6) {
-                                    "自检次数已达上限（6 次）。请直接给出当前最终版本的文件，" +
-                                            "并在正文中说明还有哪些未通过的检查项，不要再次调用本工具。"
-                                } else {
-                                    val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
-                                    val label = args.optString("path").ifBlank { "内联代码" }
-                                    ServerProcessManager.appLog("沙箱自检 ${sandboxCalls}/6：$label")
-                                    steps.add(
-                                        ChatStore.Step(
-                                            "tool", "运行自检（第 ${sandboxCalls} 次）", label.take(80)
+                                val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                val label = args.optString("path").ifBlank { "内联代码" }
+                                ServerProcessManager.appLog("沙箱自检 ${sandboxCalls}：$label")
+                                steps.add(
+                                    ChatStore.Step(
+                                        "tool", "运行自检（第 ${sandboxCalls} 次）", label.take(80)
+                                    )
+                                )
+                                syncSteps()
+                                val r = WebRunTool.execute(getApplication(), args)
+                                // 不再用「最多跑 6 次」这类计数上限：改错一次再跑一次本来就是工作方式，
+                                // 计数只会把还在推进的任务掐掉。真正的死循环判据是「没有任何进展」——
+                                // 两次报的错一模一样，说明上一轮修改没起作用，该收尾而不是再跑。
+                                val sig = r.lineSequence()
+                                    .filter { it.trimStart().startsWith("✗") }
+                                    .joinToString("|").take(400)
+                                val noProgress = ToolLoopPolicy.noProgress(sig, lastSandboxErrors)
+                                lastSandboxErrors = sig.ifEmpty { null }
+                                // 只记真正的错误：自检干净通过时报告第一行是「页面存活，无报错」，
+                                // 把它当错误存下来会让续跑误以为上次没过
+                                appendToLastInline(sid) { m ->
+                                    val errs = r.lineSequence()
+                                        .firstOrNull { it.trimStart().startsWith("✗") }
+                                    val dead = if (!r.contains("【运行结果】页面存活")) {
+                                        r.lineSequence().firstOrNull { it.isNotBlank() }
+                                    } else null
+                                    m.copy(
+                                        task = m.task?.copy(
+                                            lastError = (errs ?: dead)?.trim()?.take(200),
+                                            rounds = round + 1
                                         )
                                     )
-                                    syncSteps()
-                                    val r = WebRunTool.execute(getApplication(), args)
-                                    // 只记真正的错误：自检干净通过时报告第一行是「页面存活，无报错」，
-                                    // 把它当错误存下来会让续跑误以为上次没过
-                                    appendToLastInline(sid) { m ->
-                                        val errs = r.lineSequence()
-                                            .firstOrNull { it.trimStart().startsWith("✗") }
-                                        val dead = if (!r.contains("【运行结果】页面存活")) {
-                                            r.lineSequence().firstOrNull { it.isNotBlank() }
-                                        } else null
-                                        m.copy(
-                                            task = m.task?.copy(
-                                                lastError = (errs ?: dead)?.trim()?.take(200),
-                                                rounds = round + 1
-                                            )
-                                        )
-                                    }
-                                    ServerProcessManager.appLog(
-                                        "沙箱自检完成：" + (r.lineSequence().firstOrNull() ?: "")
-                                    )
-                                    r
                                 }
+                                ServerProcessManager.appLog(
+                                    "沙箱自检完成：" +
+                                            (r.lineSequence().firstOrNull() ?: "") +
+                                            if (noProgress) "（与上次报错相同，判定无进展）" else ""
+                                )
+                                if (noProgress) {
+                                    r + "\n\n【提醒】这次报的错和上一次完全相同，说明刚才的修改没起作用。" +
+                                            "请不要再重复运行自检：直接给出当前最终版本的文件，" +
+                                            "并在正文里说明还有哪些检查项没通过。"
+                                } else r
                             } else if (tc.name == "web_search") {
                                 val query = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                                     .optString("query")
@@ -1286,11 +1299,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                                 val route = mcpRoute[tc.name]
                                     ?: throw IllegalStateException("未路由的工具：${tc.name}")
-                                val failedBefore = mcpFailures[tc.name] ?: 0
+                                val argSig = args.toString()
+                                val prevFail = mcpFailures[tc.name]
+                                val failedBefore = if (prevFail != null && prevFail.first == argSig) prevFail.second else 0
                                 if (failedBefore >= 2) {
-                                    ServerProcessManager.appLog("MCP：${tc.name} 本消息已失败 $failedBefore 次，不再调用")
-                                    "工具「${route.second}」本消息内已经失败 $failedBefore 次，不要再调用它；" +
-                                            "请改用其他工具，或基于已有信息直接回答。"
+                                    ServerProcessManager.appLog(
+                                        "MCP：${tc.name} 用同一组参数已失败 $failedBefore 次，不再调用"
+                                    )
+                                    "工具「${route.second}」用这组参数已经失败 $failedBefore 次，同样的调用不要再发；" +
+                                            "要么按上面的原因改参数，要么改用其他工具，或者直接回答。"
                                 } else {
                                     ServerProcessManager.appLog("MCP 调用：${tc.name}")
                                     runCatching { McpHttpClient.callTool(route.first, null, route.second, args) }
@@ -1312,7 +1329,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                             onFailure = { e ->
                                                 if (e is kotlinx.coroutines.CancellationException) throw e
                                                 // 失败也要落成可见的一步，否则界面上一片正常、实际什么都没发生
-                                                mcpFailures[tc.name] = failedBefore + 1
+                                                mcpFailures[tc.name] = argSig to (failedBefore + 1)
                                                 // 同批工具名传进去：缺工作区/会话这类错要能点名「先调哪个」
                                                 val msg = McpHttpClient.explain(
                                                     route.second, e, mcpRoute.values.map { it.second }
@@ -1408,14 +1425,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     _lastStats.value = "🔧 ${usedTools.joinToString("、")}${if (base.isNotEmpty()) " · $base" else ""}"
                 }
                 // 轮次用尽但任务没收敛（最后一次自检仍有错）：标成「被打断」，
-                // 让「继续这个任务」出现，而不是带着没修完的文件算正常结束
+                // 让「继续这个任务」出现，而不是带着没修完的文件算正常结束。
+                // 轮次默认不限，所以走到这里说明用户手动设了有限轮次。
                 if (isGenerating(sid)) {
                     appendToLastInline(sid) { m ->
                         if (m.role == "assistant" && m.task?.lastError != null) {
                             m.copy(task = m.task.copy(stopped = true))
                         } else m
                     }
-                    ServerProcessManager.appLog("轮次用尽，任务未收敛，已标记为可续跑")
+                    ServerProcessManager.appLog(
+                        "工具轮次用尽（设置里是 ${AppSettings.toolRoundLimit} 轮），任务未收敛，" +
+                                "已标记为可续跑；想让它一次跑完可在设置里把上限改为「不限」"
+                    )
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
