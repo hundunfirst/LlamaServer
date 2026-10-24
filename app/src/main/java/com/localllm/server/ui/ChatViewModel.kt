@@ -803,6 +803,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 默认不限（设置里可设成有限轮次）：NPU 上每轮成本低一个数量级，次数上限反而成了任务做不完的主因。
                 // 正常结束靠模型自己不再调工具（下面的 break），中途想停靠停止按钮。
                 val roundCap = ToolLoopPolicy.roundCap(AppSettings.toolRoundLimit)
+                // 这一轮是模型自己收尾（不再调工具）还是撞上限被打断——两者收尾方式完全不同
+                var answeredNaturally = false
                 for (round in 0 until roundCap) {
                     ensureActive() // 停止/切换后不再进入下一轮
                     // 提前强制：已搜过但走到第4轮仍无正文 → 立即移除搜索工具，逼模型作答
@@ -1042,6 +1044,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             val lastUser = _messages.value.lastOrNull { it.role == "user" }?.content ?: ""
                             maybeAutoTitle(lastUser, _messages.value.lastOrNull()?.content ?: "")
                         }
+                        answeredNaturally = true
                         break
                     }
 
@@ -1424,10 +1427,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val base = _lastStats.value ?: ""
                     _lastStats.value = "🔧 ${usedTools.joinToString("、")}${if (base.isNotEmpty()) " · $base" else ""}"
                 }
-                // 轮次用尽但任务没收敛（最后一次自检仍有错）：标成「被打断」，
-                // 让「继续这个任务」出现，而不是带着没修完的文件算正常结束。
-                // 轮次默认不限，所以走到这里说明用户手动设了有限轮次。
-                if (isGenerating(sid)) {
+                // 只有「循环是被上限耗尽的」才算被打断。
+                // 这里以前只判 isGenerating(sid)——生成中当然是 true，于是只要这条消息用过工具，
+                // 就算模型自己答完收尾了也会打「轮次用尽」并挂上「继续这个任务」。
+                if (!answeredNaturally && isGenerating(sid)) {
                     appendToLastInline(sid) { m ->
                         if (m.role == "assistant" && m.task?.lastError != null) {
                             m.copy(task = m.task.copy(stopped = true))
@@ -2140,6 +2143,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         out.append(text.trim()).append("\n\n")
                         appendToLastInline(sid) { m -> m.copy(content = out.toString().trim()) }
                         _error.value = "第 ${index + 1} 步（${sk.name}）没能完成，技能链已中止"
+
                         break
                     }
                 }
