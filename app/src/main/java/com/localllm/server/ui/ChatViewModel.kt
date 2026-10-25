@@ -300,20 +300,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     _error.value = "读取文件失败或文件为空"
                     return@launch
                 }
-                // 文档（PDF/docx/xlsx）走本地文本抽取；其它按文本读取
+                // 文档走本地结构化抽取（pdf/docx/xlsx/pptx/rtf）；其它按纯文本读取
                 val doc = DocExtract.extract(bytes, name, mime)
                 val text = if (doc != null) {
-                    val (kind, extracted) = doc
-                    if (extracted.isNullOrBlank()) {
-                        _error.value = when (kind) {
+                    if (doc.text.isBlank()) {
+                        _error.value = doc.note ?: when (doc.kind) {
                             "pdf" -> "PDF 没有可提取的文字层（可能是扫描件）：可截图后走 OCR，或使用视觉模型"
                             "docx" -> "Word 文档没有可提取的文字"
-                            else -> "表格没有可提取的文字"
+                            else -> "文件里没有可提取的文字"
                         }
                         return@launch
                     }
-                    ServerProcessManager.appLog("文档抽取：$name → ${kind.uppercase()} ${extracted.length} 字")
-                    "（${kind.uppercase()} 已抽取文本）\n" + extracted
+                    ServerProcessManager.appLog(
+                        "文档抽取：$name → ${doc.kind.uppercase()} ${doc.text.length} 字" +
+                                (doc.note?.let { "（$it）" } ?: "")
+                    )
+                    "（${doc.kind.uppercase()} 已抽取文本）\n" + doc.text +
+                            (doc.note?.let { "\n[$it]" } ?: "")
                 } else {
                     if (bytes.size > 256 * 1024) {
                         _error.value = "文本文件超过 256KB，请精简后再试"

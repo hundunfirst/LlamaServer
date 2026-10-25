@@ -22,6 +22,11 @@ object FileTools {
     val NAMES = setOf(TOOL_LIST, TOOL_READ, TOOL_WRITE, TOOL_PATCH, TOOL_GREP)
 
     private const val MAX_READ_BYTES = 200 * 1024
+
+    /** 文档要整份读进来才能抽取（一个 5 MB 的 xlsx 很常见），上限单独放宽 */
+    private const val MAX_DOC_BYTES = 40 * 1024 * 1024
+    private const val DEFAULT_READ_CHARS = 20_000
+    private const val MAX_READ_CHARS = 200_000
     private const val MAX_WRITE_CHARS = 400_000
     private const val MAX_LIST_ENTRIES = 200
     private const val MAX_GREP_FILES = 60
@@ -64,8 +69,17 @@ object FileTools {
             )
             put(
                 fn(
-                    TOOL_READ, "读取授权目录内的文本文件内容",
-                    JSONObject().put("path", pathProp), listOf("path")
+                    TOOL_READ,
+                    "读取授权目录内的文件内容。纯文本直接读；pdf / docx / xlsx / pptx / rtf 在本地抽取成" +
+                            "带结构的文字（标题层级、表格行列、日期、公式），不需要视觉模型。" +
+                            "长文件用 offset（起始字符位置，从 0 开始）+ limit（本次最多读多少字）分段读，" +
+                            "返回结果末尾会给出下一段该用的 offset。",
+                    JSONObject().put("path", pathProp)
+                        .put("offset", JSONObject().put("type", "integer")
+                            .put("description", "起始字符位置，默认 0；接上返回里提示的 offset 继续读"))
+                        .put("limit", JSONObject().put("type", "integer")
+                            .put("description", "本次最多读多少字符，默认 $DEFAULT_READ_CHARS")),
+                    listOf("path")
                 )
             )
             put(
@@ -109,7 +123,10 @@ object FileTools {
         )
         return when (name) {
             TOOL_LIST -> listFiles(root, args.optString("path"))
-            TOOL_READ -> readFile(context, root, args.optString("path"))
+            TOOL_READ -> readFile(
+                context, root, args.optString("path"),
+                args.optInt("offset", 0), args.optInt("limit", 0)
+            )
             TOOL_WRITE -> writeFile(context, root, args.optString("path"), args.optString("content"))
             TOOL_PATCH -> patchFile(
                 context, root, args.optString("path"),
@@ -173,17 +190,49 @@ object FileTools {
         return sb.toString().trimEnd()
     }
 
-    private fun readFile(context: Context, root: DocumentFile, path: String): String {
+    private fun readFile(
+        context: Context,
+        root: DocumentFile,
+        path: String,
+        offsetIn: Int,
+        limitIn: Int
+    ): String {
         if (path.isBlank()) throw IllegalStateException("缺少 path 参数")
         val f = find(root, path) ?: throw IllegalStateException("文件不存在：$path")
         if (!f.isFile) throw IllegalStateException("不是文件：$path")
-        if (f.length() > MAX_READ_BYTES) {
-            throw IllegalStateException("文件过大（${f.length()} B），超过 $MAX_READ_BYTES B 上限")
+        val name = f.name ?: path
+        val mime = runCatching { context.contentResolver.getType(f.uri) }.getOrNull() ?: ""
+        val docKind = DocExtract.isDocument(name, mime)
+        val cap = if (docKind) MAX_DOC_BYTES else MAX_READ_BYTES
+        if (f.length() > cap) {
+            throw IllegalStateException("文件过大（${f.length()} B），超过 $cap B 上限")
         }
-        val text = context.contentResolver.openInputStream(f.uri)?.use {
-            it.readBytes().toString(Charsets.UTF_8)
-        } ?: throw IllegalStateException("无法读取文件")
-        return text
+        val bytes = context.contentResolver.openInputStream(f.uri)?.use { it.readBytes() }
+            ?: throw IllegalStateException("无法读取文件")
+        // 文档走本地抽取；不是文档就按 UTF-8 原样读
+        val doc = if (docKind) DocExtract.extract(bytes, name, mime) else null
+        val full = doc?.text ?: String(bytes, Charsets.UTF_8)
+        if (full.isEmpty()) {
+            return doc?.note ?: "（文件为空或没有可读内容）"
+        }
+        // 分段读：一次吐几十万字会把上下文顶爆，让模型自己按需往后翻
+        val offset = offsetIn.coerceAtLeast(0)
+        if (offset >= full.length) {
+            return "已到文件末尾：全文共 ${full.length} 字，offset=$offset 超出范围，不用再读。"
+        }
+        val limit = if (limitIn > 0) minOf(limitIn, MAX_READ_CHARS) else DEFAULT_READ_CHARS
+        val end = minOf(offset + limit, full.length)
+        val sb = StringBuilder()
+        sb.append("【").append(if (doc != null) doc.kind.uppercase() + " 已抽取文本" else "纯文本")
+            .append(" · 共 ").append(full.length).append(" 字 · 本次 ")
+            .append(offset).append('–').append(end).append(" 字】\n")
+        doc?.note?.let { sb.append('[').append(it).append("]\n") }
+        sb.append(full, offset, end)
+        if (end < full.length) {
+            sb.append("\n\n[还有 ").append(full.length - end)
+                .append(" 字未读：继续读请传 offset=").append(end).append(']')
+        }
+        return sb.toString()
     }
 
     /** 弱模型常把自己的工具调用语法写进文件内容末尾，落盘前截掉 */
