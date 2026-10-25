@@ -48,6 +48,9 @@ fun Root(vm: MainViewModel) {
         Tab("设置", Icons.Default.Settings)
     )
     var selected by remember { mutableIntStateOf(0) }
+    // 设置页的滚动位置放在这里持有：标签页切换会销毁该页的组合状态，
+    // 页面自己 remember 的话每次切回来都跳回最顶上
+    val settingsScroll = rememberScrollState()
     val error by vm.actionError.collectAsStateWithLifecycle()
     val saveMsg by vm.saveMessage.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -134,7 +137,7 @@ fun Root(vm: MainViewModel) {
                 2 -> LogsScreen(vm, modifier)
                 3 -> ModelsScreen(vm, modifier)
                 4 -> DownloadScreen(vm, modifier)
-                5 -> SettingsScreen(vm, modifier)
+                5 -> SettingsScreen(vm, modifier, settingsScroll)
             }
             // 执行宿主：只负责跑自检，摆到屏幕外——不会被标签页切换销毁，也不占版面、不挡触摸。
             // 只在自检进行中挂载：常驻的离屏 WebView 在切后台几分钟后，其渲染表面可能被

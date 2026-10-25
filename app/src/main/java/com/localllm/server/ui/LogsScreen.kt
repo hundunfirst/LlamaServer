@@ -36,16 +36,23 @@ import androidx.compose.runtime.rememberCoroutineScope
  * 运行日志：
  * - 跟随策略：仅当用户停在底部（或主动点「最新」）时才自动滚到最新；
  *   上翻阅读历史时新条目绝不顶动视口。
+ * - **进入页面直接贴底**（首帧就位，不用动画）——以前用 animateScrollToItem 滚，
+ *   每次从别的页切过来都能看到「从最顶上滑下来」。
+ * - 引擎 warmup 刷屏行折叠成一行摘要，见 [LogNoise]。
  * - 非跟随态底部显示 ↦「最新」悬浮箭头，点击一键回到最新条目。
  * - 错误/失败行标红，便于扫读。
  */
 @Composable
 fun LogsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val logs by vm.logLines.collectAsStateWithLifecycle()
+    // 折叠只影响显示；「复制」仍取 logs 原文
+    val rows = remember(logs) { com.localllm.server.core.LogNoise.collapse(logs) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     // pinned = 跟随模式；用户上翻 → false（出现箭头）；点箭头/滚回底部 → true
     var pinned by remember { mutableStateOf(true) }
+    // 进入页面后是否已经贴过底：第一次落位用瞬时跳转，之后才允许动画跟随
+    var landed by remember { mutableStateOf(false) }
 
     // 用户上翻检测（index 变小=看历史 → 解除钉住；变大时若已贴底 → 重新钉住）
     LaunchedEffect(listState) {
@@ -65,14 +72,21 @@ fun LogsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     }
 
     // 有新条目：仅在跟随态（或本来就贴底）时滚动；同时用 layoutInfo 重新校准贴底状态
-    LaunchedEffect(logs.size) {
-        if (logs.isEmpty()) return@LaunchedEffect
+    LaunchedEffect(rows.size) {
+        if (rows.isEmpty()) return@LaunchedEffect
         val info = listState.layoutInfo
         val last = info.visibleItemsInfo.lastOrNull()
-        val atBottom = last != null && last.index == logs.size - 1 &&
+        val atBottom = last != null && last.index == rows.size - 1 &&
                 (last.offset + last.size) - info.viewportEndOffset <= 64
         if (atBottom) pinned = true
-        if (pinned) listState.animateScrollToItem(logs.size - 1)
+        if (!pinned) return@LaunchedEffect
+        if (!landed) {
+            // 首次进页面（或日志从空变非空）：一帧内到位，不做动画
+            listState.scrollToItem(rows.size - 1)
+            landed = true
+        } else {
+            listState.animateScrollToItem(rows.size - 1)
+        }
     }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -108,7 +122,8 @@ fun LogsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     .padding(top = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
-                items(logs) { line ->
+                items(rows) { row ->
+                    val line = row.text
                     val isError = line.contains("错误") || line.contains("失败") ||
                             line.contains(" E ") || line.contains("E llama") ||
                             line.contains("E srv") || line.contains("E cmn")
@@ -119,8 +134,11 @@ fun LogsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                         // 兜底：万一还有超长行漏过入库截断，也不让它把排版拖死
                         maxLines = 12,
                         overflow = TextOverflow.Ellipsis,
-                        color = if (isError) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.onSurface
+                        color = when {
+                            isError -> MaterialTheme.colorScheme.error
+                            row.collapsed > 0 -> MaterialTheme.colorScheme.onSurfaceVariant
+                            else -> MaterialTheme.colorScheme.onSurface
+                        }
                     )
                 }
             }
@@ -132,7 +150,7 @@ fun LogsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 onClick = {
                     pinned = true
                     scope.launch {
-                        if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1)
+                        if (rows.isNotEmpty()) listState.animateScrollToItem(rows.size - 1)
                     }
                 },
                 modifier = Modifier

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -50,11 +51,16 @@ import kotlinx.coroutines.launch
 
 @Composable
 @OptIn(ExperimentalLayoutApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
-fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
+fun SettingsScreen(
+    vm: MainViewModel,
+    modifier: Modifier = Modifier,
+    // 滚动位置由 Root 持有：标签页切换会把本页移出组合，页面自己 remember 的状态会丢，
+    // 于是每次都回到最顶上（设置项很多，找上次改的那条要重新翻一遍）
+    settingsScroll: ScrollState = rememberScrollState()
+) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     var showModelDialog by remember { mutableStateOf(false) }
 
-    val settingsScroll = rememberScrollState()
     Box(modifier = modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
