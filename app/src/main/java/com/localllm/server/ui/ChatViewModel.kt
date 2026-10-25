@@ -796,6 +796,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     ocrSourceB64 ?: history.lastOrNull { it.imageB64 != null }?.imageB64
                 var ocrCalls = 0
                 var truncFix = 0
+                // 「只宣告下一步、不调工具」的催办次数（详见 ToolLoopPolicy.stalledWithoutActing）
+                var stallNudges = 0
                 val searchSources = mutableListOf<WebSearch.Result>()
                 var timingNote: String? = null
 
@@ -998,6 +1000,35 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     )
                             ServerProcessManager.appLog("输出撞到 max_tokens，自动续写第 $truncFix 次")
                             steps.add(ChatStore.Step("tool", "输出被截断，自动续写（第 $truncFix 次）"))
+                            syncSteps()
+                            continue
+                        }
+                        // 只写了一句「现在执行删除操作：」就停——这不是答复，是下一步的宣告。
+                        // 以前这里直接当答复收尾（真机现场：正文 108 字、零工具调用，任务原地不动），
+                        // 现在催它真调工具，同一轮最多催 2 次。
+                        val stalled = isGenerating(sid) && ToolLoopPolicy.stalledWithoutActing(
+                            unfinishedTodos = unfinishedTodos,
+                            answerText = roundText.toString(),
+                            hasToolCalls = toolCalls.isNotEmpty(),
+                            nudged = stallNudges
+                        )
+                        if (stalled) {
+                            stallNudges++
+                            apiMsgs = apiMsgs +
+                                    ChatClient.ChatMessage("assistant", roundText.toString().trim()) +
+                                    ChatClient.ChatMessage(
+                                        "user",
+                                        "上一条只写了下一步要做什么，还没有真正调用工具。" +
+                                                "现在直接调用需要的那一个工具把这一步做掉，" +
+                                                "不要再重复计划，也不要重新开头。"
+                                    )
+                            ServerProcessManager.appLog(
+                                "模型只宣告下一步、未调用任何工具，催办第 $stallNudges 次：" +
+                                        roundText.toString().trim().takeLast(40)
+                            )
+                            steps.add(
+                                ChatStore.Step("tool", "模型停在计划上，催它动手（第 $stallNudges 次）")
+                            )
                             syncSteps()
                             continue
                         }
@@ -1614,6 +1645,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         append(
             ChatStore.Msg(
                 "assistant", "",
+                // 清单必须带过来：界面上的进度卡片靠它，工具循环判「任务还没做完」也靠它
+                // （丢了就只能看正文尾部猜，续跑轮里答后调用会被误当幻觉丢掉）
+                todos = m.todos,
                 task = ChatStore.TaskState(goal = t.goal, rounds = t.rounds)
             )
         )

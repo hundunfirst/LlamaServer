@@ -33,6 +33,33 @@ object ToolLoopPolicy {
     fun keepTrailingCalls(unfinishedTodos: Boolean, answerText: String): Boolean =
         unfinishedTodos || looksLikeProgressNote(answerText)
 
+    /** 模型「只宣告下一步、不真调工具」时，同一条用户消息最多催办几次 */
+    const val STALL_NUDGE_LIMIT = 2
+
+    /**
+     * 这一轮该不该催办：模型写了一句「现在执行删除操作：」就停下，一个工具都没调。
+     *
+     * 真机现场：4B 模型这轮正文 108 字、零工具调用、finish_reason=stop，工具循环把「没有工具调用」
+     * 当成答复结束直接收尾，任务原地不动、清单停在 1/5，用户只能手打「继续」。
+     * 这一句并不是结论，是下一步的宣告——催一次它就会真的动手。
+     *
+     * 判据宁可窄：只有「清单没做完」或「结尾明确是冒号/省略号」才催。
+     * 正文里出现「现在/然后」不算——正常回答也常这么写，催了会变成同一问题答两遍。
+     */
+    fun stalledWithoutActing(
+        unfinishedTodos: Boolean,
+        answerText: String,
+        hasToolCalls: Boolean,
+        nudged: Int
+    ): Boolean {
+        if (hasToolCalls || nudged >= STALL_NUDGE_LIMIT) return false
+        val tail = answerText.trim().takeLast(80)
+        if (tail.isEmpty()) return false
+        if (unfinishedTodos) return true
+        return tail.endsWith("：") || tail.endsWith(":") ||
+                tail.endsWith("…") || tail.endsWith("...")
+    }
+
     private val PROGRESS_MARKERS = listOf(
         "接下来", "下一步", "然后", "现在", "我将", "我会", "正在", "即将", "准备", "接着"
     )

@@ -61,4 +61,54 @@ class ToolLoopPolicyTest {
         val long = "接下来我们看广告配置。" + "配置文件里没有相关字段。".repeat(12) + "结论：此包无广告。"
         assertFalse(ToolLoopPolicy.looksLikeProgressNote(long))
     }
+
+    @Test
+    fun `只宣告下一步且零工具调用时要催办`() {
+        // 真机现场：正文 108 字「…现在执行删除操作：」，零工具调用，finish_reason=stop
+        assertTrue(
+            ToolLoopPolicy.stalledWithoutActing(
+                unfinishedTodos = false,
+                answerText = "## 去广告改造进行中（续）\n\n### 第一步：继续删除核心广告文件\n\n现在执行删除操作：",
+                hasToolCalls = false,
+                nudged = 0
+            )
+        )
+        assertTrue(
+            ToolLoopPolicy.stalledWithoutActing(false, "先列出当前 APK 的内部文件结构，找到所有广告相关文件：", false, 0)
+        )
+        assertTrue(ToolLoopPolicy.stalledWithoutActing(false, "先看一下结构…", false, 0))
+    }
+
+    @Test
+    fun `清单没做完时哪怕结尾是结论也催`() {
+        assertTrue(
+            ToolLoopPolicy.stalledWithoutActing(true, "第一阶段已完成，共清理 3 个资源。", false, 0)
+        )
+    }
+
+    @Test
+    fun `真调了工具就不催`() {
+        assertFalse(ToolLoopPolicy.stalledWithoutActing(false, "现在执行删除操作：", true, 0))
+        assertFalse(ToolLoopPolicy.stalledWithoutActing(true, "现在执行删除操作：", true, 0))
+    }
+
+    @Test
+    fun `结论式正文不催`() {
+        assertFalse(
+            ToolLoopPolicy.stalledWithoutActing(false, "全部完成，已生成 3 个文件，共 320 行。", false, 0)
+        )
+        // 正文里出现「现在/然后」不算宣告，否则正常回答会被答两遍
+        assertFalse(
+            ToolLoopPolicy.stalledWithoutActing(false, "现在两者都能用了，然后重启一次即可。", false, 0)
+        )
+        assertFalse(ToolLoopPolicy.stalledWithoutActing(false, "", false, 0))
+    }
+
+    @Test
+    fun `催到上限就收尾`() {
+        val text = "现在执行删除操作："
+        assertTrue(ToolLoopPolicy.stalledWithoutActing(false, text, false, 1))
+        assertFalse(ToolLoopPolicy.stalledWithoutActing(false, text, false, ToolLoopPolicy.STALL_NUDGE_LIMIT))
+        assertFalse(ToolLoopPolicy.stalledWithoutActing(false, text, false, ToolLoopPolicy.STALL_NUDGE_LIMIT + 5))
+    }
 }
