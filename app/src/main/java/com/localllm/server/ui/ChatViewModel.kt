@@ -21,6 +21,7 @@ import com.localllm.server.core.SkillChainFlow
 import com.localllm.server.core.ServerUiState
 import com.localllm.server.core.TodoTool
 import com.localllm.server.core.ToolLoopPolicy
+import com.localllm.server.core.ToolResultBudget
 import com.localllm.server.core.UrlFetch
 import com.localllm.server.core.WebRunTool
 import com.localllm.server.core.WebSearch
@@ -1363,7 +1364,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             ServerProcessManager.appLog("工具失败：${tc.name} — ${e.message}")
                             "工具执行失败：${e.message}"
                         }
-                        newMsgs.add(ChatClient.ChatMessage("tool", result, toolCallId = tc.id))
+                        // 回传前按窗口预算压一次：一次读取吐回 9 万字曾把上下文从 15.5k 顶到 108.6k，
+                        // 下一轮直接 201837 token 超窗 400，整轮白跑。宽松裁剪，正常大小完全不受影响。
+                        val budget = ToolResultBudget.budgetChars(
+                            AppSettings.effectiveCtx(AppSettings.selectedModelPath)
+                        )
+                        val fitted = ToolResultBudget.trim(result, budget)
+                        if (fitted.truncated) {
+                            ServerProcessManager.appLog(
+                                "工具结果过大（${fitted.originalChars} 字符），回传模型时压到 " +
+                                        "${fitted.text.length} 字符（预算 $budget）"
+                            )
+                        }
+                        newMsgs.add(ChatClient.ChatMessage("tool", fitted.text, toolCallId = tc.id))
                     }
                     apiMsgs = newMsgs
                 }
@@ -2242,6 +2255,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         e.message?.contains("Failed to parse tool call arguments as JSON") == true ->
             "模型把工具调用的参数写成了不合法的 JSON（通常是陷入复读），这一轮已中断。" +
                     "再发一次、或点「继续这个任务」分段重试通常就好了。"
+        // 上下文被工具返回值撑爆：本地引擎会直接 400，这一轮连结果都拿不回来。
+        // 原文只有一行 JSON，用户看不出该做什么，这里把该做的两步说清楚。
+        e.message?.contains("exceeds the available context size") == true -> {
+            val nums = Regex("\"n_prompt_tokens\":\\s*(\\d+)|\\\"n_ctx\\\":\\s*(\\d+)")
+                .findAll(e.message ?: "").mapNotNull { it.groupValues.drop(1).firstOrNull { v -> v.isNotEmpty() } }
+                .toList()
+            val used = nums.getOrNull(0)?.toLongOrNull()
+            val cap = nums.getOrNull(1)?.toLongOrNull()
+            "上下文被撑满了" + (if (used != null && cap != null) "：这次请求 $used token，窗口只有 $cap" else "") +
+                    "。多数情况是某次工具调用一次读回了太大的内容——让它分小段读（指定行数/范围），" +
+                    "或点输入框上方的「压缩上下文」把历史压一压再重试。"
+        }
         // 兜底分支可能是几十 KB 的原始响应体，必须截断（原因见 MAX_ERROR_CHARS）
         else -> (e.message ?: "请求失败").let {
             if (it.length <= MAX_ERROR_CHARS) it else it.take(MAX_ERROR_CHARS) + "…（完整内容见日志）"
