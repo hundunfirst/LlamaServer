@@ -12,8 +12,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -97,6 +99,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -2097,60 +2100,91 @@ private fun MessageBubble(
     }
 }
 
+/** 估算单元格宽度用：中日韩字符按 2 个单位，其余按 1 */
+private fun cellUnits(s: String): Int = s.sumOf { if (it.code > 0x2E7F) 2 else 1 }
+
+private val TABLE_MIN_COL = 60.dp
+private val TABLE_MAX_COL = 240.dp
+
 /**
- * Markdown 表格：按列解析后用等权重行列渲染。
- * 列宽按各列最长内容分配权重（下限 4、上限 40 字符），窄屏自动换行但列始终对齐。
+ * 表格：列宽按内容估算，**放不下就整表横向滑动**。
+ * 以前固定 `fillMaxWidth` + 按内容比例分配权重，列一多每格被压成一条缝，
+ * 最右边的列直接被裁掉，而且没有任何滑动入口——用户看不到也点不开。
  */
 @Composable
 private fun MarkdownTable(rows: List<List<String>>, modifier: Modifier = Modifier) {
     if (rows.isEmpty()) return
     val cols = rows.maxOf { it.size }
-    val weights = remember(rows) {
+    val minWidths = remember(rows) {
         (0 until cols).map { c ->
-            rows.maxOf { r -> r.getOrElse(c) { "" }.length }
-                .coerceIn(4, 40)
-                .toFloat()
+            val units = rows.maxOf { r -> cellUnits(r.getOrElse(c) { "" }) }
+            (units.coerceIn(4, 22) * 11).dp.coerceIn(TABLE_MIN_COL, TABLE_MAX_COL)
         }
     }
-    val total = weights.sum().coerceAtLeast(1f)
     val border = MaterialTheme.colorScheme.outlineVariant
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .border(0.5.dp, border, RoundedCornerShape(8.dp))
-    ) {
-        rows.forEachIndexed { ri, row ->
-            if (ri > 0) {
-                HorizontalDivider(thickness = 0.5.dp, color = border)
-            }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(
-                        when {
-                            ri == 0 -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
-                            ri % 2 == 0 -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-                            else -> androidx.compose.ui.graphics.Color.Transparent
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        val minTotal = minWidths.fold(0.dp) { acc, w -> acc + w }
+        // 放得下：按比例撑满屏宽（小表格看起来更整齐）；放不下：保留下限，横向滚动
+        val widths = if (minTotal <= maxWidth) {
+            val k = maxWidth / minTotal
+            minWidths.map { it * k }
+        } else minWidths
+        val tableWidth = widths.fold(0.dp) { acc, w -> acc + w }
+        val scrollable = minTotal > maxWidth
+        // 用 Column 竖排「表格 + 提示」：提示不能覆盖在表格上，否则正好压住右上/右下那部分内容
+        Column(Modifier.fillMaxWidth()) {
+            Box(Modifier.horizontalScroll(rememberScrollState())) {
+                Column(
+                    modifier = Modifier
+                        .width(tableWidth)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surface)
+                        .border(0.5.dp, border, RoundedCornerShape(8.dp))
+                ) {
+                    rows.forEachIndexed { ri, row ->
+                        if (ri > 0) {
+                            HorizontalDivider(thickness = 0.5.dp, color = border)
                         }
-                    )
-            ) {
-                repeat(cols) { ci ->
-                    val cell = row.getOrElse(ci) { "" }
-                    Text(
-                        inlineMd(cell),
-                        style = if (ri == 0) MaterialTheme.typography.labelMedium
-                        else MaterialTheme.typography.bodySmall,
-                        fontWeight = if (ri == 0) FontWeight.Bold else FontWeight.Normal,
-                        // 短内容（数字/状态）不折行，避免 0.00 被拆成两行
-                        maxLines = if (cell.length <= 8) 1 else 3,
-                        softWrap = cell.length > 8,
-                        modifier = Modifier
-                            .weight(weights[ci] / total)
-                            .padding(horizontal = 6.dp, vertical = 5.dp)
-                    )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    when {
+                                        ri == 0 -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                                        ri % 2 == 0 -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                                        else -> androidx.compose.ui.graphics.Color.Transparent
+                                    }
+                                )
+                        ) {
+                            repeat(cols) { ci ->
+                                val cell = row.getOrElse(ci) { "" }
+                                Text(
+                                    inlineMd(cell),
+                                    style = if (ri == 0) MaterialTheme.typography.labelMedium
+                                    else MaterialTheme.typography.bodySmall,
+                                    fontWeight = if (ri == 0) FontWeight.Bold else FontWeight.Normal,
+                                    // 短内容（数字/状态）不折行，避免 0.00 被拆成两行；长内容给足行数，不再截断
+                                    maxLines = if (cell.length <= 8) 1 else 6,
+                                    softWrap = cell.length > 8,
+                                    overflow = TextOverflow.Clip,
+                                    modifier = Modifier
+                                        .width(widths[ci])
+                                        .padding(horizontal = 6.dp, vertical = 5.dp)
+                                )
+                            }
+                        }
+                    }
                 }
+            }
+            if (scrollable) {
+                Text(
+                    "← 左右滑动看完整表格 →",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .align(Alignment.End)
+                        .padding(top = 2.dp)
+                )
             }
         }
     }
