@@ -10,6 +10,7 @@ import com.localllm.server.core.DocExtract
 import com.localllm.server.core.DocMaker
 import com.localllm.server.core.FileTools
 import com.localllm.server.core.GgufInspector
+import com.localllm.server.core.McpArgRepair
 import com.localllm.server.core.McpHttpClient
 import com.localllm.server.core.MemoryStore
 import com.localllm.server.core.OcrIntent
@@ -38,6 +39,13 @@ import kotlinx.coroutines.launch
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private var store = ChatStore.load(app)
+
+    /**
+     * 每台 MCP 服务器上一次 open 成功返回的工作区 id（url → workspaceId）。
+     * 模型手里的 id 会漂移（把路径当 id、或拿旧 id），这里留一份服务端自己给过的，
+     * 出错时用来改参数重试（见 [McpArgRepair]）。
+     */
+    private val mcpWorkspaceIds = mutableMapOf<String, String>()
 
     private val _sessions = MutableStateFlow(store.sessions)
     val sessions: StateFlow<List<ChatStore.Session>> = _sessions.asStateFlow()
@@ -1350,10 +1358,39 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                             "要么按上面的原因改参数，要么改用其他工具，或者直接回答。"
                                 } else {
                                     ServerProcessManager.appLog("MCP 调用：${tc.name}")
-                                    runCatching { McpHttpClient.callTool(route.first, null, route.second, args) }
-                                        .fold(
+                                    var firstTry =
+                                        runCatching { McpHttpClient.callTool(route.first, null, route.second, args) }
+                                    // 上下文类错误（workspaceId 传错 / 编辑会话过期）先自己改参数重试一次：
+                                    // 这两类改完就能成，不值得再耗一整轮让模型猜（真机上它连撞四次都没猜对）
+                                    val repair = firstTry.exceptionOrNull()?.let { e ->
+                                        (e as? McpHttpClient.McpException)?.toolError?.let {
+                                            McpArgRepair.repair(it, args, mcpWorkspaceIds[route.first])
+                                        }
+                                    }
+                                    if (repair != null) {
+                                        ServerProcessManager.appLog("MCP：${repair.note}")
+                                        val retried = runCatching {
+                                            McpHttpClient.callTool(route.first, null, route.second, repair.args)
+                                        }
+                                        if (retried.isSuccess) {
+                                            steps.add(
+                                                ChatStore.Step(
+                                                    "tool", "自动修正参数后重试：${tc.name}",
+                                                    repair.note,
+                                                    args = repair.args.toString().take(600),
+                                                    ok = true
+                                                )
+                                            )
+                                            syncSteps()
+                                        }
+                                        firstTry = retried
+                                    }
+                                    firstTry.fold(
                                             onSuccess = { r ->
                                                 mcpFailures.remove(tc.name)
+                                                McpArgRepair.rememberedWorkspaceId(r)?.let {
+                                                    mcpWorkspaceIds[route.first] = it
+                                                }
                                                 steps.add(
                                                     ChatStore.Step(
                                                         "tool", "调用工具：${tc.name}",
