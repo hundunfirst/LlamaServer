@@ -105,6 +105,47 @@ class ToolLoopPolicyTest {
     }
 
     @Test
+    fun `markdown 加粗的步骤标题也算宣告`() {
+        // 真机现场 2026-10-25：第 4 轮删完 ad_charge_ring.json 后只写了这一行就停，
+        // 去掉 `**` 后末尾是「内容」不是冒号，早期判据漏判
+        assertTrue(
+            ToolLoopPolicy.stalledWithoutActing(
+                false, "### **第一步：列出当前工作空间内容**", false, 0
+            )
+        )
+        assertTrue(
+            ToolLoopPolicy.stalledWithoutActing(
+                false,
+                "## 🚀 番茄小说去广告改造进行中（续）\n\n服务已恢复！现在开始继续完成剩余的去广告任务：\n\n" +
+                        "### **第一步：列出当前工作空间内容**",
+                false,
+                0
+            )
+        )
+        assertTrue(ToolLoopPolicy.stalledWithoutActing(false, "**第二步：清理 Manifest**", false, 0))
+    }
+
+    @Test
+    fun `结尾在向用户提问时不催`() {
+        // 真机现场：模型问「是否需要我立即尝试重新连接服务？」——这就是正常收尾，
+        // 催了会答非所问（问号还被 markdown 加粗包着）
+        assertFalse(
+            ToolLoopPolicy.stalledWithoutActing(
+                false, "是否要我继续？\n\n**是否需要我立即尝试重新连接服务？**", false, 0
+            )
+        )
+        assertFalse(ToolLoopPolicy.stalledWithoutActing(false, "要不要接着删广告?", false, 0))
+    }
+
+    @Test
+    fun `长篇正文里出现步骤词不催`() {
+        // 给用户的操作手册常含「第一步」，但它超过宣告的长度，是正文
+        val guide = "手动去广告步骤如下。" + "在解压目录里逐个核对资源表，确认没有被引用后再删除。".repeat(14) +
+                "第一步：删除 assets/ad_charge_ring.json。"
+        assertFalse(ToolLoopPolicy.stalledWithoutActing(false, guide, false, 0))
+    }
+
+    @Test
     fun `催到上限就收尾`() {
         val text = "现在执行删除操作："
         assertTrue(ToolLoopPolicy.stalledWithoutActing(false, text, false, 1))

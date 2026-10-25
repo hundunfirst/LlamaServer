@@ -61,6 +61,14 @@ object McpHttpClient {
 
     private const val CONNECT_TIMEOUT_MS = 8_000
     private const val READ_TIMEOUT_MS = 20_000
+
+    /**
+     * 工具调用的读超时。20 秒对握手/列工具够用，但对真干活的工具不够：
+     * 真机上 `mt_apk_build`（重新打包 144 MB 的 APK）和 `mt_apk_search`
+     * （23079 个 zip 条目、31 万个类的 dex 名字搜索）都在 20 秒处被掐断，
+     * 任务做到最后一步「打包成 APK」必然失败。给足 3 分钟。
+     */
+    private const val TOOL_READ_TIMEOUT_MS = 180_000
     private const val RETRY_DELAY_MS = 500L
     private const val TOOL_HINT =
         "这是工具自己报的错，换一组参数可能就能成功；同一个工具连续两次失败就不要再试了。"
@@ -115,7 +123,7 @@ object McpHttpClient {
     /** 调用一个工具，返回结果文本（content[].text 拼接）。错误抛 [McpException]。 */
     suspend fun callTool(url: String, token: String?, name: String, arguments: JSONObject): String =
         withContext(Dispatchers.IO) {
-            val resp = guarded {
+            val resp = guarded(TOOL_READ_TIMEOUT_MS) {
                 withTransientRetry {
                     withRetry(url, token) {
                         rpc(
@@ -125,7 +133,9 @@ object McpHttpClient {
                                 .put("jsonrpc", "2.0")
                                 .put("id", rpcId.getAndIncrement())
                                 .put("method", "tools/call")
-                                .put("params", JSONObject().put("name", name).put("arguments", arguments))
+                                .put("params", JSONObject().put("name", name).put("arguments", arguments)),
+                            // 工具真干活（打包 APK、扫 dex）用长超时，握手和列表仍按 20 秒
+                            readTimeoutMs = TOOL_READ_TIMEOUT_MS
                         )
                     }
                 }
@@ -194,11 +204,11 @@ object McpHttpClient {
         return "工具「$name」调用失败（${f.kind.label}）：${f.detail}\n→ $advice"
     }
 
-    /** 异常 → 归因。纯函数，便于单测。 */
-    internal fun classify(e: Throwable): McpException = when (e) {
+    /** 异常 → 归因。纯函数，便于单测。[readTimeoutMs] 只影响超时文案，让日志说清实际等了几秒 */
+    internal fun classify(e: Throwable, readTimeoutMs: Int = READ_TIMEOUT_MS): McpException = when (e) {
         is McpException -> e
         is java.net.SocketTimeoutException ->
-            McpException(FailureKind.TIMEOUT, "读取超时（${READ_TIMEOUT_MS / 1000}s）", retryable = true)
+            McpException(FailureKind.TIMEOUT, "读取超时（${readTimeoutMs / 1000}s）", retryable = true)
         is java.net.ConnectException ->
             McpException(FailureKind.UNREACHABLE, "连接被拒绝，服务可能没启动")
         is java.net.UnknownHostException ->
@@ -213,13 +223,13 @@ object McpHttpClient {
     }
 
     /** 把这一层所有异常收成 [McpException]，调用方不用再猜异常类型 */
-    private fun <T> guarded(block: () -> T): T =
+    private fun <T> guarded(readTimeoutMs: Int = READ_TIMEOUT_MS, block: () -> T): T =
         try {
             block()
         } catch (e: McpException) {
             throw e
         } catch (e: Exception) {
-            throw classify(e)
+            throw classify(e, readTimeoutMs)
         }
 
     /** 瞬时故障（超时 / 5xx / 空响应）自动重试一次；连不上不重试——服务没起来，再等 8 秒也没用 */
@@ -336,9 +346,14 @@ object McpHttpClient {
     @Volatile
     private var lastSessionId: String? = null
 
-    private fun rpc(url: String, token: String?, body: JSONObject): JSONObject {
+    private fun rpc(
+        url: String,
+        token: String?,
+        body: JSONObject,
+        readTimeoutMs: Int = READ_TIMEOUT_MS
+    ): JSONObject {
         val sess = sessions[url.trim()]
-        return postRpc(url, token, sess?.sessionId, body, proto = sess?.proto)
+        return postRpc(url, token, sess?.sessionId, body, proto = sess?.proto, readTimeoutMs = readTimeoutMs)
             ?: throw McpException(FailureKind.PROTOCOL, "空响应", retryable = true)
     }
 
@@ -348,13 +363,14 @@ object McpHttpClient {
         sessionId: String?,
         body: JSONObject,
         allowEmpty: Boolean = false,
-        proto: String? = null
+        proto: String? = null,
+        readTimeoutMs: Int = READ_TIMEOUT_MS
     ): JSONObject? {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
         conn.connectTimeout = CONNECT_TIMEOUT_MS
-        conn.readTimeout = READ_TIMEOUT_MS
+        conn.readTimeout = readTimeoutMs
         conn.setRequestProperty("Content-Type", "application/json")
         conn.setRequestProperty("Accept", "application/json, text/event-stream")
         if (!token.isNullOrBlank()) {
