@@ -28,8 +28,8 @@ object DocExtract {
     data class Result(val kind: String, val text: String, val note: String? = null)
 
     private const val MAX_CHARS = 400_000
-    private const val MAX_XLSX_ROWS = 300
-    private const val MAX_XLSX_COLS = 60
+    private const val MAX_XLSX_ROWS = 2000
+    private const val MAX_XLSX_COLS = 100
     private const val MAX_PDF_PAGES = 300
 
     private const val OLE_HINT = "这是 Word 97-2003 / Excel 97-2003 的旧二进制格式，本地没有解析器：" +

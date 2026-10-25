@@ -160,6 +160,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val MAX_TOOLS_FULL = 24
 
     /**
+     * 清单更新次数的**跑飞护栏**（不是步数上限）：十步的任务光打勾就要二十来次更新，
+     * 所以这个值必须远高于真实任务的用量；它只在模型只刷清单、别的不干时兜底。
+     * （曾经是 3，撞上就拒绝更新，长任务的清单于是停在半路。）
+     */
+    private val TODO_UPDATE_GUARD = 20
+
+    /** 纯文本附件的内存上限（不是上下文上限：装不装得下由后面的预算截断决定） */
+    private val PLAIN_ATTACH_MAX_BYTES = 32 * 1024 * 1024
+
+    /**
      * 错误提示的显示长度上限。引擎会把整段工具调用参数回显进 500 响应（实测到 30 KB+），
      * 而这条文案是直接铺在聊天页上的 Text——超长文本会把 Compose 的文本测量拖死，
      * 整个界面点不动、连新会话都切不过去，只能杀进程恢复。完整内容仍然写进日志。
@@ -318,8 +328,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     "（${doc.kind.uppercase()} 已抽取文本）\n" + doc.text +
                             (doc.note?.let { "\n[$it]" } ?: "")
                 } else {
-                    if (bytes.size > 256 * 1024) {
-                        _error.value = "文本文件超过 256KB，请精简后再试"
+                    // 纯文本只挡「读进内存会出事」的体量；至于太大装不进上下文，后面有按预算的截断
+                    // （原来是 256KB 直接拒绝，比实际需要的严格得多，几十万字的日志/代码就发不进来）
+                    if (bytes.size > PLAIN_ATTACH_MAX_BYTES) {
+                        _error.value = "文本文件超过 ${PLAIN_ATTACH_MAX_BYTES / 1024 / 1024}MB，请分段发送"
                         return@launch
                     }
                     String(bytes, Charsets.UTF_8)
@@ -968,30 +980,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     )
 
-                    // 工具调用过滤（实测：弱模型答完会幻觉/再发 tool_call 引发假的第二轮）：
-                    // ① 本轮正文已成形（≥60字）→ 答后调用多半是幻觉，忽略；但清单没做完、或正文
-                    //    写的是「接下来…」这类进度说明时，这条调用是真正的下一步，必须执行
-                    //    （历史 bug：卡在这里把 mt_apk_delete_target 丢掉，任务正文写完就结束、清单停在 1/5）；
-                    // ② 只执行真实注入过的工具名，幻觉工具直接忽略。
+                    // 工具调用过滤：**只按「这个工具本轮是否真的注入过」判**。
+                    //
+                    // 以前还有一条「正文 ≥60 字且不像进度说明 → 答后调用当幻觉丢掉」，初衷是挡
+                    // 弱模型答完再补一次假调用；实际代价更大：真机上模型写完一句
+                    // 「让我重新从 CSV 文件里准确提取…生成正确的 Excel 文件。」（句号结尾）后跟了一个
+                    // file_read，被判成幻觉丢掉，那正是当时唯一该做的动作，整轮就停在那句上。
+                    // 判断「模型是不是已经答完了」这件事不该由启发式猜：调用了就执行，
+                    // 真跑错由工具结果自己说话（错误会回传给模型）。
                     val unfinishedTodos = _messages.value.lastOrNull()?.todos
                         ?.any { it.status != "completed" } == true
-                    val keepTrailing = ToolLoopPolicy.keepTrailingCalls(unfinishedTodos, roundText.toString())
-                    val validCalls = when {
-                        roundChars >= 60 && toolCalls.isNotEmpty() && !keepTrailing -> {
-                            ServerProcessManager.appLog(
-                                "正文已完整（$roundChars 字）且没在推进中，忽略答后工具调用：" +
-                                        toolCalls.joinToString { it.name } + "，本轮结束"
-                            )
-                            emptyList()
+                    val validCalls = run {
+                        val ok = toolCalls.filter { it.name in injectedNames }
+                        val ignored = toolCalls.map { it.name }.toSet() - ok.map { it.name }.toSet()
+                        if (ignored.isNotEmpty()) {
+                            ServerProcessManager.appLog("忽略未注入的工具调用：${ignored.joinToString("、")}")
                         }
-                        else -> {
-                            val ok = toolCalls.filter { it.name in injectedNames }
-                            val ignored = toolCalls.map { it.name }.toSet() - ok.map { it.name }.toSet()
-                            if (ignored.isNotEmpty()) {
-                                ServerProcessManager.appLog("忽略未注入的工具调用：${ignored.joinToString("、")}")
-                            }
-                            ok
-                        }
+                        ok
                     }
 
                     if (validCalls.isEmpty()) {
@@ -1125,8 +1130,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         val result = runCatching {
                             if (tc.name == TodoTool.NAME) {
                                 todoCalls++
-                                if (todoCalls > 3) {
-                                    "任务清单更新已达上限（3 次）。请立即在正文中给出用户要的实际内容（代码/文件），不要再更新清单。"
+                                if (todoCalls > TODO_UPDATE_GUARD) {
+                                    "清单已经更新了 $todoCalls 次，别再刷清单了：请在正文里给出用户要的实际内容（代码/文件）。"
                                 } else {
                                     val todos = TodoTool.parse(tc.arguments.ifBlank { "{}" })
                                     if (todos.isEmpty()) {

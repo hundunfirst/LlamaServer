@@ -21,16 +21,17 @@ object FileTools {
 
     val NAMES = setOf(TOOL_LIST, TOOL_READ, TOOL_WRITE, TOOL_PATCH, TOOL_GREP)
 
-    private const val MAX_READ_BYTES = 200 * 1024
+    /** 纯文本单次读入上限。配合 offset/limit 分页，读大日志不必先切文件 */
+    private const val MAX_READ_BYTES = 8 * 1024 * 1024
 
     /** 文档要整份读进来才能抽取（一个 5 MB 的 xlsx 很常见），上限单独放宽 */
     private const val MAX_DOC_BYTES = 40 * 1024 * 1024
     private const val DEFAULT_READ_CHARS = 20_000
     private const val MAX_READ_CHARS = 200_000
     private const val MAX_WRITE_CHARS = 400_000
-    private const val MAX_LIST_ENTRIES = 200
+    private const val MAX_LIST_ENTRIES = 500
     private const val MAX_GREP_FILES = 60
-    private const val MAX_GREP_HITS = 40
+    private const val MAX_GREP_HITS = 100
 
     // ---------------- 工具定义 ----------------
     fun toolsJson(): JSONArray {

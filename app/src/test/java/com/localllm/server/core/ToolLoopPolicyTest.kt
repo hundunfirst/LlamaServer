@@ -36,31 +36,9 @@ class ToolLoopPolicyTest {
         assertFalse(ToolLoopPolicy.noProgress(null, null))
     }
 
-    @Test
-    fun `清单没做完时答后调用要执行`() {
-        // 真机现场：正文 169 字 + mt_apk_delete_target 被丢，任务正文写完就结束、清单停在 1/5
-        assertTrue(ToolLoopPolicy.keepTrailingCalls(true, "已经打开工作区并读取了清单，接下来处理广告。"))
-    }
-
-    @Test
-    fun `正文是进度说明时答后调用要执行`() {
-        assertTrue(ToolLoopPolicy.keepTrailingCalls(false, "接下来我会删除广告相关文件："))
-        assertTrue(ToolLoopPolicy.keepTrailingCalls(false, "现在读取 AndroidManifest.xml"))
-        assertTrue(ToolLoopPolicy.keepTrailingCalls(false, "先看一下结构…"))
-    }
-
-    @Test
-    fun `正文是结论时答后调用按幻觉丢掉`() {
-        assertFalse(ToolLoopPolicy.keepTrailingCalls(false, "全部完成，已生成 3 个文件，共 320 行。"))
-        assertFalse(ToolLoopPolicy.keepTrailingCalls(false, "没有找到广告配置，这个 APK 可能是干净的。"))
-    }
-
-    @Test
-    fun `进度词只认结尾一段`() {
-        // 正文中间顺口提到「接下来」，但结尾是明确结论 —— 不该被当成进度说明
-        val long = "接下来我们看广告配置。" + "配置文件里没有相关字段。".repeat(12) + "结论：此包无广告。"
-        assertFalse(ToolLoopPolicy.looksLikeProgressNote(long))
-    }
+    // 「答后调用当幻觉丢掉」这条规则已删除（2026-10-25 用户决定）：
+    // 真机上它把一句「让我重新从 CSV 里准确提取…生成正确的 Excel 文件。」之后的 file_read 丢掉了，
+    // 而那正是当时唯一该做的动作。现在只按「工具本轮是否注入过」过滤，不再猜模型有没有答完。
 
     @Test
     fun `只宣告下一步且零工具调用时要催办`() {
