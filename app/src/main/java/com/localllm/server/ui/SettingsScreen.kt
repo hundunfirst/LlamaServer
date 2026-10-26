@@ -697,17 +697,62 @@ fun SettingsScreen(
             options = listOf("" to "f16(默认)", "q8_0" to "q8_0", "q4_0" to "q4_0", "q4_1" to "q4_1"),
             current = settings.cacheTypeV
         ) { v -> vm.updateSettings { it.copy(cacheTypeV = v) } }
-        CompactField(
-            value = settings.specType,
-            onValueChange = { v -> vm.updateSettings { it.copy(specType = v) } },
-            label = "投机解码（none / ngram-simple / draft-mtp）。draft-mtp 需模型自带 nextn 层：" +
-                    "CPU 上实测更慢，Hexagon NPU 上实测快约 8%",
-            modifier = Modifier.fillMaxWidth()
+        // 投机解码：可编辑输入 + 下拉候选。候选取自引擎 `--spec-type` 的取值列表，
+        // 只列「单机单模型下真能用」的几档——需要额外草稿模型的（draft-simple / eagle3 /
+        // dflash / dspark）本 App 没有侧车模型管理，摆出来只会让人以为能用；真要用仍可手打。
+        var specExpanded by remember { mutableStateOf(false) }
+        val specOptions = listOf(
+            "none" to "关闭",
+            "draft-mtp" to "模型自带 nextn 层（NPU 上实测快约 8%，CPU 上更慢）",
+            "ngram-simple" to "上下文 n-gram，不需要额外模型",
+            "ngram-map-k" to "n-gram，哈希表版，适合重复度高的输出",
+            "ngram-mod" to "n-gram，长匹配版",
+            "ngram-cache" to "复用历史输出里的重复片段"
         )
-        QuickChips(
-            options = listOf("none" to "关闭", "ngram-simple" to "ngram"),
-            current = settings.specType
-        ) { v -> vm.updateSettings { it.copy(specType = v) } }
+        androidx.compose.material3.ExposedDropdownMenuBox(
+            expanded = specExpanded,
+            onExpandedChange = { specExpanded = it }
+        ) {
+            CompactField(
+                value = settings.specType,
+                onValueChange = { v -> vm.updateSettings { it.copy(specType = v) } },
+                label = "投机解码（点箭头选，或直接改文字；组合多档用逗号分隔）",
+                trailing = {
+                    Icon(
+                        androidx.compose.material.icons.Icons.Default.ArrowDropDown,
+                        contentDescription = "展开候选",
+                        modifier = Modifier.size(26.dp),
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                },
+                modifier = Modifier
+                    .menuAnchor(androidx.compose.material3.MenuAnchorType.PrimaryEditable)
+                    .fillMaxWidth()
+            )
+            ExposedDropdownMenu(
+                expanded = specExpanded,
+                onDismissRequest = { specExpanded = false }
+            ) {
+                specOptions.forEach { (value, desc) ->
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text(value, style = MaterialTheme.typography.bodySmall)
+                                Text(
+                                    desc,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        },
+                        onClick = {
+                            vm.updateSettings { it.copy(specType = value) }
+                            specExpanded = false
+                        }
+                    )
+                }
+            }
+        }
         CompactField(
             value = settings.faMode,
             onValueChange = { v -> vm.updateSettings { it.copy(faMode = v) } },
