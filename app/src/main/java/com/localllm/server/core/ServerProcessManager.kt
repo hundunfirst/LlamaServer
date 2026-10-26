@@ -429,11 +429,14 @@ object ServerProcessManager {
                 return
             }
 
-            // 投机解码：模型自带 MTP 层（nextn）时默认**不用**——本机实测带它反而慢 25%
-            // （批量验证在这台 CPU 上几乎不省时间，见 docs/TROUBLESHOOTING #25d）。
+            // 投机解码：模型自带 MTP 层（nextn）时**默认不用**。
+            // 依据分引擎：CPU 上实测带它慢 25%（批量验证在 CPU 上几乎不省时间，
+            // 见 docs/TROUBLESHOOTING #25d）；而 Hexagon NPU 上实测反过来快约 8%
+            // （Qwen3.8-2B-Q6_K / htp / ngl 99：MTP 开 31.4–32.2 tok/s，关 29.3–29.7，14 个样本）。
+            // 默认没跟着改成「NPU 自动开」，是因为要区分「用户选了 none」和「从没设置过」，
+            // 得先动 specType 的语义（加一个 auto 档），单独做。
             // 想强开就在设置里填 draft-mtp：只有模型真带 nextn 层时才生效，否则自动忽略；
             // 万一引擎拒绝，下面还有一次去掉参数的自动重试，加载不会中断。
-            // draft-mtp 在 cpu / opencl / prism 三套引擎里都支持，所以这里不按引擎分支。
             val hasMtp = try {
                 GgufInspector.hasMtpHead(File(modelPath))
             } catch (e: Exception) {
@@ -446,7 +449,10 @@ object ServerProcessManager {
                 else -> specType
             }
             if (hasMtp && specEffective != "draft-mtp") {
-                appendLog("检测到 MTP 层（nextn）：当前引擎带它更慢，已跳过（想强开可在设置里填 draft-mtp）")
+                appendLog(
+                    if (npu) "检测到 MTP 层（nextn）：NPU 上实测更快，想用请在设置里填 draft-mtp"
+                    else "检测到 MTP 层（nextn）：当前引擎带它更慢，已跳过（想强开可在设置里填 draft-mtp）"
+                )
             } else if (specEffective == "draft-mtp") {
                 appendLog("投机解码：draft-mtp（模型自带 nextn 层）")
             }

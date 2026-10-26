@@ -209,7 +209,10 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
 - **验证**：造了一个 156 字节的最小 GGUF（arch=clip）放进模型目录，模型页正确标红、
   启动被拦截（用户真机确认）。
 
-### #25d 模型自带 MTP 层：能跑，但在这台机器上是负收益（2026-10-18 实测）
+### #25d 模型自带 MTP 层：CPU 上是负收益，Hexagon NPU 上反过来是正收益
+
+> 标题原为「在这台机器上是负收益（2026-10-18）」。2026-10-25 补的 NPU 对照推翻了「一律更慢」这个说法，
+> 见下面的「NPU 复测」。结论按引擎分开：**CPU / OpenCL 关掉，Hexagon NPU 开着**。
 
 - **判据（别信文件名）**：KV 元数据里 `<arch>.nextn_predict_layers > 0` 就说明模型自带 MTP 头，
   llama.cpp 建 MTP 上下文时只看这个。`Ternary-Bonsai-2-4B-PQ2_0-MTP-Q8_0.gguf` 是
@@ -234,12 +237,30 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
   草稿接受率 0.63–0.90、平均猜中 1.9–3.3 个 token，**问题不在 MTP 头**。
 - **根因**：这台机器的批量前向几乎不省时间——prefill 只有 23 tok/s，而单 token 解码 12.5 tok/s，
   即"验证 4 个候选"≈"顺序跑 3.2 个 token"的成本，投机的前提（验证比顺序便宜）不成立。
-  n-max 越大越亏（0.95 → 0.74 → 0.52）正是这条的推论。等引擎的 batch 路径变快后，
-  把 `ServerProcessManager` 里那句默认跳过改回默认启用即可，用户无感。
+  n-max 越大越亏（0.95 → 0.74 → 0.52）正是这条的推论。
 - **三元包上还有一个前提**：`PQ2_0`（type 142）只有 prism 能解，上游 opencl 引擎直接
   `invalid ggml type 142`，所以 GPU 路径对这个模型没有 MTP 可谈。
-- **复跑方式**：`scripts/dev/mtp_bench.py --configs "none;draft-mtp:1;draft-mtp:3" --runs 4`
-  （直接起 llama-server、交替配置顺序、每轮重启服务，把热衰减从差值里扣掉；日志里抓接受率）。
+- **NPU 复测（2026-10-25，推翻了「一律更慢」）**：同一模型同一参数，只切 `--spec-type`：
+
+  | 配置（2B Q6_K / htp / `-ngl 99 --device HTP0` / ctx 16384 / `-t 6`） | decode 中位 | 样本 |
+  |---|---|---|
+  | `--spec-type draft-mtp`（会话 1） | 31.43 tok/s | 31.29 / 27.45 / 31.57 / 33.85 / 28.20 / 35.04 |
+  | `--spec-type draft-mtp`（会话 2） | 32.15 tok/s | 29.83 / 32.15 / 30.38 / 32.16 / 29.18 / 33.13 / 33.46 / 35.04 |
+  | 不带 `--spec-type`（会话 1） | 29.70 tok/s | 30.09 / 29.75 / 29.54 / 29.68 / 29.71 / 29.55 |
+  | 不带 `--spec-type`（会话 2） | 29.33 tok/s | 29.27–29.62 |
+
+  **约 +8%（MTP 开），且关掉那一侧稳到 ±1%**，跨会话不漂。CPU 那次的 −25% 没有复现。
+  机理推测（未验证）：NPU 上单 token 解码受带宽/延迟支配，把「一次验证多个候选」交给 DSP 反而摊薄了固定开销；
+  而 CPU 上前向本身便宜，批量验证省不下时间。
+  **别跨引擎比 tok/s**：这里是 2B Q6_K，CPU 那组是 4B PQ2_0/Q5_K_XL，绝对数字不可比，只有同配置内的比值有意义。
+- **NPU 上怎么复跑**：`mtp_bench.py` 走 `run-as` 直起引擎，**htp 在这条路上起不来**——
+  日志首行 `FastRPC capability query failed (err 114)`，查不到 DSP 版本就退回加载 `libggml-htp-v73.so`，
+  在 v81 的 DSP 上 `failed to open session (0x72)`。App 自己的进程里同一个引擎正常，
+  差别在进程上下文不在环境变量。所以 NPU 只能借 App 的服务测：
+  `scripts/dev/mtp_ab_app.py --label mtp-on --runs 3`（先 `wait_ready.py` 等服务就绪），
+  换配置靠改设置 + 重启服务，两组结果用 `--compare mtp-on mtp-off` 对比。
+- **仍缺的一项**：这轮的 `timings` 里没有 draft 字段、日志也不打接受率，所以 NPU 上的
+  草稿接受率没拿到（CPU 那次是 0.63–0.90）。要看它得给引擎加更详细的 verbosity。
 
 ### #25e 三元包能挂 LoRA 适配器（实测，2026-10-18）
 

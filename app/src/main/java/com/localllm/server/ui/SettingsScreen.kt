@@ -700,7 +700,8 @@ fun SettingsScreen(
         CompactField(
             value = settings.specType,
             onValueChange = { v -> vm.updateSettings { it.copy(specType = v) } },
-            label = "投机解码（none / ngram-simple / draft-mtp；draft-mtp 需模型自带 nextn 层，本机实测更慢）",
+            label = "投机解码（none / ngram-simple / draft-mtp）。draft-mtp 需模型自带 nextn 层：" +
+                    "CPU 上实测更慢，Hexagon NPU 上实测快约 8%",
             modifier = Modifier.fillMaxWidth()
         )
         QuickChips(
