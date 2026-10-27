@@ -153,6 +153,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val _pendingImageB64 = MutableStateFlow<String?>(null)
     /** 原图 base64（仅用于 OCR，不传模型、不落盘） */
     private val _pendingImageFullB64 = MutableStateFlow<String?>(null)
+
+    /** 附件时用原图跑一次的本地 OCR 结果；随消息落盘，后续追问也能核对数字 */
+    private val _pendingOcrText = MutableStateFlow<String?>(null)
     val pendingImageB64: StateFlow<String?> = _pendingImageB64.asStateFlow()
 
     private var streamJob: Job? = null
@@ -271,8 +274,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 runCatching {
                     val fullBytes = resolver.openInputStream(uri)?.use { it.readBytes() }
                     if (fullBytes != null && fullBytes.size <= 8 * 1024 * 1024) {
-                        _pendingImageFullB64.value =
-                            android.util.Base64.encodeToString(fullBytes, android.util.Base64.NO_WRAP)
+                        val fullB64 = android.util.Base64.encodeToString(fullBytes, android.util.Base64.NO_WRAP)
+                        _pendingImageFullB64.value = fullB64
+                        // 附件时就跑一次本地 OCR：视觉模型读数字会错、读不清会编，
+                        // 逐字原文跟图一起给模型核对（版面仍以图为准）。
+                        // 图里字太少（照片/插图）就不附带，免得白占上下文。
+                        val text = runCatching { OcrTool.recognize(fullB64) }.getOrNull()
+                        _pendingOcrText.value = text
+                        if (OcrTool.promptBlock(text) != null) {
+                            ServerProcessManager.appLog(
+                                "图片：本地 OCR 预识别 ${text!!.length} 字，将与图一起送给模型"
+                            )
+                        }
                     }
                 }
             }.onFailure {
@@ -284,6 +297,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun clearPendingImage() {
         _pendingImageB64.value = null
         _pendingImageFullB64.value = null
+        _pendingOcrText.value = null
     }
 
     // ---- 文本类附件（文档/代码等）：读成文本随消息一起发送 ----
@@ -358,6 +372,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _pendingFile.value = null
         ocrSourceB64 = _pendingImageFullB64.value
         _pendingImageFullB64.value = null
+        val ocrText = _pendingOcrText.value
+        _pendingOcrText.value = null
         val content = if (file != null) {
             // 附件按上下文预算截断：避免 prompt 超限或预填充过慢
             val ctx = AppSettings.effectiveCtx(AppSettings.selectedModelPath)
@@ -383,7 +399,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             file != null -> "请阅读附件内容"
             else -> text
         }
-        append(ChatStore.Msg("user", content.ifBlank { fallback }, image))
+        append(ChatStore.Msg("user", content.ifBlank { fallback }, image, ocrText = ocrText))
         append(
             ChatStore.Msg(
                 "assistant", "",
@@ -633,15 +649,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 turnHistory = history
                 val payloadMsgs = listOf(ChatClient.ChatMessage("system", systemMerged)) +
                         history.filter { it.role != "system" }.map { m ->
+                            // 有图就有本地 OCR 原文：视觉模型读数字常错、读不清会编，
+                            // 逐字结果给它核对；版面、图表、手写仍靠图。
+                            val ocrBlock = OcrTool.promptBlock(m.ocrText)
                             when {
                                 m.imageB64 == null -> ChatClient.ChatMessage(m.role, m.content)
                                 imageVisible -> {
                                     if (!imageLogged) {
                                         imageLogged = true
-                                        ServerProcessManager.appLog("图片：多模态直读（传图给视觉模型）")
+                                        ServerProcessManager.appLog(
+                                            "图片：多模态直读（传图给视觉模型）" +
+                                                    if (ocrBlock != null)
+                                                        "，并附上本地 OCR 原文供核对数字" else ""
+                                        )
                                     }
                                     val parts = org.json.JSONArray()
-                                    parts.put(org.json.JSONObject().put("type", "text").put("text", m.content))
+                                    val textPart = if (ocrBlock == null) m.content
+                                    else (if (m.content.isNotBlank()) m.content + "\n\n" else "") + ocrBlock
+                                    parts.put(org.json.JSONObject().put("type", "text").put("text", textPart))
                                     parts.put(
                                         org.json.JSONObject().put("type", "image_url").put(
                                             "image_url",
@@ -651,25 +676,35 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     ChatClient.ChatMessage(m.role, parts)
                                 }
                                 else -> {
+                                    // 看不到图：本地 OCR 原文就是唯一的信息来源，直接给出，
+                                    // 省掉「先调一次工具才拿到字」的来回。
                                     if (!imageLogged) {
                                         imageLogged = true
                                         ServerProcessManager.appLog(
-                                            if (ocrRequested)
+                                            if (ocrBlock != null)
+                                                "图片：当前模型没有视觉投影（mmproj），已直接附上本地 OCR 原文"
+                                            else if (ocrRequested)
                                                 "图片：用户要求 OCR，按指令走 ocr_image（不传图）"
                                             else
                                                 "图片：当前模型没有视觉投影（mmproj），改由 ocr_image 工具按需识别"
                                         )
                                     }
-                                    val hint = if (ocrRequested)
+                                    val hint = if (ocrBlock != null)
+                                        "【用户上传了一张图片，你看不到图片本身。" +
+                                                "上面是本机 OCR 识别出的文字，可直接依据它作答；" +
+                                                "需要完整原文或换重点再识别时，可调用 ${OcrTool.NAME}。】"
+                                    else if (ocrRequested)
                                         "【用户上传了一张图片，并要求用 OCR 识别其中的文字】" +
                                                 "你看不到图片本身，必须调用 ocr_image 工具取得文字后再作答，不要凭空猜测内容。"
                                     else
                                         "【用户上传了一张图片】你看不到图片本身。若回答需要图上的文字" +
                                                 "（截图内容、表格、文档、报错信息等），先调用 ocr_image 工具识别，再作答。"
-                                    ChatClient.ChatMessage(
-                                        m.role,
-                                        (if (m.content.isNotBlank()) m.content + "\n\n" else "") + hint
-                                    )
+                                    val body = listOfNotNull(
+                                        m.content.takeIf { it.isNotBlank() },
+                                        ocrBlock,
+                                        hint
+                                    ).joinToString("\n\n")
+                                    ChatClient.ChatMessage(m.role, body)
                                 }
                             }
                         }

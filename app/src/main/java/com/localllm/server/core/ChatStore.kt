@@ -59,7 +59,13 @@ object ChatStore {
         val sources: List<Source> = emptyList(),
         val todos: List<Todo> = emptyList(),
         val genFiles: List<GenFile> = emptyList(),
-        val task: TaskState? = null
+        val task: TaskState? = null,
+        /**
+         * 随图片一起产生的本地 OCR 文字。挂在消息上而不是只留在当轮：
+         * 后续追问（「第二行的金额是多少」）仍要逐字原文核对，而图会一直被重发。
+         * 放在最后，别插到中间——有好几处按位置构造函数参数。
+         */
+        val ocrText: String? = null
     )
 
     data class Session(
@@ -117,6 +123,7 @@ object ChatStore {
                         sources = parseSources(m.optJSONArray("sources")),
                         todos = parseTodos(m.optJSONArray("todos")),
                         genFiles = parseGenFiles(m.optJSONArray("genFiles")),
+                        ocrText = m.optString("ocrText").takeIf { it.isNotEmpty() },
                         task = m.optJSONObject("task")?.let { t ->
                             TaskState(
                                 goal = t.optString("goal"),
@@ -197,6 +204,7 @@ object ChatStore {
             s.messages.takeLast(MAX_MESSAGES).forEach { m ->
                 val o = JSONObject().put("role", m.role).put("content", m.content)
                 if (m.imageB64 != null) o.put("image", m.imageB64)
+                if (m.ocrText != null) o.put("ocrText", m.ocrText)
                 if (m.reasoning != null) o.put("reasoning", m.reasoning)
                 if (m.steps.isNotEmpty()) {
                     val sArr = JSONArray()
