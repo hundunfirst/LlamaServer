@@ -342,6 +342,19 @@ object ServerProcessManager {
                 else -> ngl
             }
             val useGpu = effNgl > 0 && !npu
+            // 量化 KV 在 NPU 上会直接崩（htp 后端缺 SET_ROWS，ggml_abort / code=134），
+            // 而「减 ctx / 减 ngl / 去投机」那套降级对它无效——所以这里先把它换成 f16，
+            // 让服务能起来，并把代价写在日志里（想省内存应该调小上下文，那才是主线）。
+            val kvFellBack = npu && KvCache.quantized(cacheTypeK, cacheTypeV)
+            val effCacheK = if (kvFellBack) "" else cacheTypeK
+            val effCacheV = if (kvFellBack) "" else cacheTypeV
+            if (kvFellBack) {
+                appendLog(
+                    "KV 缓存量化（K=${cacheTypeK.ifBlank { "默认" }}，V=${cacheTypeV.ifBlank { "默认" }}）" +
+                            "在 Hexagon NPU 上不支持（后端缺 SET_ROWS，会直接崩），本次自动改用 f16。" +
+                            "要省内存请调小「上下文长度」，或关掉「Hexagon NPU」改用 CPU/OpenCL。"
+                )
+            }
             // DSP 内存有限：只提示，不拦截、不改用户的引擎选择
             if (npu && needBytes > NPU_WARN_BYTES) {
                 appendLog(
@@ -487,7 +500,7 @@ object ServerProcessManager {
             }
             val cmd = buildCommand(
                 binary, modelPath, bindHost, port, ctxEff, threads, effNgl, lanEnabled, apiToken,
-                cacheTypeK, cacheTypeV, specEffective, mmprojPath, faMode, apiTokenEnabled,
+                effCacheK, effCacheV, specEffective, mmprojPath, faMode, apiTokenEnabled,
                 npuDevice = if (npu) NPU_DEVICE else null,
                 slotSavePath = kvPath,
                 // 单 slot：本 App 一次只跑一条生成，多 slot 只会让缓存命中与存档目标漂移
@@ -594,7 +607,7 @@ object ServerProcessManager {
                     if (mmprojPath != null && mmprojFailed() &&
                         degradeMmprojAndRestart(
                             modelPath, port, ctxEff, threads, ngl, lanEnabled, apiToken,
-                            cacheTypeK, cacheTypeV, specType, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
+                            effCacheK, effCacheV, specType, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
                         )
                     ) {
                         return@launch
@@ -603,7 +616,7 @@ object ServerProcessManager {
                     if (specEffective == "draft-mtp" && specFailed() &&
                         degradeSpecAndRestart(
                             modelPath, port, ctxEff, threads, ngl, lanEnabled, apiToken,
-                            cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine
+                            effCacheK, effCacheV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine
                         )
                     ) {
                         return@launch
@@ -612,7 +625,7 @@ object ServerProcessManager {
                     if (ctxFailed() &&
                         degradeCtxAndRestart(
                             modelPath, port, ctxEff, threads, ngl, lanEnabled, apiToken,
-                            cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
+                            effCacheK, effCacheV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
                         )
                     ) {
                         return@launch
@@ -622,7 +635,7 @@ object ServerProcessManager {
                     if (ngl > 0 && allocFailed() &&
                         degradeAndRestart(
                             modelPath, port, ctxEff, threads, ngl, lanEnabled, apiToken,
-                            cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
+                            effCacheK, effCacheV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
                         )
                     ) {
                         return@launch
@@ -657,7 +670,7 @@ object ServerProcessManager {
                         if (ngl > 0 && allocFailed() &&
                             degradeAndRestart(
                                 modelPath, port, ctxEff, threads, ngl, lanEnabled, apiToken,
-                                cacheTypeK, cacheTypeV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
+                                effCacheK, effCacheV, specType, mmprojPath, faMode, apiTokenEnabled, displayHost, prismEngine, specDisabled
                             )
                         ) {
                             return@launch

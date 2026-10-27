@@ -1,6 +1,26 @@
 package com.localllm.server.core
 
 /**
+ * KV 缓存类型的小策略。
+ *
+ * Hexagon NPU（htp 引擎）上**不能用**量化 KV：把每步新算的 K/V 写进缓存需要 `SET_ROWS`，
+ * 这一版 ggml-hexagon 的 HTP0 后端没实现它，建上下文阶段直接 ggml_abort：
+ *   pre-allocated tensor (cache_k_l3 (view)) in a buffer (HTP0)
+ *       that cannot run the operation (SET_ROWS)
+ * 表现是「点启动就退出」（code=134），界面上只看到一句英文断言，而
+ * 「减 ctx / 减 ngl / 去投机」那套降级对它完全无效。所以 NPU 下自动退回 f16。
+ */
+object KvCache {
+
+    /** 空串 = 引擎默认（f16）；f16/bf16 不算量化 */
+    fun isQuantized(type: String): Boolean =
+        type.isNotBlank() && !type.equals("f16", true) && !type.equals("bf16", true)
+
+    /** K 或 V 任一被量化 */
+    fun quantized(k: String, v: String): Boolean = isQuantized(k) || isQuantized(v)
+}
+
+/**
  * llama-server 启动参数拼装。
  *
  * 从 `ServerProcessManager.buildCommand` 抽出来做成纯函数：原实现直接依赖 `AppSettings` 和
