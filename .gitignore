@@ -39,6 +39,7 @@ dist/
 .DS_Store
 HANDOFF.md
 
-# ---- dev 基准输出（可重跑，不入库） ----
+# ---- dev bench outputs (rerunnable, not committed) ----
 mtp_ab_*.json
-vision_tokens.json.vision_bench/
+vision_tokens.json
+.vision_bench/

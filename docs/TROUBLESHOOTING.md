@@ -323,6 +323,11 @@ $raw = Get-Content ui.xml -Raw -Encoding UTF8    # 必须 UTF8，否则中文变
   `pre-allocated tensor (cache_k_l3 (view)) in a buffer (HTP0) that cannot run the operation (SET_ROWS)`
   → `ggml_abort`。htp 后端没实现量化 KV 所需的 `SET_ROWS`；「减 ctx / 减 ngl / 去投机」那套降级对它无效。
   App 现在会在启动前把这种组合**自动改回 f16** 并落一行中文日志（`KvCache.quantized()`）。
+- **v0.8.0（`8642541b2`，2026-10-29 复测）仍然崩**：同一条断言，只是层号从 `cache_k_l3`
+  变成 `cache_k_l2`（LFM3 层数不同，与模型无关）。说明这不是某个版本的回归，而是 htp 后端一直没实现
+  该算子——App 的 f16 自动回退是**长期方案**，不是等上游修的临时办法。
+  诊断期间注意：崩溃会被看门狗当 ERROR，**5 秒一次反复重启**（日志里「自动重启（第 N 次）」），
+  停服务或先关掉 NPU 开关再查。
 - **CPU 上是负收益（用户真机观察，2026-10-27，尚未做 A/B 量化）**：量化 KV 的收益是**显存/内存**，
   不是速度——attention 每次都要把 K/V 解量化回可算的格式，CPU 上这笔开销盖过了省下的带宽。
   想省内存又要快，优先**调小上下文**（KV 与 ctx 线性，131k→32k 是最大的一刀）、
