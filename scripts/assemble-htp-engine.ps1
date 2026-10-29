@@ -9,9 +9,13 @@
 #   2. 必须 strip，否则一个引擎 155 MB。
 #   3. 归一到一个扁平目录（和 cpu/opencl/prism 一致），走 LD_LIBRARY_PATH=引擎目录。
 
+param(
+    # build.py --install-dir 产生的目录名（默认 pkg-adb）
+    [string]$InstallDir = "pkg-adb"
+)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$src  = "$root\llama.cpp\pkg-adb\llama.cpp"
+$src  = "$root\llama.cpp\$InstallDir\llama.cpp"
 $dst  = "$root\app\src\main\assets\engines\htp"
 $strip = "$env:LOCALAPPDATA\Android\Sdk\ndk\27.3.13750724\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe"
 
@@ -24,6 +28,8 @@ if (-not (Test-Path $strip)) { throw "缺少 llvm-strip: $strip" }
 $libs = @(
     "libggml.so", "libggml-base.so", "libggml-cpu.so", "libggml-hexagon.so", "libggml-opencl.so",
     "libggml-htp-v73.so", "libggml-htp-v75.so", "libggml-htp-v79.so", "libggml-htp-v81.so",
+    # v85 只有 v0.8 及以后的工具链才产出，老构建里没有，缺了跳过
+    "libggml-htp-v85.so",
     "libllama.so", "libllama-common.so", "libllama-server-impl.so", "libmtmd.so"
 )
 
@@ -32,7 +38,13 @@ Remove-Item "$dst\*" -Force -ErrorAction SilentlyContinue
 
 Copy-Item "$src\bin\llama-server" "$dst\llama-server" -Force
 foreach ($l in $libs) {
-    if (-not (Test-Path "$src\lib\$l")) { throw "构建产物里缺少 $l" }
+    if (-not (Test-Path "$src\lib\$l")) {
+        if ($l -eq "libggml-htp-v85.so") {
+            Write-Host "  [skip] 本次构建没有 v85 skel"
+            continue
+        }
+        throw "构建产物里缺少 $l"
+    }
     Copy-Item "$src\lib\$l" "$dst\$l" -Force
 }
 

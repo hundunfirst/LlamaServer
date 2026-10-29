@@ -69,10 +69,12 @@ llama.cpp 的**公共契约是 CLI 参数和 OpenAI API**，出现以下任一�
 
 **不需要改**：进程管理、FGS、SELinux/LD 策略、模型目录、UI——这些与 llama 版本无关。
 
-## 三、当前引擎结构存档（620d2225c / v0.7.0 基线）
+## 三、当前引擎结构存档（v0.8.0 基线，commit `8642541b2`）
 
-> 与 3fb4767 基线逐文件比对：产物集合**完全一致**（cpu 8 个 / opencl 9 个），仅体积变化，
-> 说明 CLI 与模块划分稳定；升级实测见 §六。
+> v0.7.0 → v0.8.0 结构未变（`llama-server` 仍是 ~7KB 壳）。两点差异：
+> cpu 构建会多产出 `llama-cli` 与 `libllama-cli-impl.so`（App 不用，已从 assets 剔除，见 §六）；
+> htp 的 DSP skel 多了 `libggml-htp-v85.so`（v0.8 工具链新增，本机设备是 v81，暂用不到但保留）。
+> 旧基线 620d2225c 的比对结论：产物集合**完全一致**（cpu 8 个 / opencl 9 个），仅体积变化。
 
 ```
 bin/llama-server              ~7KB 壳，main.cpp 仅一行：return llama_server(argc, argv);
@@ -122,4 +124,42 @@ decode 反而低于 CPU——与设置页「0 = 纯 CPU 更快」的提示一致
 
 功能回归：mmproj 视觉请求（红色圆形）识别正确；起停 3 轮无 crash、进程树干净；
 opencl 引擎 `libggml-opencl.so` 正常加载（进程内 231 处 `/dev/kgsl-3d0` 映射）。
+
+## 七、升级实测记录（v0.8.0，2026-10-28 起）
+
+**动机**：新下载的 `LFM3-1.7B-Uncensored-AD-Q4_K_M.gguf` 报
+`unknown model architecture: 'lfm3'`——v0.8.0 的 release notes 第一条就是 **LFM3 家族**
+（LFM3-1.7B 文本 / LFM3-VL-2B 视觉）。
+
+**路径**：tag `v0.7.0`（`620d2225c`）→ tag `v0.8.0`（`8642541b2`）。两个自研补丁
+（`scripts/patches/0001` LAZY_TENSORS、`0002` MADV_WILLNEED）在 v0.8.0 上**直接应用干净**，
+没有冲突——这是本轮最大的不确定项，实测落空。
+
+### htp 的工具链必须跟着升
+
+用 v0.7 镜像编 v0.8.0 源码，DSP 内核直接编不过：
+
+```
+ggml-hexagon/htp/hvx-copy.h:324: error: call to undeclared function 'Q6_Vsf_equals_Vw'
+ggml-hexagon/htp/hvx-exp.h:227: error: call to undeclared function 'Q6_Vh_equals_Vhf'
+```
+
+上游那句 `hexagon: update to snapdragon-toolchain v0.8 and enable hexagon v85` 是硬性要求。
+**国内拉 ghcr 的办法**：`ghcr.nju.edu.cn` 镜像 3 秒可达，直连 ghcr 慢；拉完打规范 tag 再用：
+
+```powershell
+docker pull ghcr.nju.edu.cn/snapdragon-toolchain/arm64-android:v0.8
+docker tag  ghcr.nju.edu.cn/snapdragon-toolchain/arm64-android:v0.8 `
+            ghcr.io/snapdragon-toolchain/arm64-android:v0.8
+```
+
+### 产物集合的变化（§1.2 核对清单要跟上）
+
+- **cpu**：多出 `llama-cli` + `libllama-cli-impl.so`（~210 KB，App 不用，已剔除）。
+  build.py 的拷贝是「bin 目录全搬」，所以每轮升级后都要确认这两个没有回流。
+- **htp**：多出 `libggml-htp-v85.so`（871 KB）。`assemble-htp-engine.ps1` 已支持
+  `-InstallDir` 指定构建目录，并把 v85 skel 设为可选（老构建没有就不报错）。
+- 两者结构不变：`llama-server` 仍是 ~7KB 壳，NEEDED 闭包与 16KB 对齐（LOAD align `0x4000`）复核过。
+
+**版本号**：`BinaryInstaller.VERSION` 8 → 10（9 是中间只升 prism 那次）。
 

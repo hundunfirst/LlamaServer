@@ -18,7 +18,7 @@ object BinaryInstaller {
     // 6：cpu/opencl 引擎带上 MoE 专家按需读补丁（scripts/patches/0001-lazy-expert-tensors.patch）
     // 7：再带上专家级预读补丁（0002-moe-expert-prefetch.patch）
     // 8：htp（NPU）引擎也用两个补丁重建——之前它没有补丁，14.4GB 模型会被整份预读
-    private const val VERSION = "9"
+    private const val VERSION = "10"
     private const val ASSET_ROOT = "engines"
 
     const val MODE_CPU = "cpu"

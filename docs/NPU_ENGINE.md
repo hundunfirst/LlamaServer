@@ -76,9 +76,15 @@ ggml-hex: device 0: HTP0 (phys=0, virt=0, domain=nsp1000:1000)
 
 前置：Docker Desktop（WSL2 后端）、`adb` 在 PATH 里。
 
+> **工具链版本跟着上游走**：llama.cpp v0.8.0 起必须用 `v0.8` 镜像——v0.8 的 DSP 内核用了
+> 更新的 HVX intrinsic（`Q6_Vsf_equals_Vw` 等），v0.7 的 Hexagon SDK 里没有，编不过。
+> 国内直连 ghcr 慢，用南大镜像再打规范 tag：
+> `docker pull ghcr.nju.edu.cn/snapdragon-toolchain/arm64-android:v0.8`
+> `docker tag  ghcr.nju.edu.cn/snapdragon-toolchain/arm64-android:v0.8 ghcr.io/snapdragon-toolchain/arm64-android:v0.8`
+
 ```powershell
 # 1. 拉工具链镜像（数 GB；该镜像含 linux/amd64，x86_64 宿主原生运行，不走 qemu）
-docker pull ghcr.io/snapdragon-toolchain/arm64-android:v0.7
+docker pull ghcr.io/snapdragon-toolchain/arm64-android:v0.8
 
 # 2. 构建 + 推到手机（产物同时留在 llama.cpp\pkg-adb\llama.cpp）
 cd llama.cpp
@@ -87,6 +93,9 @@ python scripts\snapdragon\build.py --target "adb:<序列号>" --push
 ```
 
 - `--hex-only --hex-arch v81` 只编译 Hexagon 相关库，**不含 llama-server**，不能当引擎用。
+- **构建目录别复用跨主机的**：CMakeCache 里存着生成时的绝对路径，在 Windows 上配过、
+  再进容器（`/workspace`）会报 `CMakeCache.txt 目录不同`。换 `--build-dir build-htp-v08`
+  开新的，不要删旧目录（那是备份）。
 - 宿主机是 AMD64 时不要用 `setup-sdk.py` 装裁剪版 SDK：GitHub 上那些包全是 `-arm64-wos`
   （Windows-on-ARM 宿主），装了也跑不了。要原生构建只能装高通官网的完整 SDK（需账号）。
 - 产物布局：`pkg-adb\llama.cpp\{bin,lib}`。`bin/llama-server` 只有 ~10KB，是加载
@@ -100,7 +109,7 @@ python scripts\snapdragon\build.py --target "adb:<序列号>" --push
 ```
 llama-server
 libggml.so  libggml-base.so  libggml-cpu.so  libggml-hexagon.so
-libggml-htp-v73.so  libggml-htp-v75.so  libggml-htp-v79.so  libggml-htp-v81.so
+libggml-htp-v73.so  libggml-htp-v75.so  libggml-htp-v79.so  libggml-htp-v81.so  libggml-htp-v85.so
 libllama.so  libllama-common.so  libllama-server-impl.so  libmtmd.so
 ```
 
