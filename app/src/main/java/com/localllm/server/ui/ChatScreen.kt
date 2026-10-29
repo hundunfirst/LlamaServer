@@ -1611,12 +1611,23 @@ private fun MessageBubble(
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+                                val fileCtx = androidx.compose.ui.platform.LocalContext.current
                                 msg.genFiles.forEach { gf ->
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .clickable { onOpenGenFile(gf) }
+                                            .clickable {
+                                                // 直接交给系统应用打开；没有能处理的应用才回落到内嵌预览
+                                                if (!com.localllm.server.core.FileOpener.open(fileCtx, gf.path)) {
+                                                    android.widget.Toast.makeText(
+                                                        fileCtx,
+                                                        "没有应用能打开 ${gf.path}，已切换到预览",
+                                                        android.widget.Toast.LENGTH_SHORT
+                                                    ).show()
+                                                    onOpenGenFile(gf)
+                                                }
+                                            }
                                             .padding(vertical = 3.dp)
                                     ) {
                                         Column(Modifier.weight(1f)) {
@@ -1626,14 +1637,33 @@ private fun MessageBubble(
                                                 color = MaterialTheme.colorScheme.primary
                                             )
                                             Text(
-                                                "${gf.content.length} 字符 · 点击预览",
+                                                "${gf.content.length} 字符 · 点击用其他应用打开",
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
+                                        // 定位到所在文件夹：文件管理器接不住时把路径给出来，至少能手动找
+                                        Text(
+                                            "定位",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier
+                                                .clickable {
+                                                    if (!com.localllm.server.core.FileOpener
+                                                            .revealInFolder(fileCtx, gf.path)
+                                                    ) {
+                                                        android.widget.Toast.makeText(
+                                                            fileCtx,
+                                                            "文件管理器不支持打开文件夹，路径：${gf.path}",
+                                                            android.widget.Toast.LENGTH_LONG
+                                                        ).show()
+                                                    }
+                                                }
+                                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
                                         Icon(
                                             Icons.Default.ChevronRight,
-                                            contentDescription = "预览",
+                                            contentDescription = "打开",
                                             modifier = Modifier.size(16.dp),
                                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                                         )

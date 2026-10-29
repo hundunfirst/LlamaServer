@@ -156,8 +156,13 @@ object FileTools {
         }
     }
 
-    private fun find(root: DocumentFile, path: String): DocumentFile? {
-        checkPath(path)
+    /** 界面侧用：把授权目录内的相对路径解析成 DocumentFile（拿 content Uri 交给系统应用打开） */
+    fun documentFor(context: Context, path: String): DocumentFile? {
+        val root = rootDir(context) ?: return null
+        return runCatching { find(root, path) }.getOrNull()
+    }
+
+    private fun find(root: DocumentFile, path: String): DocumentFile? {        checkPath(path)
         var cur: DocumentFile = root
         for (seg in segments(path)) {
             cur = cur.findFile(seg) ?: return null

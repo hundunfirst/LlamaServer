@@ -561,7 +561,7 @@ fun SettingsScreen(
         CompactField(
             value = settings.ngl,
             onValueChange = { v -> vm.updateSettings { it.copy(ngl = v.filter(Char::isDigit)) } },
-            label = "GPU 层数 -ngl（0 = 纯 CPU，本机实测更快，推荐）",
+            label = "GPU 层数 -ngl",
             number = true,
             modifier = Modifier.fillMaxWidth()
         )
