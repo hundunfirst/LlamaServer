@@ -4,10 +4,12 @@ import android.annotation.SuppressLint
 import android.webkit.WebView
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -112,7 +114,7 @@ fun SandboxPanel() {
                         if (isNotEmpty()) append(" · ")
                         append(summary)
                     }
-                    if (isEmpty()) append("点开查看")
+                    if (isEmpty()) append("点开全屏查看")
                 }
                 Text(
                     sub,
@@ -129,8 +131,19 @@ fun SandboxPanel() {
     }
 
     if (showDialog) {
-        Dialog(onDismissRequest = { showDialog = false }) {
-            Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surface) {
+        // 全屏预览：usePlatformDefaultWidth=false 让弹窗占满窗口，WebView 顶满剩余空间，
+        // 顶部留系统栏 padding 避免标题被状态栏盖住。
+        Dialog(
+            onDismissRequest = { showDialog = false },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding(),
+                color = MaterialTheme.colorScheme.surface
+            ) {
                 Column {
                     Row(
                         modifier = Modifier
@@ -140,7 +153,7 @@ fun SandboxPanel() {
                     ) {
                         Text(
                             label.ifBlank { "运行预览" },
-                            style = MaterialTheme.typography.titleSmall,
+                            style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Medium,
                             modifier = Modifier.weight(1f)
                         )
@@ -152,7 +165,7 @@ fun SandboxPanel() {
                         html = html,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(460.dp)
+                            .weight(1f)
                             .padding(horizontal = 8.dp)
                             .padding(bottom = 8.dp)
                     )
