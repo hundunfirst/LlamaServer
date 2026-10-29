@@ -3,14 +3,14 @@
 # 说明: 这套引擎支持 PQ2_0 / PTQ1_0 等 PrismML 打包（上游 llama.cpp 不认），只有纯 CPU 模式会用到；
 #       assets/engines/ 不入库，所以在别的机器上构建前需要先跑一次本脚本。
 param(
-    [string]$Release = "prism-b10777-e3de715",
+    [string]$Release = "prism-b10826-c9c34bc",
     [string]$Mirror  = "https://gh-proxy.com/"
 )
 
 $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
 $work = "$root\dist\prism-engine"
-$tar  = "$work\android-arm64.tar.gz"
+$tar  = "$work\$Release-android-arm64.tar.gz"
 $dest = "$root\app\src\main\assets\engines\prism"
 $ndk  = "$env:LOCALAPPDATA\Android\Sdk\ndk\27.3.13750724"
 $strip = "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe"
