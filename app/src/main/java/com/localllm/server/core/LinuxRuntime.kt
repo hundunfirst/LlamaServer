@@ -89,7 +89,12 @@ object LinuxRuntime {
                 timeoutMs = 600_000
             )
             if (out.exitCode != 0) {
-                return "基础工具安装失败（apt 退出码 ${out.exitCode}）：${out.output.take(500)}"
+                // 完整 apt 输出落盘，报错只带路径和开头——500 字截断会把真正的错误吞掉
+                runCatching {
+                    File(context.filesDir, "runtime/apt-bootstrap.log").writeText(out.output.take(30_000))
+                }
+                return "基础工具安装失败（apt 退出码 ${out.exitCode}）：${out.output.take(500)}" +
+                        "\n完整日志：files/runtime/apt-bootstrap.log"
             }
             File(context.filesDir, MARK_APT).writeText("1")
         }
