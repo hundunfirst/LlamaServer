@@ -27,7 +27,7 @@ object LinuxRuntime {
     private const val MARK_READY = "runtime/.ready"
     private const val MARK_APT = "runtime/.apt-installed"
     /** 内容版本：tar/结构有变化就 +1，旧设备靠它重新解压 */
-    private const val READY_VERSION = "3"
+    private const val READY_VERSION = "4"
 
     /** 输出回传上限：环境工具的产出也会进上下文，超长截断 */
     private const val MAX_OUTPUT_CHARS = 6000
@@ -166,32 +166,27 @@ object LinuxRuntime {
         dest.mkdirs()
         context.assets.open(asset).use { MinimalTar.extractGz(it, dest) }
     }
-    /** tar 里符号链接已原样解出；这里只补 zip 没有的 unix 权限位：
-     *  bin/sbin 目录下全部可执行，其余 0644 */
+    /** tar 里符号链接已原样解出；这里只补 zip 没有的 unix 权限位。
+     *  逻辑反着来：**默认可执行**（apt 的 /usr/lib/apt/methods/http 这类深层可执行文件
+     *  靠 whitelist 会漏，实测 apt 报 Failed to exec method），只有明确的纯数据目录例外。 */
+    private val NON_EXEC_SEGMENTS = setOf(
+        "share", "include", "man", "doc", "locale", "icons", "fonts",
+        "translations", "pam.d", "presets"
+    )
     private fun applyPermissions(rf: File) {
-        val execDirs = setOf(
-            "bin", "sbin", "usr/bin", "usr/sbin", "usr/local/bin", "usr/local/sbin",
-            "usr/libexec", "usr/lib", "usr/local/lib", "lib", "lib64", "usr/lib64"
-        )
         fun walk(dir: File) {
+            dir.setExecutable(true, false)
             dir.listFiles()?.forEach { f ->
-                if (f.isDirectory) {
-                    f.setExecutable(true, false)
-                    walk(f)
-                } else {
-                    val parent = f.parentFile?.name ?: ""
-                    val grand = f.parentFile?.parentFile?.name ?: ""
-                    val execLike = execDirs.contains(f.parentFile?.absolutePath
-                        ?.removePrefix(rf.absolutePath)?.trimStart('/') ?: "") ||
-                            execDirs.contains(parent) ||
-                            (grand == "bin" && parent == "sbin") ||
-                            f.name == "ld-linux-aarch64.so.1"
+                if (f.isDirectory) walk(f)
+                else {
+                    val rel = f.absolutePath.removePrefix(rf.absolutePath).trimStart('/')
+                    val execLike = f.name.endsWith(".so") ||
+                            rel.split('/').none { it in NON_EXEC_SEGMENTS }
                     f.setExecutable(execLike, false)
                 }
             }
         }
         rf.listFiles()?.forEach { d -> if (d.isDirectory) walk(d) }
-        // 常见必需：/bin/bash、/usr/bin/env 已在 bin 目录规则里；dpkg 脚本靠 shebang + bash
     }
 
     private fun writeGuestConfig(rf: File) {
