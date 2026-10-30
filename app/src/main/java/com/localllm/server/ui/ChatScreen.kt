@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -1325,6 +1326,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                     isUser = isUser,
                     waiting = waiting,
                     thinking = thinking,
+                    generating = streaming && i == messages.lastIndex && !isUser,
                     showStats = (!isUser && i == messages.lastIndex && lastStats != null),
                     stats = lastStats ?: "",
                     onResumeTask = { vm.resumeStoppedTask(i) },
@@ -1548,6 +1550,130 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     }
 }
 
+// 一体时间线的一行：思考/搜索/工具按原始顺序渲染，参数与结果可展开
+@Composable
+private fun StepRow(st: ChatStore.Step, thinkBody: String? = null) {
+    var detailOpen by remember(st) { mutableStateOf(false) }
+    Row(verticalAlignment = Alignment.Top) {
+        Text(
+            when (st.type) {
+                "think" -> "💡"
+                "search" -> "🔍"
+                else -> "🔧"
+            },
+            modifier = Modifier.width(22.dp)
+        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                st.label,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (st.ok) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.error
+            )
+            if (st.type == "think") {
+                val body = thinkBody ?: st.detail
+                if (!body.isNullOrBlank()) {
+                    if (detailOpen) {
+                        // 固定盒子：思考只能在盒内滚动（限高260dp），正文是全局页面。
+                        // 包 SelectionContainer：长按可选中复制思考全文。
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 260.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            androidx.compose.foundation.text.selection.SelectionContainer {
+                                Text(
+                                    latexToUnicode(body),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    } else {
+                        Text(
+                            body.take(40) + if (body.length > 40) "…" else "",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.clickable { detailOpen = true }
+                        )
+                    }
+                }
+            } else {
+                // 工具/搜索步：参数 + 结果都可展开。以前只存结果前 120 字、不存参数，
+                // 排查「为什么没调对工具」时只能翻日志。
+                val argsText = st.args
+                val hasBody = argsText != null || st.detail != null
+                if (hasBody) {
+                    val collapsed = when {
+                        argsText != null -> "参数 " + argsText.take(36)
+                        else -> st.detail!!.take(36)
+                    }
+                    val expanded = buildString {
+                        if (argsText != null) append("参数：").append(argsText)
+                        if (st.detail != null) {
+                            if (argsText != null) append("\n\n")
+                            append("结果：").append(st.detail)
+                        }
+                    }
+                    Text(
+                        if (detailOpen) expanded
+                        else collapsed + if (expanded.length > collapsed.length) "…" else "",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = when {
+                            detailOpen -> MaterialTheme.colorScheme.onSurfaceVariant
+                            !st.ok -> MaterialTheme.colorScheme.error
+                            else -> MaterialTheme.colorScheme.primary
+                        },
+                        modifier = Modifier.clickable { detailOpen = !detailOpen }
+                    )
+                }
+            }
+        }
+    }
+}
+
+// 流式思考行：思考还在生成、尚未落成 think 步时实时滚动显示
+@Composable
+private fun LiveThinkRow(reasoning: String) {
+    val thinkScroll = rememberScrollState()
+    var thinkJumped by remember { mutableStateOf(false) }
+    LaunchedEffect(reasoning.length) {
+        val max = thinkScroll.maxValue
+        if (max <= 0) return@LaunchedEffect
+        if (!thinkJumped) {
+            thinkScroll.scrollTo(max)
+            thinkJumped = true
+        } else if (thinkScroll.value >= max - 80) {
+            thinkScroll.scrollTo(max)
+        }
+    }
+    Row(verticalAlignment = Alignment.Top) {
+        Text("💡", modifier = Modifier.width(22.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                "思考中…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 260.dp)
+                    .verticalScroll(thinkScroll)
+            ) {
+                androidx.compose.foundation.text.selection.SelectionContainer {
+                    Text(
+                        latexToUnicode(reasoning),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubble(
@@ -1555,6 +1681,7 @@ private fun MessageBubble(
     isUser: Boolean,
     waiting: Boolean,
     thinking: Boolean = false,
+    generating: Boolean = false,
     showStats: Boolean,
     stats: String,
     menuOpen: Boolean,
@@ -1711,9 +1838,13 @@ private fun MessageBubble(
                                 }
                             }
                         }
-                        // 执行步骤时间线（思考/搜索/工具），Rikkahub 风格
-                        if (!isUser && msg.steps.isNotEmpty()) {
-                            var stepsOpen by remember { mutableStateOf(true) }
+                        // 一体式过程时间线（DSH / MiMo Desktop 风格）：思考、搜索、工具调用
+                        // 按原始顺序一行行交错串在一起，整块可折叠成一行摘要，正文在下面。
+                        val rawReasoning = msg.reasoning?.takeIf { it.isNotBlank() }
+                        val thinkSteps = msg.steps.count { it.type == "think" }
+                        val hasReasoning = rawReasoning != null && thinkSteps == 0
+                        if (!isUser && (msg.steps.isNotEmpty() || rawReasoning != null)) {
+                            var processOpen by remember { mutableStateOf(true) }
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1724,72 +1855,74 @@ private fun MessageBubble(
                                     )
                                     .padding(8.dp)
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                // 头部：一行摘要，整行可点击切换展开/收起
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable { processOpen = !processOpen }
+                                        .padding(vertical = 2.dp)
+                                ) {
+                                    if (thinking || generating) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(14.dp),
+                                            strokeWidth = 2.dp,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                    }
                                     Text(
-                                        "🧩 执行步骤（${msg.steps.size}）",
+                                        when {
+                                            thinking -> "思考中…"
+                                            generating -> "生成中…"
+                                            else -> ChatStore.turnSummaryLabel(msg.steps, hasReasoning)
+                                        },
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f)
                                     )
-                                    TextButton(onClick = { stepsOpen = !stepsOpen }) {
-                                        Text(
-                                            if (stepsOpen) "收起" else "展开",
-                                            style = MaterialTheme.typography.labelSmall
-                                        )
-                                    }
+                                    Text(
+                                        if (processOpen) "▾" else "▸",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
                                 }
-                                if (stepsOpen) {
-                                    msg.steps.forEachIndexed { si, st ->
-                                        var detailOpen by remember(si) { mutableStateOf(false) }
-                                        Row(
-                                            verticalAlignment = Alignment.Top,
-                                            modifier = Modifier.padding(vertical = 2.dp)
-                                        ) {
-                                            Text(
-                                                when (st.type) {
-                                                    "think" -> "💡"
-                                                    "search" -> "🔍"
-                                                    else -> "🔧"
-                                                },
-                                                modifier = Modifier.width(22.dp)
-                                            )
-                                            Column(Modifier.weight(1f)) {
-                                                Text(
-                                                    st.label,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = if (st.ok) MaterialTheme.colorScheme.onSurface
-                                                    else MaterialTheme.colorScheme.error
+                                if (processOpen || thinking) {
+                                    // 左边一道细线：标识下面这些行「同属这一个过程」
+                                    Row(Modifier.fillMaxWidth()) {
+                                        Box(
+                                            Modifier
+                                                .width(2.dp)
+                                                .fillMaxHeight()
+                                                .background(
+                                                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
                                                 )
-                                                // 工具步：参数 + 结果都可展开。以前只存结果前 120 字、不存参数，
-                                                // 排查「为什么没调对工具」时只能翻日志。
-                                                val argsText = st.args
-                                                val hasBody = argsText != null || st.detail != null
-                                                if (hasBody) {
-                                                    val collapsed = when {
-                                                        argsText != null -> "参数 " + argsText.take(36)
-                                                        else -> st.detail!!.take(36)
-                                                    }
-                                                    val expanded = buildString {
-                                                        if (argsText != null) append("参数：").append(argsText)
-                                                        if (st.detail != null) {
-                                                            if (argsText != null) append("\n\n")
-                                                            append("结果：").append(st.detail)
-                                                        }
-                                                    }
-                                                    Text(
-                                                        if (detailOpen) expanded
-                                                        else collapsed + if (expanded.length > collapsed.length) "…" else "",
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        color = when {
-                                                            detailOpen -> MaterialTheme.colorScheme.onSurfaceVariant
-                                                            !st.ok -> MaterialTheme.colorScheme.error
-                                                            else -> MaterialTheme.colorScheme.primary
-                                                        },
-                                                        modifier = Modifier.clickable {
-                                                            detailOpen = !detailOpen
-                                                        }
-                                                    )
-                                                }
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Column(
+                                            Modifier.weight(1f),
+                                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                                        ) {
+                                            // 流式思考还没落成 think 步：实时滚动显示
+                                            if (thinking) {
+                                                LiveThinkRow(rawReasoning ?: "")
+                                            }
+                                            msg.steps.forEach { st ->
+                                                StepRow(
+                                                    st = st,
+                                                    thinkBody = if (st.type == "think" && thinkSteps == 1)
+                                                        rawReasoning else null
+                                                )
+                                            }
+                                            // 老数据：只有 reasoning 没有 steps（思考未落盘的历史消息）
+                                            if (!thinking && msg.steps.isEmpty() && rawReasoning != null) {
+                                                StepRow(
+                                                    st = ChatStore.Step("think", "思考过程", detail = rawReasoning),
+                                                    thinkBody = rawReasoning
+                                                )
                                             }
                                         }
                                     }
@@ -1805,80 +1938,7 @@ private fun MessageBubble(
                                 Text("继续这个任务", style = MaterialTheme.typography.labelLarge)
                             }
                         }
-                        // 思考过程（DeepSeek 风格折叠卡，默认收起）
-                        if (!isUser && !msg.reasoning.isNullOrBlank()) {
-                            var thinkOpen by remember { mutableStateOf(false) }
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(bottom = 6.dp)
-                                    .background(
-                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                        RoundedCornerShape(8.dp)
-                                    )
-                                    .padding(8.dp)
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        when {
-                                            thinkOpen -> "🧠 思考过程"
-                                            thinking -> "🧠 思考中…"
-                                            else -> "🧠 已深度思考，点击查看"
-                                        },
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    if (thinking) {
-                                        androidx.compose.material3.CircularProgressIndicator(
-                                            modifier = Modifier.size(12.dp).padding(end = 4.dp),
-                                            strokeWidth = 1.5.dp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    TextButton(onClick = {
-                                        clipboard.setText(
-                                            androidx.compose.ui.text.AnnotatedString(msg.reasoning ?: "")
-                                        )
-                                        Toast.makeText(context, "思考过程已复制", Toast.LENGTH_SHORT).show()
-                                    }) {
-                                        Text("复制", style = MaterialTheme.typography.labelSmall)
-                                    }
-                                    TextButton(onClick = { thinkOpen = !thinkOpen }) {
-                                        Text(if (thinkOpen) "收起" else "展开", style = MaterialTheme.typography.labelSmall)
-                                    }
-                                }
-                                if (thinkOpen) {
-                                    // 固定盒子：思考只能在盒内滚动（限高260dp），正文是全局页面。
-                                    // 展开时滚到最新；流式期间贴近底部时自动跟随；上翻阅读则不打扰。
-                                    val thinkScroll = rememberScrollState()
-                                    var thinkJumped by remember { mutableStateOf(false) }
-                                    LaunchedEffect(msg.reasoning?.length) {
-                                        val max = thinkScroll.maxValue
-                                        if (max <= 0) return@LaunchedEffect
-                                        if (!thinkJumped) {
-                                            thinkScroll.scrollTo(max)
-                                            thinkJumped = true
-                                        } else if (thinkScroll.value >= max - 80) {
-                                            thinkScroll.scrollTo(max)
-                                        }
-                                    }
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .heightIn(max = 260.dp)
-                                            .verticalScroll(thinkScroll)
-                                            .padding(top = 4.dp)
-                                    ) {
-                                        Text(
-                                            latexToUnicode(msg.reasoning!!),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                        // 思考已并入上面的过程时间线（think 步 / 流式 LiveThinkRow），不再单独成卡
                         if (waiting) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 androidx.compose.material3.CircularProgressIndicator(
