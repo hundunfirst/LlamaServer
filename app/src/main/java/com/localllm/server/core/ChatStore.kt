@@ -30,6 +30,7 @@ object ChatStore {
     /**
      * 一体过程时间线的收起摘要（DSH / MiMo Desktop 风格）：
      * 有工具调用 → "✓ 已完成 · N 次工具调用 · M 次搜索"；
+     * 中间正文（text 步）→ 摘要加 "· M 条消息"；
      * 只有思考 → "✓ 已完成 · N 段思考"；什么都没有 → "✓ 已完成"。
      * hasReasoning 用于思考还在流式、尚未落成 think 步（或老数据只有 reasoning）的场景；
      * 已有 think 步时忽略，避免重复计数。
@@ -37,11 +38,13 @@ object ChatStore {
     internal fun turnSummaryLabel(steps: List<Step>, hasReasoning: Boolean = false): String {
         val tools = steps.count { it.type == "tool" }
         val searches = steps.count { it.type == "search" }
+        val messages = steps.count { it.type == "text" }
         val thinkSteps = steps.count { it.type == "think" }
         val thinks = thinkSteps + if (hasReasoning && thinkSteps == 0) 1 else 0
         val parts = mutableListOf("✓ 已完成")
         if (tools > 0) parts += "$tools 次工具调用"
         if (searches > 0) parts += "$searches 次搜索"
+        if (messages > 0) parts += "$messages 条消息"
         if (parts.size == 1 && thinks > 0) parts += "$thinks 段思考"
         return parts.joinToString(" · ")
     }

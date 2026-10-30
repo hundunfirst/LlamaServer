@@ -878,7 +878,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     ensureActive() // 停止/切换后不再进入下一轮
                     // 提前强制：已搜过但走到第4轮仍无正文 → 立即移除搜索工具，逼模型作答
                     val forceNoTools = searchAvailable && round >= 3 &&
-                            _messages.value.lastOrNull()?.content.isNullOrEmpty() == true
+                            _messages.value.lastOrNull()?.content.isNullOrEmpty() == true &&
+                            // 中间正文已落成 text 步也算有产出（正文区此时是空的）
+                            steps.none { it.type == "text" }
                     if ((forceNoTools || (searchAvailable && searchCount >= searchCap)) && !loggedNoSearch) {
                         loggedNoSearch = true
                         ServerProcessManager.appLog(
@@ -1146,6 +1148,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
                     // 执行工具调用并回传结果（仅 validCalls）
                     settleThink()
+                    // 本轮正文落成「消息」步：DSH 时间线里中间正文与工具调用交错。
+                    // 正文区只留最终答案——中间轮的文字从正文清走，避免时间线和正文重复。
+                    val roundProse = roundText.toString().trim()
+                    if (roundProse.isNotEmpty()) {
+                        steps.add(
+                            ChatStore.Step(
+                                "text",
+                                roundProse.lineSequence().firstOrNull()?.take(40) ?: "消息",
+                                detail = roundProse
+                            )
+                        )
+                        appendToLastInline(sid) { it.copy(content = "") }
+                        syncSteps()
+                    }
                     val asstCalls = org.json.JSONArray()
                     val newMsgs = apiMsgs.toMutableList()
                     validCalls.forEach { tc ->
@@ -1532,7 +1548,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val productive = usedTools.any {
                     it == WebRunTool.NAME || it == FileTools.TOOL_WRITE || it == FileTools.TOOL_PATCH
                 }
-                val needsRealOutput = !productive && (
+                // 中间正文落成 text 步后，正文区为空不代表没产出——时间线里已有消息行
+                val hasProseSteps = steps.any { it.type == "text" }
+                val needsRealOutput = !productive && !hasProseSteps && (
                         lastContentNow.isBlank() ||
                                 (lastContentNow.length < 120 && todoCalls > 0)
                         )

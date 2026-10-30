@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.VolumeUp
@@ -1550,85 +1551,204 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     }
 }
 
-// 一体时间线的一行：思考/搜索/工具按原始顺序渲染，参数与结果可展开
+// 一体时间线的一行（DSH 样式）：思考/中间正文/搜索/工具按原始顺序渲染，每行独立可折叠。
+// think：折叠显示预览，展开显示完整思考（限高滚动盒，长按可复制）；
+// text（中间正文）：默认展开显示迷你 markdown，可折叠；
+// tool/search：折叠显示参数/结果预览，展开成「命令|参数」+「输出」两块。
 @Composable
 private fun StepRow(st: ChatStore.Step, thinkBody: String? = null) {
-    var detailOpen by remember(st) { mutableStateOf(false) }
+    var open by remember(st) { mutableStateOf(st.type == "text") }
+    val thinkBodyText = if (st.type == "think") (thinkBody ?: st.detail) else null
+    val toolArgs = if (st.type == "tool" || st.type == "search") st.args else null
+    val toolDetail = if (st.type == "tool" || st.type == "search") st.detail else null
+    val hasBody = st.type == "text" ||
+            !thinkBodyText.isNullOrBlank() ||
+            toolArgs != null || toolDetail != null
     Row(verticalAlignment = Alignment.Top) {
-        Text(
-            when (st.type) {
-                "think" -> "💡"
-                "search" -> "🔍"
-                else -> "🔧"
+        Icon(
+            imageVector = when (st.type) {
+                "think" -> Icons.Filled.Psychology
+                "search" -> Icons.Filled.Search
+                "text" -> Icons.Filled.TextFields
+                else -> Icons.Filled.PlayArrow
             },
-            modifier = Modifier.width(22.dp)
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = if (st.ok) MaterialTheme.colorScheme.onSurfaceVariant
+            else MaterialTheme.colorScheme.error
         )
+        Spacer(modifier = Modifier.width(6.dp))
         Column(Modifier.weight(1f)) {
-            Text(
-                st.label,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (st.ok) MaterialTheme.colorScheme.onSurface
-                else MaterialTheme.colorScheme.error
-            )
-            if (st.type == "think") {
-                val body = thinkBody ?: st.detail
-                if (!body.isNullOrBlank()) {
-                    if (detailOpen) {
-                        // 固定盒子：思考只能在盒内滚动（限高260dp），正文是全局页面。
-                        // 包 SelectionContainer：长按可选中复制思考全文。
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 260.dp)
-                                .verticalScroll(rememberScrollState())
-                        ) {
-                            androidx.compose.foundation.text.selection.SelectionContainer {
-                                Text(
-                                    latexToUnicode(body),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+            when (st.type) {
+                "text" -> {
+                    // 中间正文：默认展开（迷你 markdown），可折叠成预览
+                    val textBody = st.detail ?: ""
+                    if (open) {
+                        parseSegments(textBody).forEach { seg ->
+                            when (seg) {
+                                is Seg.Text -> if (seg.s.isNotBlank()) {
+                                    Text(
+                                        inlineMd(seg.s),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        modifier = Modifier.padding(vertical = 2.dp)
+                                    )
+                                }
+                                is Seg.Heading -> Text(
+                                    inlineMd(seg.s),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(top = 2.dp, bottom = 1.dp)
                                 )
+                                is Seg.ListBlock -> Column(
+                                    verticalArrangement = Arrangement.spacedBy(1.dp),
+                                    modifier = Modifier.padding(vertical = 2.dp)
+                                ) {
+                                    seg.lines.forEach { l ->
+                                        Text(inlineMd(l), style = MaterialTheme.typography.bodyMedium)
+                                    }
+                                }
+                                is Seg.Quote -> Text(
+                                    inlineMd(seg.s),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(vertical = 2.dp)
+                                )
+                                is Seg.Table -> MarkdownTable(seg.rows, modifier = Modifier.padding(vertical = 2.dp))
+                                is Seg.Code -> CodeBlock(seg.lang, seg.s)
                             }
                         }
                     } else {
                         Text(
-                            body.take(40) + if (body.length > 40) "…" else "",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.clickable { detailOpen = true }
+                            if (textBody.length > 60) textBody.take(60) + "…" else textBody,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
-            } else {
-                // 工具/搜索步：参数 + 结果都可展开。以前只存结果前 120 字、不存参数，
-                // 排查「为什么没调对工具」时只能翻日志。
-                val argsText = st.args
-                val hasBody = argsText != null || st.detail != null
-                if (hasBody) {
-                    val collapsed = when {
-                        argsText != null -> "参数 " + argsText.take(36)
-                        else -> st.detail!!.take(36)
-                    }
-                    val expanded = buildString {
-                        if (argsText != null) append("参数：").append(argsText)
-                        if (st.detail != null) {
-                            if (argsText != null) append("\n\n")
-                            append("结果：").append(st.detail)
+                else -> {
+                    Text(
+                        st.label,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (st.ok) MaterialTheme.colorScheme.onSurface
+                        else MaterialTheme.colorScheme.error
+                    )
+                    if (st.type == "think") {
+                        if (!thinkBodyText.isNullOrBlank()) {
+                            if (open) {
+                                // 固定盒子：思考只能在盒内滚动（限高260dp），正文是全局页面。
+                                // 包 SelectionContainer：长按可选中复制思考全文。
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 260.dp)
+                                        .verticalScroll(rememberScrollState())
+                                ) {
+                                    androidx.compose.foundation.text.selection.SelectionContainer {
+                                        Text(
+                                            latexToUnicode(thinkBodyText),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            } else {
+                                Text(
+                                    thinkBodyText.take(40) + if (thinkBodyText.length > 40) "…" else "",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.clickable { open = true }
+                                )
+                            }
+                        }
+                    } else {
+                        // 工具/搜索步：展开成「命令|参数」+「输出」两块
+                        if (toolArgs != null || toolDetail != null) {
+                            if (open) {
+                                Column(
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    modifier = Modifier.padding(top = 4.dp)
+                                ) {
+                                    toolArgs?.let {
+                                        Row(
+                                            verticalAlignment = Alignment.Top,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .background(
+                                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                                    RoundedCornerShape(6.dp)
+                                                )
+                                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        ) {
+                                            Text(
+                                                if (st.label.startsWith("执行命令")) "命令" else "参数",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.width(40.dp)
+                                            )
+                                            Text(
+                                                it,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        }
+                                    }
+                                    toolDetail?.let {
+                                        Row(
+                                            verticalAlignment = Alignment.Top,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .background(
+                                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                                    RoundedCornerShape(6.dp)
+                                                )
+                                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        ) {
+                                            Text(
+                                                "输出",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.width(40.dp)
+                                            )
+                                            Text(
+                                                it,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = if (st.ok) MaterialTheme.colorScheme.onSurface
+                                                else MaterialTheme.colorScheme.error,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        }
+                                    }
+                                }
+                            } else {
+                                val collapsed = when {
+                                    toolArgs != null -> "参数 " + toolArgs.take(36)
+                                    else -> toolDetail!!.take(36)
+                                }
+                                Text(
+                                    collapsed + "…",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (!st.ok) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.clickable { open = true }
+                                )
+                            }
                         }
                     }
-                    Text(
-                        if (detailOpen) expanded
-                        else collapsed + if (expanded.length > collapsed.length) "…" else "",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = when {
-                            detailOpen -> MaterialTheme.colorScheme.onSurfaceVariant
-                            !st.ok -> MaterialTheme.colorScheme.error
-                            else -> MaterialTheme.colorScheme.primary
-                        },
-                        modifier = Modifier.clickable { detailOpen = !detailOpen }
-                    )
                 }
             }
+        }
+        // 逐行折叠箭头（DSH 每行右侧 ^/v）
+        if (hasBody) {
+            Text(
+                if (open) "▾" else "▸",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .padding(start = 4.dp, top = 2.dp)
+                    .clickable { open = !open }
+            )
         }
     }
 }
@@ -1649,7 +1769,13 @@ private fun LiveThinkRow(reasoning: String) {
         }
     }
     Row(verticalAlignment = Alignment.Top) {
-        Text("💡", modifier = Modifier.width(22.dp))
+        Icon(
+            imageVector = Icons.Filled.Psychology,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.primary
+        )
+        Spacer(modifier = Modifier.width(6.dp))
         Column(Modifier.weight(1f)) {
             Text(
                 "思考中…",
@@ -1845,15 +1971,9 @@ private fun MessageBubble(
                         val hasReasoning = rawReasoning != null && thinkSteps == 0
                         if (!isUser && (msg.steps.isNotEmpty() || rawReasoning != null)) {
                             var processOpen by remember { mutableStateOf(true) }
+                            // 不再包浅灰卡片：过程行直接落在消息卡里，靠左边细线标识同轮归属（DSH 样式）
                             Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(bottom = 6.dp)
-                                    .background(
-                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                                        RoundedCornerShape(8.dp)
-                                    )
-                                    .padding(8.dp)
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
                             ) {
                                 // 头部：一行摘要，整行可点击切换展开/收起
                                 Row(

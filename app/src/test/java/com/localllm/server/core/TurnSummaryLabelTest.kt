@@ -67,4 +67,20 @@ class TurnSummaryLabelTest {
             ChatStore.turnSummaryLabel(listOf(step("tool"), step("think")), hasReasoning = true)
         )
     }
+
+    @Test
+    fun `中间正文算消息条数`() {
+        assertEquals(
+            "✓ 已完成 · 2 条消息",
+            ChatStore.turnSummaryLabel(listOf(step("text"), step("text")))
+        )
+    }
+
+    @Test
+    fun `工具加中间正文都列出`() {
+        assertEquals(
+            "✓ 已完成 · 2 次工具调用 · 1 条消息",
+            ChatStore.turnSummaryLabel(listOf(step("think"), step("text"), step("tool"), step("tool")))
+        )
+    }
 }
