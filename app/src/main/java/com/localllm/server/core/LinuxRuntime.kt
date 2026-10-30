@@ -38,6 +38,29 @@ object LinuxRuntime {
 
     fun isReady(context: Context): Boolean = File(context.filesDir, MARK_READY).exists()
 
+    /**
+     * 文件工具授权目录的**真实路径**（/storage/emulated/0/...）。
+     *
+     * proot 里 bind 了 /storage，所以 bash 看到的这个路径和 SAF 是同一棵树——
+     * 模型用 file_write 写进授权目录的文件，在 Linux 环境里直接就在这个路径下。
+     * 解析不了（未授权 / 非 documents tree）时返回 null。
+     */
+    fun workdirAbsPath(context: Context): String? {
+        val uriStr = AppSettings.workDirTreeUri
+        if (uriStr.isBlank()) return null
+        val uri = runCatching { android.net.Uri.parse(uriStr) }.getOrNull() ?: return null
+        if ("tree" != uri.authority?.substringAfterLast('.')) return null
+        val docId = runCatching {
+            android.provider.DocumentsContract.getTreeDocumentId(uri)
+        }.getOrNull() ?: return null
+        val idx = docId.indexOf(':')
+        if (idx <= 0) return null
+        val storageId = docId.substring(0, idx)
+        val rel = docId.substring(idx + 1)
+        val root = if (storageId == "primary") "/storage/emulated/0" else "/storage/$storageId"
+        return if (rel.isEmpty()) root else root + "/" + rel.replace("/", "/")
+    }
+
     /** 首次使用：解压 rootfs + node、补运行时文件、按需安装基础工具。返回非空 = 失败原因 */
     fun prepare(context: Context): String {
         val rf = rootfsDir(context)
@@ -94,6 +117,8 @@ object LinuxRuntime {
             "-b", "${rf.absolutePath}/var/lib/dsh-app/empty:/sys/fs/selinux",
             "-b", "${rf.absolutePath}/var/lib/dsh-app/shm:/dev/shm",
             "-b", "/system", "-b", "/apex",
+            // 全盘文件访问：legacy storage 下 App 能直接读 /storage，bind 进去后 bash 就是同一棵树
+            "-b", "/storage",
             "/usr/bin/env", "-i",
             "HOME=/root", "USER=root", "LOGNAME=root", "SHELL=/bin/bash",
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",

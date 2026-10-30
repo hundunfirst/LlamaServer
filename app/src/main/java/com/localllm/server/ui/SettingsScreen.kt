@@ -257,6 +257,42 @@ fun SettingsScreen(
             com.localllm.server.core.AppSettings.fileToolsEnabled = fileOn
         }
 
+        // ---- 全盘文件访问（Linux 环境需要 bind /storage）----
+        // targetSdk 28 + WRITE_EXTERNAL_STORAGE = legacy storage，即 /sdcard 全盘读写；
+        // 授权后 Linux 环境（run_bash）里的 /storage 与文件工具目录是同一棵树。
+        var storageGranted by remember {
+            mutableStateOf(
+                androidx.core.content.ContextCompat.checkSelfPermission(
+                    fileCtx, android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            )
+        }
+        val storageLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+        ) { grants ->
+            storageGranted = grants[android.Manifest.permission.WRITE_EXTERNAL_STORAGE] == true
+            if (storageGranted) {
+                com.localllm.server.core.ServerProcessManager.appLog("已开启全盘文件访问（legacy storage）")
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (storageGranted) "已开启全盘文件访问"
+                else "未开启全盘访问——Linux 环境（run_bash）的 /storage 需要它",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            OutlinedButton(onClick = {
+                storageLauncher.launch(
+                    arrayOf(
+                        android.Manifest.permission.READ_EXTERNAL_STORAGE,
+                        android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+                    )
+                )
+            }) { Text(if (storageGranted) "已授权" else "开启全盘访问") }
+        }
+
         // ---- 代码自检（WebView 沙箱）----
         var sandboxOn by remember {
             mutableStateOf(com.localllm.server.core.AppSettings.webSandboxEnabled)

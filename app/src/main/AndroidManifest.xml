@@ -7,6 +7,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 全盘文件访问：targetSdk 28 下授予后即 legacy storage，可直接读写 /sdcard 任意路径。
+         用途：把 /storage bind 进 Linux 环境（proot），让 run_bash 能操作文件工具授权目录之外的真实文件；
+         这也是文件工具从「单 SAF 目录」升级成「全盘」的前提（2026-10-30 用户决定，替代 10-25 的不做）。 -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <!-- run_bash：apt / npm 前判断网络是否可用，避免让模型对着超时瞎猜 -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- run_bash：apt install / 构建类长命令会被省电策略掐断，需引导用户放行后台 -->

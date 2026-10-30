@@ -70,6 +70,15 @@ object BashTool {
         val timeout = args.optInt("timeout", 60).coerceIn(5, 600)
         val cwd = args.optString("cwd").ifBlank { "/root" }
 
+        // Linux 环境 bind 了 /storage（全盘访问），没授权的话命令会在看不到文件的地方跑，先拦住
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            return "错误：还没有「读写存储」权限——Linux 环境里的 /storage 需要它（全盘文件访问）。" +
+                    "请在 设置 → 文件工具 里点击「开启全盘访问」授权后重试。"
+        }
+
         val prep = LinuxRuntime.prepare(context)
         if (prep.isNotEmpty()) return "Linux 环境未就绪：$prep"
 
