@@ -549,7 +549,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             "需要 PDF 用 make_pdf。都写入工作目录，并在回答里告知文件名；" +
                             "已经存在的文件只改一两处时，用 file_patch（给 old/new 片段），" +
                             "不要用 file_write 重吐全文——那样每轮都要重新输出整份文件，慢且容易把已对的部分改坏；" +
-                            "查看已有文件用 file_list / file_read / file_grep。"
+                            "查看已有文件用 file_list / file_read / file_grep；" +
+                            "**关于设备/系统的状态类问题（版本号、文件是否在、命令能否跑、目录内容），" +
+                            "必须先用 run_bash 实测再回答，禁止凭记忆给答案——你记忆里的版本号不是这台机器上的版本号。**"
                 } else ""
                 val todoHint = if (todoOn && wantsArtifact) {
                     "多步任务可先用 todo_write 列出计划（同一消息最多 3 次），随后必须在正文中直接给出实际产出（代码/文件内容），" +
@@ -576,7 +578,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // （1539 token 同提示重发 0.18s、尾部换问题 0.47s、中途分叉 10-11s），
                 // 所以顺序对缓存没有收益，按指令遵循效果排序即可。
                 val chatHint = if (wantsArtifact) "" else
-                    "用户只是提问、求解释或求介绍时，直接用中文回答，不要建文件、不要调用任何工具。"
+                    "用户只是提问、求解释或求介绍时，直接用中文回答，不要建文件、不要调用任何工具。" +
+                            "但关于设备/系统当前状态的提问（软件版本号、文件是否在、命令能否执行、目录里有什么）例外：" +
+                            "那类必须先调用 run_bash 实测，凭记忆回答会报错或撒谎。"
                 val systemText = chatHint + (if (basePrompt.isNotBlank())
                     "【本会话角色设定，优先遵守】" + basePrompt + " "
                 else "") + todoHint + fileHint + sandboxHint + memoryHint +
