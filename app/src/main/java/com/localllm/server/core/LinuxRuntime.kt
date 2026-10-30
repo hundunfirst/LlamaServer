@@ -2,9 +2,7 @@ package com.localllm.server.core
 
 import android.content.Context
 import java.io.File
-import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
-import java.util.zip.ZipInputStream
 
 /**
  * 内置 Linux 运行环境（PRoot + Ubuntu Base + Node）。
@@ -22,10 +20,12 @@ import java.util.zip.ZipInputStream
  */
 object LinuxRuntime {
 
-    private const val ROOTFS_ASSET = "runtime/rootfs.zip"
-    private const val NODE_ASSET = "runtime/node-arm64.zip"
+    private const val ROOTFS_ASSET = "runtime/rootfs.tar.gz"
+    private const val NODE_ASSET = "runtime/node-arm64.tar.gz"
     private const val MARK_READY = "runtime/.ready"
     private const val MARK_APT = "runtime/.apt-installed"
+    /** 内容版本：tar/结构有变化就 +1，旧设备靠它重新解压 */
+    private const val READY_VERSION = "3"
 
     /** 输出回传上限：环境工具的产出也会进上下文，超长截断 */
     private const val MAX_OUTPUT_CHARS = 6000
@@ -36,7 +36,8 @@ object LinuxRuntime {
     private fun tmpDir(context: Context): File = File(context.cacheDir, "proot-tmp")
     private fun nativeLibDir(context: Context): String = context.applicationInfo.nativeLibraryDir
 
-    fun isReady(context: Context): Boolean = File(context.filesDir, MARK_READY).exists()
+    fun isReady(context: Context): Boolean =
+        runCatching { File(context.filesDir, MARK_READY).readText() == READY_VERSION }.getOrDefault(false)
 
     /**
      * 文件工具授权目录的**真实路径**（/storage/emulated/0/...）。
@@ -66,8 +67,8 @@ object LinuxRuntime {
         val rf = rootfsDir(context)
         if (!isReady(context)) {
             runCatching {
-                extractZip(context, ROOTFS_ASSET, rf)
-                extractZip(context, NODE_ASSET, rf) // node 包带 usr/local/ 前缀
+                context.assets.open(ROOTFS_ASSET).use { MinimalTar.extractGz(it, rf) }
+                context.assets.open(NODE_ASSET).use { MinimalTar.extractGz(it, rf) }
             }.getOrElse { return "解压运行环境失败：${it.message ?: "未知错误"}" }
             applyPermissions(rf)
             writeGuestConfig(rf)
@@ -75,7 +76,7 @@ object LinuxRuntime {
             File(rf, "var/lib/dsh-app/empty").mkdirs()
             File(rf, "var/lib/dsh-app/shm").mkdirs()
             tmpDir(context).mkdirs()
-            File(context.filesDir, MARK_READY).writeText("1")
+            File(context.filesDir, MARK_READY).writeText(READY_VERSION)
         }
         if (!File(context.filesDir, MARK_APT).exists()) {
             val out = exec(
@@ -161,26 +162,10 @@ object LinuxRuntime {
 
     private fun extractZip(context: Context, asset: String, dest: File) {
         dest.mkdirs()
-        context.assets.open(asset).use { input ->
-            ZipInputStream(input).use { zip ->
-                var e = zip.nextEntry
-                while (e != null) {
-                    val name = e.name
-                    if (name.endsWith("/")) {
-                        File(dest, name).mkdirs()
-                    } else {
-                        val f = File(dest, name)
-                        f.parentFile?.mkdirs()
-                        FileOutputStream(f).use { out -> zip.copyTo(out, 1 shl 16) }
-                    }
-                    zip.closeEntry()
-                    e = zip.nextEntry
-                }
-            }
-        }
+        context.assets.open(asset).use { MinimalTar.extractGz(it, dest) }
     }
-
-    /** zip 不带 unix 权限位，这里按目录补执行位：bin/sbin 目录下全部可执行，其余 0644 */
+    /** tar 里符号链接已原样解出；这里只补 zip 没有的 unix 权限位：
+     *  bin/sbin 目录下全部可执行，其余 0644 */
     private fun applyPermissions(rf: File) {
         val execDirs = setOf(
             "bin", "sbin", "usr/bin", "usr/sbin", "usr/local/bin", "usr/local/sbin",
