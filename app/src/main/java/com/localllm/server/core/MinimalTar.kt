@@ -2,6 +2,7 @@ package com.localllm.server.core
 
 import java.io.File
 import java.io.InputStream
+import java.io.SequenceInputStream
 import java.util.zip.GZIPInputStream
 
 /**
@@ -22,11 +23,17 @@ object MinimalTar {
         runCatching { android.system.Os.symlink(target, link) }.isSuccess
     }
 
-    /** 把 gzip 压缩的 tar 流解压到 [dest]（目录结构 + 符号链接原样还原） */
+    /** 把（可能 gzip 的）tar 流解压到 [dest]。先嗅探 gzip 魔数再决定要不要解压 */
     fun extractGz(gz: InputStream, dest: File) {
-        GZIPInputStream(gz).use { tar ->
-            extract(tar, dest)
+        val peek = ByteArray(2)
+        val n = gz.read(peek)
+        val buf = java.io.ByteArrayInputStream(peek.copyOf(n))
+        val stream: InputStream = if (n >= 2 && peek[0] == 0x1f.toByte() && peek[1] == 0x8b.toByte()) {
+            GZIPInputStream(SequenceInputStream(buf, gz))
+        } else {
+            SequenceInputStream(buf, gz)
         }
+        stream.use { extract(it, dest) }
     }
 
     fun extract(tar: InputStream, dest: File) {

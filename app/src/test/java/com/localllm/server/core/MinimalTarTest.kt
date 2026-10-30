@@ -55,7 +55,7 @@ class MinimalTarTest {
 
     @Test
     fun `rootfs 解出关键路径且符号链接还原`() {
-        val rf = extract("rootfs.tar.gz")
+        val rf = extract("rootfs.bin")
         assertTrue("usr/bin/env 应存在", File(rf, "usr/bin/env").isFile)
         assertTrue("usr/bin/bash 应存在", File(rf, "usr/bin/bash").isFile)
         assertTrue("usr/bin/apt 应存在", File(rf, "usr/bin/apt").isFile)
@@ -73,7 +73,7 @@ class MinimalTarTest {
 
     @Test
     fun `node 包解到 usr local 且 bin 链接还原`() {
-        val rf = extract("node-arm64.tar.gz")
+        val rf = extract("node-arm64.bin")
         // PATH 里真正用到的是 usr/local/bin/node（实体二进制）；lib/node_modules 深路径是 Windows 边角
         assertTrue("usr/local/bin/node 应存在", File(rf, "usr/local/bin/node").isFile)
         assertFalse("不应残留顶层目录", File(rf, "node-v24.22.1-linux-arm64").exists())

@@ -20,8 +20,10 @@ import java.util.concurrent.TimeUnit
  */
 object LinuxRuntime {
 
-    private const val ROOTFS_ASSET = "runtime/rootfs.tar.gz"
-    private const val NODE_ASSET = "runtime/node-arm64.tar.gz"
+    // 资产用 .bin 扩展名：aapt 会剥掉 .gz 后缀并把 gzip 解压成裸 tar（实测），
+    // .bin 不受影响，open() 返回的就是原始 gzip 字节
+    private const val ROOTFS_ASSET = "runtime/rootfs.bin"
+    private const val NODE_ASSET = "runtime/node-arm64.bin"
     private const val MARK_READY = "runtime/.ready"
     private const val MARK_APT = "runtime/.apt-installed"
     /** 内容版本：tar/结构有变化就 +1，旧设备靠它重新解压 */
