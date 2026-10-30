@@ -43,3 +43,6 @@ HANDOFF.md
 mtp_ab_*.json
 vision_tokens.json
 .vision_bench/
+
+# ---- Linux 运行环境资产（体积大，脚本可重建，不入库） ----
+app/src/main/assets/runtime/

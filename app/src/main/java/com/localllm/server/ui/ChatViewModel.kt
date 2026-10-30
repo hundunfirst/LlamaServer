@@ -4,12 +4,14 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.localllm.server.core.AppSettings
+import com.localllm.server.core.BashTool
 import com.localllm.server.core.ChatClient
 import com.localllm.server.core.ChatStore
 import com.localllm.server.core.DocExtract
 import com.localllm.server.core.DocMaker
 import com.localllm.server.core.FileTools
 import com.localllm.server.core.GgufInspector
+import com.localllm.server.core.LinuxRuntime
 import com.localllm.server.core.McpArgRepair
 import com.localllm.server.core.McpHttpClient
 import com.localllm.server.core.MemoryStore
@@ -773,6 +775,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (fileOn) FileTools.toolsJson().let { fa ->
                         for (i in 0 until fa.length()) arr.put(fa.getJSONObject(i))
                     }
+                    // 内置 Linux 环境（PRoot + Ubuntu）：跑测试/git/node 的入口，跟着文件工具一起给
+                    if (fileOn) arr.put(BashTool.toolJson())
                     if (memoryOn) arr.put(MemoryStore.toolJson())
                     // OCR 工具：只有对话里真的出现过图片才注入，平时不白占 schema
                     if (hasImage) arr.put(OcrTool.toolJson())
@@ -1222,6 +1226,31 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                         }
                                     }
                                 }
+                            } else if (fileOn && tc.name == BashTool.NAME) {
+                                val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                val cmd = args.optString("command").trim()
+                                if (!LinuxRuntime.isReady(getApplication())) {
+                                    ServerProcessManager.appLog(
+                                        "Linux 环境首次使用：解压 rootfs + 安装 git/curl/python3，可能需要几分钟…"
+                                    )
+                                }
+                                ServerProcessManager.appLog("Linux 命令：${cmd.take(80)}")
+                                // 长命令放到 IO 线程，别卡主线程
+                                val r = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                                    BashTool.execute(getApplication(), args)
+                                }
+                                val failed = r.startsWith("【命令退出码") || r.startsWith("Linux 环境未就绪")
+                                steps.add(
+                                    ChatStore.Step(
+                                        "tool", "执行命令：${cmd.take(60)}",
+                                        r.take(800), args = cmd.take(600), ok = !failed
+                                    )
+                                )
+                                syncSteps()
+                                ServerProcessManager.appLog(
+                                    "Linux 命令完成：${if (failed) "失败" else "成功"}（${r.length} 字符回传）"
+                                )
+                                r
                             } else if (fileOn && tc.name in FileTools.NAMES) {
                                 val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                                 ServerProcessManager.appLog("文件工具：${tc.name}")
