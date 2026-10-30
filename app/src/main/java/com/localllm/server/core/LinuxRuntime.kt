@@ -27,7 +27,7 @@ object LinuxRuntime {
     private const val MARK_READY = "runtime/.ready"
     private const val MARK_APT = "runtime/.apt-installed"
     /** 内容版本：tar/结构有变化就 +1，旧设备靠它重新解压 */
-    private const val READY_VERSION = "4"
+    private const val READY_VERSION = "5"
 
     /** 输出回传上限：环境工具的产出也会进上下文，超长截断 */
     private const val MAX_OUTPUT_CHARS = 6000
@@ -175,8 +175,9 @@ object LinuxRuntime {
      *  逻辑反着来：**默认可执行**（apt 的 /usr/lib/apt/methods/http 这类深层可执行文件
      *  靠 whitelist 会漏，实测 apt 报 Failed to exec method），只有明确的纯数据目录例外。 */
     private val NON_EXEC_SEGMENTS = setOf(
-        "share", "include", "man", "doc", "locale", "icons", "fonts",
-        "translations", "pam.d", "presets"
+        // 注意：不能把 share 放进来——/usr/share/debconf/frontend 是 debconf 的前端程序，
+        // apt 的 tzdata/ca-certificates postinst 要 exec 它，0644 会让 dpkg 配置阶段全挂
+        "include", "man", "doc", "locale", "icons", "fonts", "translations"
     )
     private fun applyPermissions(rf: File) {
         fun walk(dir: File) {
