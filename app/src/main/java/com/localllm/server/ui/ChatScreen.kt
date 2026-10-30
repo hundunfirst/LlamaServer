@@ -1652,8 +1652,10 @@ private fun StepRow(st: ChatStore.Step, thinkBody: String? = null) {
                                     }
                                 }
                             } else {
+                                // 折叠预览：完成态取全文首行（DSH 规则），去掉 **
+                                val preview = ChatStore.thinkingPreview(thinkBodyText, active = false)
                                 Text(
-                                    thinkBodyText.take(40) + if (thinkBodyText.length > 40) "…" else "",
+                                    preview.take(40) + if (preview.length > 40) "…" else "",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier.clickable { open = true }
@@ -1753,21 +1755,12 @@ private fun StepRow(st: ChatStore.Step, thinkBody: String? = null) {
     }
 }
 
-// 流式思考行：思考还在生成、尚未落成 think 步时实时滚动显示
+// 流式思考行（DSH ThinkingPill）：紧凑一行「思考中 + 最近一段首行预览」，
+// 思考边生成边实时更新；点开在细线旁看全文（自动跟随滚动）。
 @Composable
 private fun LiveThinkRow(reasoning: String) {
-    val thinkScroll = rememberScrollState()
-    var thinkJumped by remember { mutableStateOf(false) }
-    LaunchedEffect(reasoning.length) {
-        val max = thinkScroll.maxValue
-        if (max <= 0) return@LaunchedEffect
-        if (!thinkJumped) {
-            thinkScroll.scrollTo(max)
-            thinkJumped = true
-        } else if (thinkScroll.value >= max - 80) {
-            thinkScroll.scrollTo(max)
-        }
-    }
+    var open by remember { mutableStateOf(false) }
+    val preview = ChatStore.thinkingPreview(reasoning, active = true)
     Row(verticalAlignment = Alignment.Top) {
         Icon(
             imageVector = Icons.Filled.Psychology,
@@ -1777,26 +1770,67 @@ private fun LiveThinkRow(reasoning: String) {
         )
         Spacer(modifier = Modifier.width(6.dp))
         Column(Modifier.weight(1f)) {
-            Text(
-                "思考中…",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 260.dp)
-                    .verticalScroll(thinkScroll)
-            ) {
-                androidx.compose.foundation.text.selection.SelectionContainer {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "思考中",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                CircularProgressIndicator(
+                    modifier = Modifier.size(10.dp),
+                    strokeWidth = 1.5.dp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                if (preview.isNotEmpty()) {
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        latexToUnicode(reasoning),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        preview,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
                     )
                 }
             }
+            if (open) {
+                val thinkScroll = rememberScrollState()
+                var thinkJumped by remember { mutableStateOf(false) }
+                LaunchedEffect(reasoning.length) {
+                    val max = thinkScroll.maxValue
+                    if (max <= 0) return@LaunchedEffect
+                    if (!thinkJumped) {
+                        thinkScroll.scrollTo(max)
+                        thinkJumped = true
+                    } else if (thinkScroll.value >= max - 80) {
+                        thinkScroll.scrollTo(max)
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 260.dp)
+                        .verticalScroll(thinkScroll)
+                ) {
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        Text(
+                            latexToUnicode(reasoning),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
         }
+        Text(
+            if (open) "▾" else "▸",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .padding(start = 4.dp, top = 2.dp)
+                .clickable { open = !open }
+        )
     }
 }
 
@@ -1975,42 +2009,33 @@ private fun MessageBubble(
                             Column(
                                 modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
                             ) {
-                                // 头部：一行摘要，整行可点击切换展开/收起
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .clickable { processOpen = !processOpen }
-                                        .padding(vertical = 2.dp)
-                                ) {
-                                    if (thinking || generating) {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(14.dp),
-                                            strokeWidth = 2.dp,
-                                            color = MaterialTheme.colorScheme.primary
+                                // 运行中只有行在长，不显示摘要头（DSH：结束才折叠成摘要）
+                                if (!thinking && !generating) {
+                                    // 头部：一行摘要，整行可点击切换展开/收起
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .clickable { processOpen = !processOpen }
+                                            .padding(vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            ChatStore.turnSummaryLabel(msg.steps, hasReasoning),
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
                                         )
-                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            if (processOpen) "▾" else "▸",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
                                     }
-                                    Text(
-                                        when {
-                                            thinking -> "思考中…"
-                                            generating -> "生成中…"
-                                            else -> ChatStore.turnSummaryLabel(msg.steps, hasReasoning)
-                                        },
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Text(
-                                        if (processOpen) "▾" else "▸",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
                                 }
-                                if (processOpen || thinking) {
+                                if (processOpen || thinking || generating) {
                                     // 左边一道细线：标识下面这些行「同属这一个过程」
                                     Row(Modifier.fillMaxWidth()) {
                                         Box(
@@ -2026,16 +2051,16 @@ private fun MessageBubble(
                                             Modifier.weight(1f),
                                             verticalArrangement = Arrangement.spacedBy(2.dp)
                                         ) {
-                                            // 流式思考还没落成 think 步：实时滚动显示
-                                            if (thinking) {
-                                                LiveThinkRow(rawReasoning ?: "")
-                                            }
+                                            // 已有步骤按顺序排；实时思考行跟在最后，按时间顺序长
                                             msg.steps.forEach { st ->
                                                 StepRow(
                                                     st = st,
                                                     thinkBody = if (st.type == "think" && thinkSteps == 1)
                                                         rawReasoning else null
                                                 )
+                                            }
+                                            if (thinking) {
+                                                LiveThinkRow(rawReasoning ?: "")
                                             }
                                             // 老数据：只有 reasoning 没有 steps（思考未落盘的历史消息）
                                             if (!thinking && msg.steps.isEmpty() && rawReasoning != null) {

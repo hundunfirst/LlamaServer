@@ -49,6 +49,40 @@ object ChatStore {
         return parts.joinToString(" · ")
     }
 
+
+    /**
+     * DSH ThinkingPill 的预览规则：思考中只取「已写完首行的最近一段」（不跟着半句话抖），
+     * 完成后取全文第一行；都去掉 `**`。返回的预览用于思考行的紧凑一行。
+     */
+    internal fun thinkingPreview(text: String, active: Boolean): String {
+        val line = if (active) latestParagraphFirstLine(text) else firstLine(text)
+        return line.replace("**", "").trim()
+    }
+
+    private fun firstLine(text: String): String {
+        val trimmed = text.trimStart()
+        val nl = trimmed.indexOf('\n')
+        return if (nl == -1) trimmed else trimmed.substring(0, nl)
+    }
+
+    /** 最近一段里已经写完（后面跟着换行）的首行；还没有就空。 */
+    private fun latestParagraphFirstLine(text: String): String {
+        var summary = ""
+        var start = 0
+        val matches = Regex("\\r?\\n(?:[\\t ]*\\r?\\n)+").findAll(text).toList()
+        for (i in 0..matches.size) {
+            val sep = if (i < matches.size) matches[i] else null
+            val end = if (sep == null) text.length else sep.range.first + sep.value.indexOf('\n')
+            val nl = text.indexOf('\n', start)
+            if (nl != -1 && nl <= end) {
+                val candidate = text.substring(start, nl).trim()
+                if (candidate.isNotEmpty()) summary = candidate
+            }
+            if (sep == null) break
+            start = sep.range.last + 1
+        }
+        return summary
+    }
     /** 搜索来源（可点击跳转） */
     data class Source(val title: String, val url: String)
 

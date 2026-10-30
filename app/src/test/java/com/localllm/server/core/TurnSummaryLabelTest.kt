@@ -83,4 +83,34 @@ class TurnSummaryLabelTest {
             ChatStore.turnSummaryLabel(listOf(step("think"), step("text"), step("tool"), step("tool")))
         )
     }
+
+    @Test
+    fun `思考预览_完成态取全文第一行并去掉星号`() {
+        assertEquals(
+            "先看 pubspec 里锁的版本",
+            ChatStore.thinkingPreview("**先看 pubspec 里锁的版本**\n然后看依赖树\n\n第二段", active = false)
+        )
+    }
+
+    @Test
+    fun `思考预览_进行中只取已写完首行的最近一段`() {
+        assertEquals(
+            "再看依赖树",
+            ChatStore.thinkingPreview("先看 pubspec\n\n再看依赖树\n", active = true)
+        )
+    }
+
+    @Test
+    fun `思考预览_进行中半句话不抖`() {
+        assertEquals("", ChatStore.thinkingPreview("只写到一半没有换行", active = true))
+        assertEquals("", ChatStore.thinkingPreview("半句（还没写完", active = true))
+    }
+
+    @Test
+    fun `思考预览_进行中最近一段优先`() {
+        assertEquals(
+            "再看依赖树",
+            ChatStore.thinkingPreview("先看 pubspec\n\n再看依赖树\n\n还在想", active = true)
+        )
+    }
 }
