@@ -93,7 +93,39 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun enqueue(sid: String, text: String) {
         _taskQueue.update { it + QueuedTask(sid, text) }
+        saveQueue()
         ServerProcessManager.appLog("指令已排队（共 ${_taskQueue.value.size} 条）：${text.take(40)}")
+    }
+
+    /** 队列落盘：进程被系统杀掉时排队的指令不该跟着消失 */
+    private fun queueFile() = java.io.File(getApplication<Application>().filesDir, "task_queue.json")
+
+    private fun saveQueue() {
+        runCatching {
+            val arr = org.json.JSONArray()
+            _taskQueue.value.forEach { q ->
+                arr.put(org.json.JSONObject().put("sid", q.sid).put("text", q.text))
+            }
+            queueFile().writeText(arr.toString())
+        }
+    }
+
+    private fun loadQueue() {
+        runCatching {
+            val f = queueFile()
+            if (!f.isFile) return
+            val arr = org.json.JSONArray(f.readText())
+            val list = (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val sid = o.optString("sid")
+                val text = o.optString("text")
+                if (sid.isBlank() || text.isBlank()) null else QueuedTask(sid, text)
+            }
+            if (list.isNotEmpty()) {
+                _taskQueue.value = list
+                ServerProcessManager.appLog("恢复排队指令 ${list.size} 条（上次进程被结束时留下的）")
+            }
+        }
     }
 
     /** 一轮跑完后取出本会话的下一条排队指令；没有就什么都不做 */
@@ -101,6 +133,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (sid in _generating.value) return
         val next = _taskQueue.value.firstOrNull { it.sid == sid } ?: return
         _taskQueue.update { it - next }
+        saveQueue()
         if (_activeId.value != sid) {
             // 用户已经切走了：留一条提示，切回来再说，不擅自换会话
             _toast.value = "「${next.text.take(20)}」还在队列里，切回该会话后会自动继续"
@@ -116,6 +149,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun clearQueue() {
         ServerProcessManager.appLog("已清空排队指令（${_taskQueue.value.size} 条）")
         _taskQueue.value = emptyList()
+        saveQueue()
     }
 
     /** 各会话的生成进度（“342 token · 28.1 tok/s”），用于全局运行中指示 */
@@ -374,6 +408,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun onInput(v: String) { _input.value = v }
 
     init {
+        // 上次进程被结束时还剩的排队指令：读回来，接着排队
+        runCatching { loadQueue() }
         // 进程在后台被杀时，那一轮的 stopped 还是 false，正文也可能为空：
         // 重开时把它们标成「被打断」，于是「继续这个任务」会出现，而不是看起来什么都没发生。
         runCatching {
@@ -952,6 +988,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 } else if (permission == "read") {
                     "【仅可查看】这一轮只能读取信息，不要写文件、不要执行会改变系统状态的命令。"
                 } else ""
+                // 已沉淀的技能：只报名字和一句话说明，**不贴正文**。
+                // 正文动辄几百字，全塞进提示词会污染每一轮；让模型知道「有这么个经验」，
+                // 真要细节时由用户从技能里选用。
+                val skillHint = run {
+                    val all = AppSettings.loadSkills()
+                    if (all.isEmpty()) return@run ""
+                    val picked = if (all.size <= 5) {
+                        all
+                    } else {
+                        all.filter { s ->
+                            val key = s.name.take(6)
+                            key.isNotBlank() && lastUserText.contains(key)
+                        }.take(5)
+                    }
+                    if (picked.isEmpty()) ""
+                    else "【以前做成功过的流程（仅列名字，细节问用户）】\n" +
+                            picked.joinToString("\n") { "- ${it.name}：${it.desc.take(40)}" } +
+                            "\n如果这次和其中某条相似，就说明「可以照 XXX 的做法」，别凭空编步骤。"
+                }
                 // 用户最后一条消息里若含链接 → 抓取内容（GitHub 走 README 特判）
                 // 注意：内容必须并入首条 system 文案——部分模板（Qwen）要求 system 只能在开头
                 val linkText: String? = run {
@@ -999,8 +1054,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 var imageLogged = false
                 // 对话里有没有图：决定是否注入 ocr_image 工具
                 val hasImage = history.any { it.imageB64 != null }
-                val systemTextFull = if (linkText == null) systemText
-                else systemText + "\n\n【用户消息中链接的内容（供回答参考，可能不完整）】\n" + linkText
+                val systemTextFull = (if (linkText == null) systemText
+                else systemText + "\n\n【用户消息中链接的内容（供回答参考，可能不完整）】\n" + linkText) +
+                        (if (skillHint.isBlank()) "" else "\n\n" + skillHint)
                 // Qwen3.5 等模板硬性要求 system 只能是第一条，否则 raise_exception：
                 // 「System message must be at the beginning」。而上下文压缩产生的「历史摘要」
                 // 是以 system 角色插在历史中间的——直接让整个请求 500，且是在 prefill
