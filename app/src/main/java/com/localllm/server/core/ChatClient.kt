@@ -35,18 +35,39 @@ object ChatClient {
         val arguments: String
     )
 
-    /** 当前进行中的请求连接（单会话单请求）；停止按钮通过 abort() 立即断开 */
-    @Volatile
-    private var activeConn: HttpURLConnection? = null
+    /** 进行中的请求连接，按调用方给的身份登记（会话 id）——多会话并行时各断各的 */
+    private val activeConns = java.util.concurrent.ConcurrentHashMap<String, HttpURLConnection>()
 
-    /** 立即中断正在进行的流式请求：断开连接让阻塞中的读马上返回，
-     *  对思考流（reasoning）同样生效——仅靠协程取消对阻塞 readLine 无效。 */
-    fun abort() {
-        val c = activeConn
-        activeConn = null
-        try {
-            c?.disconnect()
-        } catch (_: Exception) {
+    /** 最近一次请求的「缓存命中」token 数（llama.cpp 的 timings.cache_n / OpenAI 的 cached_tokens） */
+    @Volatile
+    var lastCacheHit: Int = 0
+        private set
+
+    /** 按调用方（会话）分开记：多会话并行时不能互相读到对方的命中数 */
+    private val cacheHitsByKey = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    fun lastCacheHitFor(key: String): Int = cacheHitsByKey[key] ?: 0
+
+    /** 立即中断：callKey 非空只断这一条，空则全部断开（停止按钮/退出时用）。
+     *  断开连接让阻塞中的读马上返回，对思考流（reasoning）同样生效——
+     *  仅靠协程取消对阻塞 readLine 无效。 */
+    fun abort(callKey: String? = null) {
+        if (callKey != null) {
+            activeConns.remove(callKey)?.let {
+                try {
+                    it.disconnect()
+                } catch (_: Exception) {
+                }
+            }
+            return
+        }
+        val all = activeConns.values.toList()
+        activeConns.clear()
+        all.forEach {
+            try {
+                it.disconnect()
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -78,7 +99,9 @@ object ChatClient {
         /** 流结束原因：stop / length（撞 max_tokens 截断）/ tool_calls 等 */
         onFinish: (String) -> Unit = {},
         /** 耗时诊断：ttfbMs=首字节，firstTokenMs=首个内容增量（云端慢排查用） */
-        onTiming: (ttfbMs: Long, firstTokenMs: Long?) -> Unit = { _, _ -> }
+        onTiming: (ttfbMs: Long, firstTokenMs: Long?) -> Unit = { _, _ -> },
+        /** 调用方身份（会话 id）：abort 按它断开，多会话并行不乱杀 */
+        callKey: String = ""
     ) = withContext(Dispatchers.IO) {
         val url = if (baseUrl.isNullOrBlank()) {
             URL("http://127.0.0.1:$port/v1/chat/completions")
@@ -96,7 +119,7 @@ object ChatClient {
                 setRequestProperty("Authorization", "Bearer $apiToken")
             }
         }
-        activeConn = conn
+        if (callKey.isNotBlank()) activeConns[callKey] = conn
         val t0 = System.currentTimeMillis()
         var ttfbMs = -1L
         var firstTokenMs: Long? = null
@@ -167,6 +190,12 @@ object ChatClient {
                         val prompt = usage.optInt("prompt_tokens", 0)
                         // tps 可能缺失（云端 OpenAI 风格无 timings）：照样采纳权威 token 数
                         val tps = timings?.optDouble("predicted_per_second", 0.0) ?: 0.0
+                        // 缓存命中：llama.cpp 在 timings.cache_n 里给，OpenAI 风格在
+                        // usage.prompt_tokens_details.cached_tokens；两边都认
+                        lastCacheHit = timings?.optInt("cache_n", 0)
+                            ?: usage.optJSONObject("prompt_tokens_details")?.optInt("cached_tokens", 0)
+                            ?: 0
+                        cacheHitsByKey[callKey] = lastCacheHit
                         if (tokens > 0) onFinal(tokens, tps, prompt)
                         continue
                     }
@@ -224,7 +253,7 @@ object ChatClient {
             onToolCalls(calls)
             onFinish(lastFinish)
         } finally {
-            if (activeConn === conn) activeConn = null
+            if (callKey.isNotBlank()) activeConns.remove(callKey, conn)
             conn.disconnect()
         }
     }

@@ -136,6 +136,11 @@ object AppSettings {
         get() = prefs.getInt("ctx_size", 8192)
         set(value) = prefs.edit().putInt("ctx_size", value).apply()
 
+    /** 全局输出上限（本地 max_tokens）；模型页里单模型留空时用这个 */
+    var outSize: Int
+        get() = prefs.getInt("out_size", 8192)
+        set(value) = prefs.edit().putInt("out_size", value.coerceIn(256, 131072)).apply()
+
     var threads: Int
         get() = prefs.getInt("threads", 0)
         set(value) = prefs.edit().putInt("threads", value).apply()
@@ -603,6 +608,61 @@ object AppSettings {
         set(value) = prefs.edit().putString("work_dir_tree", value).apply()
 
     /**
+     * 危险操作确认：执行命令、写文件、带写语义的 MCP 工具前先弹一次确认。
+     * 默认开——模型看错一次路径就可能是不可撤销的删除。
+     */
+    var toolApprovalEnabled: Boolean
+        get() = prefs.getBoolean("tool_approval_enabled", true)
+        set(value) = prefs.edit().putBoolean("tool_approval_enabled", value).apply()
+
+    /**
+     * 新会话的默认执行权限：read（仅可查看）/ workspace（工作区内修改）/ full（完全权限）。
+     * 会话里可以单独覆盖；这里只是新会话的起点。
+     */
+    var defaultPermission: String
+        get() = prefs.getString("default_permission", "workspace") ?: "workspace"
+        set(value) = prefs.edit().putString("default_permission", value).apply()
+
+    /**
+     * 图片压缩档位：
+     * - original：不压缩（超过 6MB 才降采样，否则请求体太大）
+     * - auto：小图直传，大图压到长边 3072 / 质量 95
+     * - small：一律压到长边 1600 / 质量 85（省上下文，字会糊）
+     * 默认 original——重编码是截图小字糊掉的主因。
+     */
+    var imageCompressMode: String
+        get() = prefs.getString("image_compress_mode", "original") ?: "original"
+        set(value) = prefs.edit().putString("image_compress_mode", value).apply()
+
+    /** 文本附件体积上限（MB）；0 = 不限。默认 32 */
+    var attachmentMaxMb: Int
+        get() = prefs.getInt("attachment_max_mb", 32)
+        set(value) = prefs.edit().putInt("attachment_max_mb", value.coerceAtLeast(0)).apply()
+
+    /**
+     * 附件允许占用上下文的比例（%）。超过就按比例截断。
+     * 0 = 不按比例截断（只在模型自己的上下文上限那里报错），默认 45。
+     */
+    var attachmentBudgetPct: Int
+        get() = prefs.getInt("attachment_budget_pct", 45)
+        set(value) = prefs.edit().putInt("attachment_budget_pct", value.coerceIn(0, 100)).apply()
+
+    /** 单条工具结果能占上下文的百分比；0 = 不截断。默认 17（约 1/6） */
+    var toolResultBudgetPct: Int
+        get() = prefs.getInt("tool_result_budget_pct", 17)
+        set(value) = prefs.edit().putInt("tool_result_budget_pct", value.coerceIn(0, 100)).apply()
+
+    /** 错误提示在界面上最多显示多少字；0 = 不限（超长会把界面拖死，慎用）。默认 300 */
+    var errorMaxChars: Int
+        get() = prefs.getInt("error_max_chars", 300)
+        set(value) = prefs.edit().putInt("error_max_chars", value.coerceAtLeast(0)).apply()
+
+    /** MCP 工具全量注入的阈值；0 = 不限（一个不筛，全给模型）。默认 24 */
+    var mcpToolFullLimit: Int
+        get() = prefs.getInt("mcp_tool_full_limit", 24)
+        set(value) = prefs.edit().putInt("mcp_tool_full_limit", value.coerceAtLeast(0)).apply()
+
+    /**
      * 代码自检开关：允许模型把生成的 HTML 丢进内置 WebView 沙箱跑一次，拿到报错后自己修。
      * 没有这条回路，弱模型写的代码就只能一次成型、错了也不知道。
      */
@@ -672,8 +732,8 @@ object AppSettings {
     /** 生效上下文长度：模型级 → 全局 */
     fun effectiveCtx(modelPath: String?): Int = localModelParam(modelPath)?.ctx ?: ctxSize
 
-    /** 生效输出上限（本地 max_tokens）：模型级 → 默认 8192 */
-    fun effectiveOut(modelPath: String?): Int = localModelParam(modelPath)?.out ?: 8192
+    /** 生效输出上限（本地 max_tokens）：模型级 → 全局 outSize */
+    fun effectiveOut(modelPath: String?): Int = localModelParam(modelPath)?.out ?: outSize
 
     /** 生效 mmproj：模型级（空串=跟全局，"none"=明确不用）→ 全局 */
     fun effectiveMmproj(modelPath: String?): String? =

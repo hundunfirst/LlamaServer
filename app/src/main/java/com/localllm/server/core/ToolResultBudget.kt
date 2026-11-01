@@ -14,10 +14,15 @@ object ToolResultBudget {
     data class Trimmed(val text: String, val truncated: Boolean, val originalChars: Int)
 
     /**
-     * 单条工具结果能占多少字符：窗口 token 的 1/6，按最坏情况折算（中文约 1 字符 = 1 token，
+     * 单条工具结果能占多少字符：默认按窗口的 1/6，按最坏情况折算（中文约 1 字符 = 1 token，
      * 代码约 3~4 字符 = 1 token）。上下限只是防极端配置，131k 窗口下是 21845 字符。
+     *
+     * [ratioPct] 由设置控制（17 / 33 / 50 / 0=不截断）——用云端大窗口时没必要动刀。
      */
-    fun budgetChars(ctxTokens: Int): Int = (ctxTokens / 6).coerceIn(2_000, 60_000)
+    fun budgetChars(ctxTokens: Int, ratioPct: Int = 17): Int {
+        if (ratioPct <= 0) return Int.MAX_VALUE
+        return (ctxTokens.toLong() * ratioPct / 100L).coerceIn(2_000L, 400_000L).toInt()
+    }
 
     fun trim(result: String, budget: Int): Trimmed {
         if (result.length <= budget) return Trimmed(result, false, result.length)

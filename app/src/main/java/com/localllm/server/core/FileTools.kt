@@ -59,7 +59,11 @@ object FileTools {
         }
         val pathProp = JSONObject()
             .put("type", "string")
-            .put("description", "相对授权目录的路径，如 demo/index.html；省略表示根目录")
+            .put(
+                "description",
+                "相对授权目录的路径（如 demo/index.html），" +
+                        "或绝对路径（如 /sdcard/Download/demo.html，需要开启全盘访问）；省略表示根目录"
+            )
 
         return JSONArray().apply {
             put(
@@ -119,8 +123,14 @@ object FileTools {
     // ---------------- 执行 ----------------
     /** 返回给模型的结果文本；失败抛 IllegalStateException */
     fun execute(context: Context, name: String, args: JSONObject): String {
+        // 绝对路径 → 走真实文件系统（需要全盘访问；原来 SAF 只能留在授权目录里）
+        val p = args.optString("path")
+        if (p.startsWith("/") && name != TOOL_GREP || (name == TOOL_GREP && p.startsWith("/"))) {
+            return LocalFsTools.execute(context, name, args)
+        }
         val root = rootDir(context) ?: throw IllegalStateException(
-            "尚未授权工作目录：请在 设置 → 文件工具 里选择一个文件夹"
+            "尚未授权工作目录：请在 设置 → 文件工具 里选择一个文件夹" +
+                    "（或开启全盘访问后直接用 /sdcard/... 绝对路径）"
         )
         return when (name) {
             TOOL_LIST -> listFiles(root, args.optString("path"))

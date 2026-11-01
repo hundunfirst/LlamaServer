@@ -90,7 +90,11 @@ object ChatStore {
     data class Todo(val title: String, val status: String)
 
     /** 由文件工具生成的文件（内容截断保存，供聊天内预览） */
-    data class GenFile(val path: String, val content: String)
+    /**
+     * 生成/改动过的文件。[prev] 是这次写入**之前**的旧内容（null = 新建），
+     * 有了它才能算「+N 行 / -M 行」并给出改动对比。
+     */
+    data class GenFile(val path: String, val content: String, val prev: String? = null)
 
     /**
      * 中断后续跑用的任务快照。
@@ -121,7 +125,24 @@ object ChatStore {
          * 后续追问（「第二行的金额是多少」）仍要逐字原文核对，而图会一直被重发。
          * 放在最后，别插到中间——有好几处按位置构造函数参数。
          */
-        val ocrText: String? = null
+        val ocrText: String? = null,
+        /** 这一轮从发出到结束的耗时（毫秒）；0 = 老数据没有记录 */
+        val elapsedMs: Long = 0,
+        /** 这一轮的实际用 token：输入（含缓存命中）与输出；0 = 老数据 */
+        val promptTokens: Int = 0,
+        val outputTokens: Int = 0
+    )
+
+    /**
+     * 会话级端点覆盖：null = 跟随全局设置。
+     * local=true 走本机回环；否则按 baseUrl/model/apiKey 走 OpenAI 兼容端点
+     * （云端 API，或电脑上跑的 llama.cpp 等）。多个会话各自绑不同端点即可并行跑。
+     */
+    data class Endpoint(
+        val local: Boolean = false,
+        val baseUrl: String = "",
+        val model: String = "",
+        val apiKey: String = ""
     )
 
     data class Session(
@@ -133,7 +154,21 @@ object ChatStore {
         val systemPrompt: String? = null,
         /** 生效来源：单个技能或技能链的 id（互斥）；null = 手写指令或未设置 */
         val appliedSkillId: String? = null,
-        val appliedChainId: String? = null
+        val appliedChainId: String? = null,
+        /** 本会话端点覆盖：null = 跟随全局设置 */
+        val endpoint: Endpoint? = null,
+        /** 文件夹（工作区）分组名；null = 未分组 */
+        val folder: String? = null,
+        /**
+         * 计划模式：只读文件、不出手，先把计划说清楚等用户点头。
+         * 开启后不注入任何写/执行类工具，提示词里也要求先给计划。
+         */
+        val planMode: Boolean = false,
+        /**
+         * 本会话的执行权限：read（仅可查看）/ workspace（工作区内修改）/ full（完全权限）。
+         * null = 跟随全局默认（AppSettings.defaultPermission）。
+         */
+        val permission: String? = null
     )
 
     data class Store(val activeId: String, val sessions: List<Session>)
@@ -180,6 +215,9 @@ object ChatStore {
                         todos = parseTodos(m.optJSONArray("todos")),
                         genFiles = parseGenFiles(m.optJSONArray("genFiles")),
                         ocrText = m.optString("ocrText").takeIf { it.isNotEmpty() },
+                    elapsedMs = m.optLong("elapsedMs"),
+                    promptTokens = m.optInt("promptTokens"),
+                    outputTokens = m.optInt("outputTokens"),
                         task = m.optJSONObject("task")?.let { t ->
                             TaskState(
                                 goal = t.optString("goal"),
@@ -198,7 +236,18 @@ object ChatStore {
                     msgs,
                     o.optString("systemPrompt").takeIf { it.isNotEmpty() },
                     o.optString("appliedSkillId").takeIf { it.isNotEmpty() },
-                    o.optString("appliedChainId").takeIf { it.isNotEmpty() }
+                    o.optString("appliedChainId").takeIf { it.isNotEmpty() },
+                    o.optJSONObject("endpoint")?.let {
+                        Endpoint(
+                            local = it.optBoolean("local"),
+                            baseUrl = it.optString("baseUrl"),
+                            model = it.optString("model"),
+                            apiKey = it.optString("apiKey")
+                        )
+                    },
+                    o.optString("folder").takeIf { it.isNotEmpty() },
+                    o.optBoolean("planMode"),
+                    o.optString("permission").takeIf { it.isNotEmpty() }
                 )
             }.ifEmpty {
                 listOf(Session("1", "新会话", System.currentTimeMillis(), emptyList()))
@@ -213,7 +262,11 @@ object ChatStore {
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
             val path = o.optString("path")
             if (path.isBlank()) return@mapNotNull null
-            GenFile(path, o.optString("content"))
+            GenFile(
+                path,
+                o.optString("content"),
+                if (o.isNull("prev")) null else o.optString("prev")
+            )
         }
     }
 
@@ -261,6 +314,9 @@ object ChatStore {
                 val o = JSONObject().put("role", m.role).put("content", m.content)
                 if (m.imageB64 != null) o.put("image", m.imageB64)
                 if (m.ocrText != null) o.put("ocrText", m.ocrText)
+        if (m.elapsedMs > 0) o.put("elapsedMs", m.elapsedMs)
+        if (m.promptTokens > 0) o.put("promptTokens", m.promptTokens)
+        if (m.outputTokens > 0) o.put("outputTokens", m.outputTokens)
                 if (m.reasoning != null) o.put("reasoning", m.reasoning)
                 if (m.steps.isNotEmpty()) {
                     val sArr = JSONArray()
@@ -290,6 +346,10 @@ object ChatStore {
                         gArr.put(
                             JSONObject().put("path", gf.path)
                                 .put("content", gf.content.take(20000))
+                                .apply {
+                                    // 旧内容只留前 8000 字：算增删行够用，也不让会话文件膨胀
+                                    gf.prev?.let { put("prev", it.take(8000)) }
+                                }
                         )
                     }
                     o.put("genFiles", gArr)
@@ -321,6 +381,18 @@ object ChatStore {
                         s.systemPrompt?.let { put("systemPrompt", it) }
                         s.appliedSkillId?.let { put("appliedSkillId", it) }
                         s.appliedChainId?.let { put("appliedChainId", it) }
+                        s.folder?.let { put("folder", it) }
+                        if (s.planMode) put("planMode", true)
+                        s.permission?.let { put("permission", it) }
+                        s.endpoint?.let { e ->
+                            put(
+                                "endpoint",
+                                JSONObject().put("local", e.local)
+                                    .put("baseUrl", e.baseUrl)
+                                    .put("model", e.model)
+                                    .put("apiKey", e.apiKey)
+                            )
+                        }
                     }
             )
         }

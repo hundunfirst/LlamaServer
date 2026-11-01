@@ -839,14 +839,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     if (thinkStartedAt > 0) {
                         val ms = System.currentTimeMillis() - thinkStartedAt
                         val body = roundThink.toString().trim().replace(Regex("\\s+"), " ")
-                        steps.add(
-                            ChatStore.Step(
-                                "think",
-                                "思考了 ${String.format("%.1f", ms / 1000.0)} 秒",
+                        val liveIdx = steps.indexOfLast { it.type == "think" && it.label == "思考中" }
+                        if (liveIdx >= 0) {
+                            // 思考开始时已占好时间线位置：就地收尾，不重排不跳位
+                            steps[liveIdx] = steps[liveIdx].copy(
+                                label = "思考了 ${String.format("%.1f", ms / 1000.0)} 秒",
                                 detail = body.take(600).ifBlank { null },
                                 millis = ms
                             )
-                        )
+                        } else {
+                            steps.add(
+                                ChatStore.Step(
+                                    "think",
+                                    "思考了 ${String.format("%.1f", ms / 1000.0)} 秒",
+                                    detail = body.take(600).ifBlank { null },
+                                    millis = ms
+                                )
+                            )
+                        }
                         roundThink.setLength(0)
                         thinkStartedAt = 0L
                         syncSteps()
@@ -1000,10 +1010,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     }
                                 }
                                 else -> {
-                                    if (thinkStartedAt == 0L) thinkStartedAt = System.currentTimeMillis()
+                                    if (thinkStartedAt == 0L) {
+                                        thinkStartedAt = System.currentTimeMillis()
+                                        // 思考一开始就占好时间线位置（label 思考中），边想边更新正文——
+                                        // 而不是等思考完才补一行（那样等于多一步）
+                                        steps.add(ChatStore.Step("think", "思考中", detail = ""))
+                                    }
                                     roundThink.append(r)
+                                    // 实时更新 think 步正文 + reasoning：时间线里的思考行边想边长
+                                    val liveBody = roundThink.toString()
+                                    val liveIdx = steps.indexOfLast { it.type == "think" && it.label == "思考中" }
+                                    if (liveIdx >= 0) steps[liveIdx] = steps[liveIdx].copy(detail = liveBody.take(600))
                                     appendToLastInline(sid) {
-                                        it.copy(reasoning = (it.reasoning ?: "") + r)
+                                        it.copy(
+                                            reasoning = (it.reasoning ?: "") + r,
+                                            steps = steps.toList()
+                                        )
                                     }
                                 }
                             }

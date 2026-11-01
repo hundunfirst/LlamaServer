@@ -1556,12 +1556,14 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
 // text（中间正文）：默认展开显示迷你 markdown，可折叠；
 // tool/search：折叠显示参数/结果预览，展开成「命令|参数」+「输出」两块。
 @Composable
-private fun StepRow(st: ChatStore.Step, thinkBody: String? = null) {
-    var open by remember(st) { mutableStateOf(st.type == "text") }
+private fun StepRow(st: ChatStore.Step, thinkBody: String? = null, liveThink: Boolean = false) {
+    // 用 type+label 当记忆键：流式更新 detail 时展开状态不重置
+    var open by remember(st.type + st.label) { mutableStateOf(st.type == "text") }
     val thinkBodyText = if (st.type == "think") (thinkBody ?: st.detail) else null
     val toolArgs = if (st.type == "tool" || st.type == "search") st.args else null
     val toolDetail = if (st.type == "tool" || st.type == "search") st.detail else null
     val hasBody = st.type == "text" ||
+            liveThink ||
             !thinkBodyText.isNullOrBlank() ||
             toolArgs != null || toolDetail != null
     Row(verticalAlignment = Alignment.Top) {
@@ -1626,40 +1628,74 @@ private fun StepRow(st: ChatStore.Step, thinkBody: String? = null) {
                     }
                 }
                 else -> {
-                    Text(
-                        st.label,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (st.ok) MaterialTheme.colorScheme.onSurface
-                        else MaterialTheme.colorScheme.error
-                    )
                     if (st.type == "think") {
-                        if (!thinkBodyText.isNullOrBlank()) {
+                        if (liveThink) {
+                            // 思考中：转圈 + 实时段预览（DSH ThinkingPill）
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    "思考中",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(10.dp),
+                                    strokeWidth = 1.5.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        } else {
+                            Text(
+                                st.label,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (st.ok) MaterialTheme.colorScheme.onSurface
+                                else MaterialTheme.colorScheme.error
+                            )
+                        }
+                        if (!thinkBodyText.isNullOrBlank() || liveThink) {
                             if (open) {
                                 // 固定盒子：思考只能在盒内滚动（限高260dp），正文是全局页面。
                                 // 包 SelectionContainer：长按可选中复制思考全文。
+                                val scroll = rememberScrollState()
+                                if (liveThink) {
+                                    // 流式期间展开：自动跟随最新
+                                    var jumped by remember { mutableStateOf(false) }
+                                    LaunchedEffect(thinkBodyText?.length ?: 0) {
+                                        val max = scroll.maxValue
+                                        if (max <= 0) return@LaunchedEffect
+                                        if (!jumped) {
+                                            scroll.scrollTo(max)
+                                            jumped = true
+                                        } else if (scroll.value >= max - 80) {
+                                            scroll.scrollTo(max)
+                                        }
+                                    }
+                                }
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .heightIn(max = 260.dp)
-                                        .verticalScroll(rememberScrollState())
+                                        .verticalScroll(scroll)
                                 ) {
                                     androidx.compose.foundation.text.selection.SelectionContainer {
                                         Text(
-                                            latexToUnicode(thinkBodyText),
+                                            latexToUnicode(thinkBodyText ?: ""),
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
                                 }
                             } else {
-                                // 折叠预览：完成态取全文首行（DSH 规则），去掉 **
-                                val preview = ChatStore.thinkingPreview(thinkBodyText, active = false)
-                                Text(
-                                    preview.take(40) + if (preview.length > 40) "…" else "",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.clickable { open = true }
-                                )
+                                // 折叠预览：进行中取最近段首行、完成取全文首行（DSH 规则）
+                                val preview = ChatStore.thinkingPreview(thinkBodyText ?: "", active = liveThink)
+                                if (preview.isNotEmpty()) {
+                                    Text(
+                                        preview.take(40) + if (preview.length > 40) "…" else "",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.clickable { open = true }
+                                    )
+                                }
                             }
                         }
                     } else {
@@ -1755,84 +1791,7 @@ private fun StepRow(st: ChatStore.Step, thinkBody: String? = null) {
     }
 }
 
-// 流式思考行（DSH ThinkingPill）：紧凑一行「思考中 + 最近一段首行预览」，
-// 思考边生成边实时更新；点开在细线旁看全文（自动跟随滚动）。
-@Composable
-private fun LiveThinkRow(reasoning: String) {
-    var open by remember { mutableStateOf(false) }
-    val preview = ChatStore.thinkingPreview(reasoning, active = true)
-    Row(verticalAlignment = Alignment.Top) {
-        Icon(
-            imageVector = Icons.Filled.Psychology,
-            contentDescription = null,
-            modifier = Modifier.size(16.dp),
-            tint = MaterialTheme.colorScheme.primary
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "思考中",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                CircularProgressIndicator(
-                    modifier = Modifier.size(10.dp),
-                    strokeWidth = 1.5.dp,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                if (preview.isNotEmpty()) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        preview,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-            if (open) {
-                val thinkScroll = rememberScrollState()
-                var thinkJumped by remember { mutableStateOf(false) }
-                LaunchedEffect(reasoning.length) {
-                    val max = thinkScroll.maxValue
-                    if (max <= 0) return@LaunchedEffect
-                    if (!thinkJumped) {
-                        thinkScroll.scrollTo(max)
-                        thinkJumped = true
-                    } else if (thinkScroll.value >= max - 80) {
-                        thinkScroll.scrollTo(max)
-                    }
-                }
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 260.dp)
-                        .verticalScroll(thinkScroll)
-                ) {
-                    androidx.compose.foundation.text.selection.SelectionContainer {
-                        Text(
-                            latexToUnicode(reasoning),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-        }
-        Text(
-            if (open) "▾" else "▸",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier
-                .padding(start = 4.dp, top = 2.dp)
-                .clickable { open = !open }
-        )
-    }
-}
+// 思考行已并入 StepRow（liveThink）：思考开始即占位，边想边更新，结束就地改标签
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -2051,16 +2010,14 @@ private fun MessageBubble(
                                             Modifier.weight(1f),
                                             verticalArrangement = Arrangement.spacedBy(2.dp)
                                         ) {
-                                            // 已有步骤按顺序排；实时思考行跟在最后，按时间顺序长
+                                            // 思考步在思考开始时就已占位（label 思考中），跟着时间线实时长
                                             msg.steps.forEach { st ->
                                                 StepRow(
                                                     st = st,
                                                     thinkBody = if (st.type == "think" && thinkSteps == 1)
-                                                        rawReasoning else null
+                                                        rawReasoning else null,
+                                                    liveThink = thinking && st.type == "think" && st.label == "思考中"
                                                 )
-                                            }
-                                            if (thinking) {
-                                                LiveThinkRow(rawReasoning ?: "")
                                             }
                                             // 老数据：只有 reasoning 没有 steps（思考未落盘的历史消息）
                                             if (!thinking && msg.steps.isEmpty() && rawReasoning != null) {
@@ -2083,7 +2040,7 @@ private fun MessageBubble(
                                 Text("继续这个任务", style = MaterialTheme.typography.labelLarge)
                             }
                         }
-                        // 思考已并入上面的过程时间线（think 步 / 流式 LiveThinkRow），不再单独成卡
+                        // 思考已并入上面的过程时间线（think 步 liveThink），不再单独成卡
                         if (waiting) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 androidx.compose.material3.CircularProgressIndicator(
