@@ -1060,7 +1060,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 这一环借云端，文件与命令仍然在本地执行（数据不出设备）。
                 val cloudPlan = if (selfSession?.planWithCloud == true) {
                     setProgress(sid, "正在让云端出计划…")
-                    requestCloudPlan(lastUserText)
+                    when (val r = requestCloudPlan(lastUserText)) {
+                        is PlanResult.Ok -> r.text
+                        is PlanResult.Skip -> {
+                            // 别静默退回本地：明确说一句，否则用户以为开关生效了
+                            ServerProcessManager.appLog("规划用云端未生效：${r.reason}")
+                            _toast.value = "规划用云端未生效：${r.reason}"
+                            null
+                        }
+                    }
                 } else null
                 val planHint = if (cloudPlan.isNullOrBlank()) "" else
                     "\n\n【云端给出的执行计划，照此执行，不要重新规划】\n" + cloudPlan
@@ -2419,10 +2427,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      * 请云端出一份分步计划。失败或没配置就返回 null，这一轮退回纯本地——
      * 不能因为"云端不可用"把整轮卡死。
      */
-    private suspend fun requestCloudPlan(goal: String): String? {
-        if (!AppSettings.chatCloudEnabled) return null
+    /** 云端规划的结果：成功给出计划，或者说明为什么没生效（不能静默退回本地） */
+    private sealed interface PlanResult {
+        data class Ok(val text: String) : PlanResult
+        data class Skip(val reason: String) : PlanResult
+    }
+
+    private suspend fun requestCloudPlan(goal: String): PlanResult {
+        if (!AppSettings.chatCloudEnabled) {
+            return PlanResult.Skip("「模型渠道」里还没启用云端端点")
+        }
         val url = AppSettings.chatCloudUrl.trim().removeSuffix("/")
-        if (url.isBlank()) return null
+        if (url.isBlank()) {
+            return PlanResult.Skip("「模型渠道」里云端地址是空的")
+        }
         val model = AppSettings.chatCloudModel.ifBlank { "default" }
         val key = AppSettings.chatCloudKey
         val system = "你是任务规划者。根据用户目标，输出一份可执行的分步计划：\n" +
@@ -2434,7 +2452,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             ChatClient.ChatMessage("user", goal.take(2000))
         )
         val sb = StringBuilder()
-        val failed = runCatching {
+        val error = runCatching {
             ChatClient.chatStream(
                 port = AppSettings.port,
                 messages = messages,
@@ -2454,12 +2472,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 onReasoning = {},
                 onFinal = { _, _, _ -> }
             )
-        }.isFailure
-        if (failed) return null
+        }.exceptionOrNull()
+        if (error != null) {
+            return PlanResult.Skip("云端请求失败：${error.message ?: error.javaClass.simpleName}")
+        }
         val text = sb.toString().trim()
-        if (text.isBlank()) return null
+        if (text.isBlank()) return PlanResult.Skip("云端返回了空计划")
         ServerProcessManager.appLog("云端规划完成：${text.length} 字")
-        return text
+        return PlanResult.Ok(text)
     }
 
     /**
