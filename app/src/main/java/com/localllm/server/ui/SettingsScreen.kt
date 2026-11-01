@@ -581,7 +581,6 @@ fun SettingsScreen(
                 com.localllm.server.core.AppSettings.pureMode = pureOn
             }
 
-            }
             // ---- 定时任务 ----
             val schedCtx = androidx.compose.ui.platform.LocalContext.current
             var schedTasks by remember {
@@ -763,6 +762,7 @@ fun SettingsScreen(
                 open = settingGroup == "g5"
             ) { settingGroup = if (settingGroup == "g5") null else "g5" }
             if (settingGroup == "g5") {
+            }
             // ---- 任务清单工具 ----
             var todoOn by remember {
                 mutableStateOf(com.localllm.server.core.AppSettings.todoToolEnabled)
