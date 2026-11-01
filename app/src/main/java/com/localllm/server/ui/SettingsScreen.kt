@@ -785,6 +785,68 @@ fun SettingsScreen(
                 ModelConfigDialog(vm = vm, onDismiss = { showModelDialog = false })
             }
 
+            // 规划端点：只在「规划用云端」开着时用到，选一次就固定绑它
+            val planPresets = com.localllm.server.core.AppSettings.loadCloudPresets()
+                .filter { it.url.isNotBlank() }
+            if (planPresets.isNotEmpty()) {
+                var planExpanded by remember { mutableStateOf(false) }
+                var planUrl by remember { mutableStateOf(com.localllm.server.core.AppSettings.planPresetUrl) }
+                val pinnedName = planPresets
+                    .firstOrNull { it.url.trim().removeSuffix("/") == planUrl.trim().removeSuffix("/") }
+                    ?.name
+                androidx.compose.material3.ExposedDropdownMenuBox(
+                    expanded = planExpanded,
+                    onExpandedChange = { planExpanded = it }
+                ) {
+                    CompactField(
+                        value = pinnedName ?: "自动（跟随聊天渠道）",
+                        onValueChange = {},
+                        label = "规划端点（「规划用云端」用）",
+                        readOnly = true,
+                        trailing = {
+                            Icon(
+                                androidx.compose.material.icons.Icons.Default.ArrowDropDown,
+                                contentDescription = "展开预设",
+                                modifier = Modifier.size(26.dp),
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
+                        },
+                        modifier = Modifier
+                            .menuAnchor(androidx.compose.material3.MenuAnchorType.PrimaryNotEditable)
+                            .fillMaxWidth()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = planExpanded,
+                        onDismissRequest = { planExpanded = false }
+                    ) {
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("自动（跟随聊天渠道）") },
+                            onClick = {
+                                planUrl = ""
+                                com.localllm.server.core.AppSettings.planPresetUrl = ""
+                                planExpanded = false
+                            }
+                        )
+                        planPresets.forEach { p ->
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text(p.name) },
+                                onClick = {
+                                    planUrl = p.url
+                                    com.localllm.server.core.AppSettings.planPresetUrl = p.url
+                                    planExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+                Text(
+                    "只影响「规划用云端」这一次调用；聊天渠道不跟着变，不用切回本地。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+
             // ---- MCP 服务器（实验，stdio 型，llama-server 内置客户端） ----
             McpSection()
 

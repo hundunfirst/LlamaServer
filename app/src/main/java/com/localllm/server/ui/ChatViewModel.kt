@@ -2434,21 +2434,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 挑一个端点来做规划：优先当前选中的那个，否则用预设里第一个有地址的。
-     * 注意**不看 chatCloudEnabled**——那句话的意思是"聊天走不走云端"，
-     * 而这里要的恰恰是"聊天在本地、规划借云端"，用它会把这个功能直接掐死。
+     * 挑一个端点来做规划：
+     * 1) 设置里明确指定的「规划端点」（按 URL 认）；
+     * 2) 没指定就用当前聊天渠道那个；
+     * 3) 再没有就用预设里第一个有地址的。
+     * 注意**不看 chatCloudEnabled**——那是"聊天走不走云端"，而这里要的恰恰是
+     * "聊天在本地、规划借云端"，用它会把这个功能直接掐死。
      */
     private fun planEndpoint(): Triple<String, String, String?>? {
         val presets = AppSettings.loadCloudPresets().filter { it.url.isNotBlank() }
         if (presets.isEmpty()) return null
-        val currentUrl = AppSettings.chatCloudUrl.trim().removeSuffix("/")
-        val preset = presets.firstOrNull { it.url.trim().removeSuffix("/") == currentUrl }
+        val norm = { s: String -> s.trim().removeSuffix("/") }
+        val pinned = AppSettings.planPresetUrl
+        val preset = (if (pinned.isNotBlank()) presets.firstOrNull { norm(it.url) == norm(pinned) } else null)
+            ?: presets.firstOrNull { norm(it.url) == norm(AppSettings.chatCloudUrl) }
             ?: presets.first()
-        return Triple(
-            preset.url.trim().removeSuffix("/"),
-            preset.model.ifBlank { "default" },
-            preset.key.ifBlank { null }
-        )
+        return Triple(norm(preset.url), preset.model.ifBlank { "default" }, preset.key.ifBlank { null })
     }
 
     private suspend fun requestCloudPlan(goal: String): PlanResult {

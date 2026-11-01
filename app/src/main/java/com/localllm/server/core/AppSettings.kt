@@ -770,6 +770,14 @@ object AppSettings {
         get() = prefs.getString("chat_cloud_model", "") ?: ""
         set(value) = prefs.edit().putString("chat_cloud_model", value).apply()
 
+    /**
+     * 「规划用云端」用哪个端点（按 URL 认，URL 唯一且不会因为改名而失效）。
+     * 空 = 跟随当前选中的聊天渠道。这个设置不影响聊天本身走本地还是云端。
+     */
+    var planPresetUrl: String
+        get() = prefs.getString("plan_preset_url", "") ?: ""
+        set(value) = prefs.edit().putString("plan_preset_url", value.trim()).apply()
+
     /** 进行中的下载任务（JSON 数组），进程重启后自动恢复 */
     var downloadTasksJson: String
         get() = prefs.getString("download_tasks", "[]") ?: "[]"
