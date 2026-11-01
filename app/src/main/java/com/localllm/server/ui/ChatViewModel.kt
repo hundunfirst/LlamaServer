@@ -317,6 +317,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 自驱模式最多自动续跑几次（再多就是模型跑偏了，停下来交给人看） */
     private val MAX_AUTODRIVE = 5
+
+    /**
+     * 熔断阈值：**工具名 + 参数完全一致**的调用连续失败几次就不再给它这个工具。
+     * 刻意定高（5 次）——换个路径、改个参数的重试是正常行为，不能误伤。
+     */
+    private val SAME_CALL_FAIL_LIMIT = 5
+
+    /** 宽松硬上限：轮次设为「不限」时的兜底，防止单任务把机器跑到底 */
+    private val HARD_ROUND_CAP = 200
+    private val HARD_TIME_MS = 20 * 60 * 1000L
     // MCP 工具注入阈值由设置控制（0 = 不限，全给）；超过阈值才按关键词筛
     private val maxToolsFull: Int
         get() = AppSettings.mcpToolFullLimit
@@ -1230,6 +1240,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val searchSources = mutableListOf<WebSearch.Result>()
                 var timingNote: String? = null
 
+                // 熔断状态：只统计「工具名 + 参数一字不差」的连续失败；换参数即重置
+                var lastCallKey: String? = null
+                var sameCallFails = 0
+                val mutedTools = mutableSetOf<String>()
+                var hardStop = false
+
+                /** 本轮真正下发给模型的工具：被熔断摘掉的不再出现 */
+                fun toolsForRound(exhausted: Boolean): org.json.JSONArray? {
+                    val base = (if (exhausted) toolsNoSearch else toolsJson) ?: return null
+                    if (mutedTools.isEmpty()) return base
+                    return org.json.JSONArray().also { arr ->
+                        for (i in 0 until base.length()) {
+                            val o = base.getJSONObject(i)
+                            val name = o.optJSONObject("function")?.optString("name") ?: ""
+                            if (name !in mutedTools) arr.put(o)
+                        }
+                    }
+                }
+
                 // 注意：必须用 for + break——repeat 里的 return@repeat 是 continue 语义，
                 // 会导致「回答完成」后仍继续下一轮（历史 bug：同一问题最多被连答 5 遍）。
                 // 默认不限（设置里可设成有限轮次）：NPU 上每轮成本低一个数量级，次数上限反而成了任务做不完的主因。
@@ -1239,6 +1268,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 var answeredNaturally = false
                 for (round in 0 until roundCap) {
                     ensureActive() // 停止/切换后不再进入下一轮
+
+                    // 硬上限（宽松）：轮次设成「不限」也挡一下极端情况——跑了几百轮或二十分钟还没完，
+                    // 大概率是模型在原地打转，收掉工具让它用文字总结，比继续空转有用。
+                    if (!hardStop && (round >= HARD_ROUND_CAP ||
+                                System.currentTimeMillis() - sendStartedAt > HARD_TIME_MS)
+                    ) {
+                        hardStop = true
+                        mutedTools.addAll(usedTools)
+                        ServerProcessManager.appLog("达到硬上限（第 $round 轮 / 24 分钟量级），转为收尾")
+                        steps.add(
+                            ChatStore.Step("tool", "达到硬上限，收尾", "第 $round 轮，不再提供工具")
+                        )
+                        syncSteps()
+                        apiMsgs = apiMsgs + ChatClient.ChatMessage(
+                            "user",
+                            "（系统提示：已经跑了 $round 轮，现在停止调用工具。请用一段话总结：" +
+                                    "完成了什么、卡在哪里、建议用户下一步怎么做。）"
+                        )
+                    }
                     // 只按用户设的配额收口；「连续多轮没正文就逼模型作答」那条围栏已去掉：
                     // 多步任务本来就常常连跑几轮工具不带正文，它会把正常的流程掐断。
                     val searchExhausted = searchAvailable && searchCount >= searchCap
@@ -1299,7 +1347,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         maxTokens = if (cloud) null else AppSettings.effectiveOut(AppSettings.selectedModelPath),
                         codeTask = codeTask,
                         // 搜索配额用尽 → 不再提供搜索工具（防止弱模型空转到轮数上限、永远不回答）
-                        tools = if (searchExhausted) toolsNoSearch else toolsJson,
+                        tools = if (hardStop) null else toolsForRound(searchExhausted),
                         onToolCalls = { toolCalls = it },
                         onFinish = { finishReason = it },
                         onTiming = { ttfb, firstToken ->
@@ -1999,6 +2047,52 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             )
                         }
                         newMsgs.add(ChatClient.ChatMessage("tool", fitted.text, toolCallId = tc.id))
+
+                        // 熔断计数：工具名 + 参数完全一致才算「同一次失败」；
+                        // 只要换了参数或成功了，计数清零——正常重试不会被误伤。
+                        val callKey = tc.name + "|" + tc.arguments
+                        val isFailure = fitted.text.trimStart().startsWith("错误") ||
+                                fitted.text.startsWith("工具执行失败") ||
+                                fitted.text.startsWith("【命令退出码") ||
+                                fitted.text.startsWith("搜索失败") ||
+                                fitted.text.startsWith("Linux 环境未就绪")
+                        if (isFailure) {
+                            if (callKey == lastCallKey) sameCallFails++
+                            else {
+                                lastCallKey = callKey
+                                sameCallFails = 1
+                            }
+                        } else {
+                            lastCallKey = null
+                            sameCallFails = 0
+                        }
+                    }
+
+                    // 同一调用连续失败到阈值 → 摘掉这个工具，并明确告诉模型别再用它
+                    if (sameCallFails >= SAME_CALL_FAIL_LIMIT) {
+                        val toolName = lastCallKey?.substringBefore('|')
+                        if (toolName != null && mutedTools.add(toolName)) {
+                            ServerProcessManager.appLog(
+                                "熔断：$toolName 连续失败 $sameCallFails 次，本轮起不再提供该工具"
+                            )
+                            steps.add(
+                                ChatStore.Step(
+                                    "tool", "熔断：暂时移除 $toolName",
+                                    "同样的调用连续失败 $sameCallFails 次"
+                                )
+                            )
+                            syncSteps()
+                            newMsgs.add(
+                                ChatClient.ChatMessage(
+                                    "user",
+                                    "（系统提示：$toolName 已经用完全相同的参数连续失败 $sameCallFails 次，" +
+                                            "这个工具暂时不给你用了。请换一种做法：改路径、换工具、或用 run_bash；" +
+                                            "如果确实做不到，就直接告诉用户卡在哪里。）"
+                                )
+                            )
+                        }
+                        sameCallFails = 0
+                        lastCallKey = null
                     }
                     apiMsgs = newMsgs
                 }
