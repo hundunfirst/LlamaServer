@@ -1220,12 +1220,6 @@ fun SettingsScreen(
             }
 
             }
-            GroupHeader(
-                title = "版本与更新",
-                summary = "检查更新",
-                open = settingGroup == "g6"
-            ) { settingGroup = if (settingGroup == "g6") null else "g6" }
-            if (settingGroup == "g6") {
             // ---- 版本与更新 ----
             val appCtx = androidx.compose.ui.platform.LocalContext.current
             val appVer = remember {
@@ -1238,12 +1232,6 @@ fun SettingsScreen(
             }
             var checking by remember { mutableStateOf(false) }
             val updateScope = androidx.compose.runtime.rememberCoroutineScope()
-            SectionHeader(
-                title = "版本与更新",
-                help = "从 GitHub Releases 检查新版本。发现新版会显示更新说明，点「下载」用浏览器下载 APK，安装由系统确认。",
-                titleStyle = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(top = 8.dp)
-            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("当前版本：v$appVer", style = MaterialTheme.typography.bodyMedium)
                 Spacer(modifier = Modifier.width(12.dp))
@@ -1291,7 +1279,6 @@ fun SettingsScreen(
                 )
             }
 
-            }
 
         Spacer(modifier = Modifier.height(80.dp))
         }
@@ -1430,103 +1417,6 @@ private fun McpSection() {
         )
     }
 }
-
-/** 助手指令预设管理弹窗 */
-@Composable
-private fun SysPresetDialog(onDismiss: () -> Unit) {
-    var list by remember { mutableStateOf(com.localllm.server.core.AppSettings.loadSysPresets()) }
-    var editing by remember { mutableStateOf<com.localllm.server.core.SysPreset?>(null) }
-    var isNew by remember { mutableStateOf(false) }
-
-    fun persist(newList: List<com.localllm.server.core.SysPreset>) {
-        list = newList
-        com.localllm.server.core.AppSettings.saveSysPresets(newList)
-        if (com.localllm.server.core.AppSettings.activeSysPresetId.isBlank()) {
-            com.localllm.server.core.AppSettings.activeSysPresetId = newList.first().id
-        }
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("助手指令预设") },
-        text = {
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                list.forEachIndexed { i, pr ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(pr.name, style = MaterialTheme.typography.bodyMedium)
-                            if (pr.text.isNotBlank()) {
-                                Text(
-                                    pr.text.take(50),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1
-                                )
-                            }
-                        }
-                        TextButton(onClick = {
-                            editing = pr
-                            isNew = false
-                        }) { Text("编辑") }
-                        TextButton(onClick = {
-                            if (list.size > 1) {
-                                persist(list.filterIndexed { k, _ -> k != i })
-                            }
-                        }) {
-                            Text("删除", color = MaterialTheme.colorScheme.error)
-                        }
-                    }
-                }
-                OutlinedButton(onClick = {
-                    editing = com.localllm.server.core.SysPreset(
-                        java.util.UUID.randomUUID().toString(), "新预设", ""
-                    )
-                    isNew = true
-                }) { Text("新增预设") }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } }
-    )
-
-    editing?.let { pr ->
-        var name by remember(pr.id) { mutableStateOf(pr.name) }
-        var text by remember(pr.id) { mutableStateOf(pr.text) }
-        AlertDialog(
-            onDismissRequest = { editing = null },
-            title = { Text(if (isNew) "新增预设" else "编辑预设") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    CompactField(
-                        value = name,
-                        onValueChange = { name = it },
-                        label = "名称",
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    CompactFieldMultiline(
-                        value = text,
-                        onValueChange = { text = it },
-                        label = "指令内容",
-                        minHeight = 140
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val updated = pr.copy(name = name.trim().ifBlank { "预设" }, text = text.trim())
-                    val newList = if (isNew) list + updated
-                                  else list.map { if (it.id == pr.id) updated else it }
-                    persist(newList)
-                    editing = null
-                }) { Text("保存") }
-            },
-            dismissButton = { TextButton(onClick = { editing = null }) { Text("取消") } }
-        )
-    }
-}
-
 
 /**
  * 设置分组头：一行标题 + 一句话说清这组里有什么，点一下展开/收起。

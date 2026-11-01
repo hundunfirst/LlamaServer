@@ -15,7 +15,6 @@ import com.localllm.server.core.GgufInspector
 import com.localllm.server.core.LinuxRuntime
 import com.localllm.server.core.McpArgRepair
 import com.localllm.server.core.McpHttpClient
-import com.localllm.server.core.MemoryStore
 import com.localllm.server.core.OcrIntent
 import com.localllm.server.core.OcrTool
 import com.localllm.server.core.RepeatGuard
@@ -24,7 +23,6 @@ import com.localllm.server.core.Skill
 import com.localllm.server.core.SkillChain
 import com.localllm.server.core.SkillChainFlow
 import com.localllm.server.core.ServerUiState
-import com.localllm.server.core.TodoTool
 import com.localllm.server.core.ToolGuard
 import com.localllm.server.core.ToolLoopPolicy
 import com.localllm.server.core.ToolResultBudget
@@ -382,7 +380,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      * 所以这个值必须远高于真实任务的用量；它只在模型只刷清单、别的不干时兜底。
      * （曾经是 3，撞上就拒绝更新，长任务的清单于是停在半路。）
      */
-    private val TODO_UPDATE_GUARD = 20
 
     /** 纯文本附件的内存上限（不是上下文上限：装不装得下由后面的预算截断决定） */
     private val PLAIN_ATTACH_MAX_BYTES = 32 * 1024 * 1024
@@ -1246,7 +1243,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }?.toSet()
                 } ?: emptySet()
                 var searchCount = 0
-                var todoCalls = 0
                 var sandboxCalls = 0
                 val searchCap = AppSettings.searchMaxCalls.let { if (it <= 0) Int.MAX_VALUE else it }
                 var loggedNoSearch = false
