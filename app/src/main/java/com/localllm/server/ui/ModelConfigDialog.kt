@@ -157,6 +157,9 @@ fun ModelConfigDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     fun selectChip(id: String) {
         commitSupplier()
         selId = id
+        // 点选即「聊天用这个」：save() 按 activeTarget 激活渠道，
+        // 只改 selId 的话，选了别的供应商保存后聊天渠道还是原来那个（实测踩到）。
+        activeTarget = id
     }
 
     fun genId(): String {
