@@ -8,10 +8,21 @@ import org.junit.Test
 class ToolResultBudgetTest {
 
     @Test
-    fun `预算按窗口六分之一给`() {
-        assertEquals(21845, ToolResultBudget.budgetChars(131072))
-        assertEquals(2_000, ToolResultBudget.budgetChars(4_096))   // 小窗口有下限
-        assertEquals(60_000, ToolResultBudget.budgetChars(2_000_000)) // 超大窗口封顶
+    fun `预算默认按窗口百分之十七给`() {
+        // 默认 17% ≈ 原来的 1/6，但上限从 60k 提到 400k：大窗口（云端）不该被本地小窗口的尺度卡住
+        assertEquals(22_282, ToolResultBudget.budgetChars(131_072))
+        assertEquals(2_000, ToolResultBudget.budgetChars(4_096))        // 小窗口有下限
+        assertEquals(340_000, ToolResultBudget.budgetChars(2_000_000))  // 超大窗口按比例
+    }
+
+    @Test
+    fun `比例为 0 时不截断`() {
+        assertEquals(Int.MAX_VALUE, ToolResultBudget.budgetChars(131_072, 0))
+    }
+
+    @Test
+    fun `比例可调`() {
+        assertTrue(ToolResultBudget.budgetChars(131_072, 50) > ToolResultBudget.budgetChars(131_072, 17))
     }
 
     @Test

@@ -1998,6 +1998,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
             AttachSheet(
                 permissionLabel = permissionLabel(cur?.permission ?: com.localllm.server.core.AppSettings.defaultPermission),
                 planMode = cur?.planMode == true,
+                autoDrive = cur?.autoDrive == true,
                 onDismiss = { showAttachSheet = false },
                 onGallery = {
                     showAttachSheet = false
@@ -2028,7 +2029,8 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                     showAttachSheet = false
                     permissionEditing = true
                 },
-                onPlanMode = { on -> vm.setSessionPlanMode(activeId, on) }
+                onPlanMode = { on -> vm.setSessionPlanMode(activeId, on) },
+                onAutoDrive = { on -> vm.setSessionAutoDrive(activeId, on) }
             )
         }
 
@@ -2114,12 +2116,14 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
 private fun AttachSheet(
     permissionLabel: String,
     planMode: Boolean,
+    autoDrive: Boolean,
     onDismiss: () -> Unit,
     onGallery: () -> Unit,
     onCamera: () -> Unit,
     onFile: () -> Unit,
     onPermission: () -> Unit,
     onPlanMode: (Boolean) -> Unit,
+    onAutoDrive: (Boolean) -> Unit,
 ) {
     androidx.compose.material3.ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -2194,6 +2198,27 @@ private fun AttachSheet(
                         androidx.compose.material3.Switch(
                             checked = planMode,
                             onCheckedChange = onPlanMode
+                        )
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onAutoDrive(!autoDrive) }
+                            .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("自驱", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                if (autoDrive) "没做完就自己接着做，最多 5 次" else "关闭：模型说要收尾就收尾",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        androidx.compose.material3.Switch(
+                            checked = autoDrive,
+                            onCheckedChange = onAutoDrive
                         )
                     }
                 }

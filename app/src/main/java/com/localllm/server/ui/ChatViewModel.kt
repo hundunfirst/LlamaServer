@@ -314,6 +314,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 同时最多几条会话在生成：再多设备扛不住，也没人看得过来 */
     private val MAX_PARALLEL_GENERATIONS = 3
+
+    /** 自驱模式最多自动续跑几次（再多就是模型跑偏了，停下来交给人看） */
+    private val MAX_AUTODRIVE = 5
     // MCP 工具注入阈值由设置控制（0 = 不限，全给）；超过阈值才按关键词筛
     private val maxToolsFull: Int
         get() = AppSettings.mcpToolFullLimit
@@ -816,6 +819,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val selfSession = _sessions.value.find { it.id == sid }
                 val permission = selfSession?.permission ?: AppSettings.defaultPermission
                 val planMode = selfSession?.planMode == true
+                // 自驱：模型想收尾时先按客观判据查一遍，没达成就有上限地继续
+                val autoDrive = selfSession?.autoDrive == true && !planMode
+                var autoDriveCount = 0
+                var lastStallKey: String? = null
                 val readOnly = permission == "read" || planMode
                 val fullAccess = permission == "full" && !planMode
                 // 授权过工作目录就注入文件工具；读类（列/读/搜）在只读与计划模式下都要留着——
@@ -1438,6 +1445,54 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             steps.add(ChatStore.Step("tool", "输出被截断，自动续写（第 $truncFix 次）"))
                             syncSteps()
                             continue
+                        }
+                        // 自驱：模型这一轮不调工具了，先看客观判据再决定收不收尾。
+                        // 判据不问模型（小模型自评不可靠），只看：有没有失败、该产出的产出了没、是否原地打转。
+                        if (autoDrive) {
+                            val failed = steps.count { st -> !st.ok }
+                            val deliverable = _messages.value.lastOrNull()?.genFiles?.isNotEmpty() == true
+                            val stallKey = steps.filter { !it.ok }
+                                .joinToString("|") { (it.label + ":" + (it.detail ?: "")).take(80) }
+                                .ifBlank { null }
+                            val sameStall = stallKey != null && stallKey == lastStallKey
+                            val verdict = ToolLoopPolicy.driveVerdict(
+                                wantsArtifact = wantsArtifact,
+                                hasDeliverable = deliverable,
+                                failedTools = failed,
+                                sameStall = sameStall,
+                                continued = autoDriveCount,
+                                maxContinue = MAX_AUTODRIVE,
+                            )
+                            if (verdict.shouldContinue && round < roundCap - 1) {
+                                autoDriveCount++
+                                lastStallKey = stallKey
+                                val failedNotes = steps.filter { !it.ok }
+                                    .takeLast(3)
+                                    .joinToString("\n") { "- " + it.label.take(60) + "：" + (it.detail ?: "").take(160) }
+                                val nudge = buildString {
+                                    append("【自动续跑 $autoDriveCount/$MAX_AUTODRIVE】")
+                                    append(verdict.reason ?: "目标还没完成")
+                                    append("。\n")
+                                    if (failedNotes.isNotBlank()) {
+                                        append("最近失败的步骤：\n").append(failedNotes).append('\n')
+                                    }
+                                    append("请针对上面的问题继续做完，不要重复已经完成的部分，也不要重新开头。")
+                                }
+                                ServerProcessManager.appLog(
+                                    "自驱续跑第 $autoDriveCount 次：${verdict.reason}"
+                                )
+                                steps.add(
+                                    ChatStore.Step("tool", "目标未达成，自动续跑（第 $autoDriveCount 次）", verdict.reason)
+                                )
+                                syncSteps()
+                                apiMsgs = apiMsgs + ChatClient.ChatMessage("user", nudge)
+                                continue
+                            }
+                            if (!verdict.shouldContinue && verdict.reason != null) {
+                                ServerProcessManager.appLog("自驱收尾：${verdict.reason}")
+                                steps.add(ChatStore.Step("tool", "自驱收尾", verdict.reason))
+                                syncSteps()
+                            }
                         }
                         // 最终回复：先把可能还在流式的思考行收尾（正文开始后模型也可能再思考）
                         settleThink()
@@ -2212,6 +2267,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun setSessionPlanMode(sid: String, on: Boolean) {
         _sessions.value = _sessions.value.map {
             if (it.id == sid) it.copy(planMode = on) else it
+        }
+        saveStore()
+    }
+
+    /** 自驱模式：目标没达成时自动继续（有次数上限） */
+    fun setSessionAutoDrive(sid: String, on: Boolean) {
+        _sessions.value = _sessions.value.map {
+            if (it.id == sid) it.copy(autoDrive = on) else it
         }
         saveStore()
     }

@@ -168,7 +168,12 @@ object ChatStore {
          * 本会话的执行权限：read（仅可查看）/ workspace（工作区内修改）/ full（完全权限）。
          * null = 跟随全局默认（AppSettings.defaultPermission）。
          */
-        val permission: String? = null
+        val permission: String? = null,
+        /**
+         * 自驱模式：模型想收尾时，先用客观判据（有没有失败、该产出的产出了没）检查一遍，
+         * 没达成就有上限地继续，而不是直接停下等用户再催。
+         */
+        val autoDrive: Boolean = false
     )
 
     data class Store(val activeId: String, val sessions: List<Session>)
@@ -247,7 +252,8 @@ object ChatStore {
                     },
                     o.optString("folder").takeIf { it.isNotEmpty() },
                     o.optBoolean("planMode"),
-                    o.optString("permission").takeIf { it.isNotEmpty() }
+                    o.optString("permission").takeIf { it.isNotEmpty() },
+                    o.optBoolean("autoDrive")
                 )
             }.ifEmpty {
                 listOf(Session("1", "新会话", System.currentTimeMillis(), emptyList()))
@@ -383,6 +389,7 @@ object ChatStore {
                         s.appliedChainId?.let { put("appliedChainId", it) }
                         s.folder?.let { put("folder", it) }
                         if (s.planMode) put("planMode", true)
+                        if (s.autoDrive) put("autoDrive", true)
                         s.permission?.let { put("permission", it) }
                         s.endpoint?.let { e ->
                             put(
