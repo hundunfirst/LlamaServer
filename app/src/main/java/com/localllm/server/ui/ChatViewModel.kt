@@ -929,7 +929,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             }
                         }
                 val fileHint = if (fileOn) {
-                    "如需生成文件（HTML/代码/CSV）用 file_write；需要真正的 Excel 表格用 make_xlsx（rows 二维数组）；" +
+                    // 路径约定写在最前面：实测小模型会把「工作目录」和「根目录 / 系统目录」混着用，
+                    // 一会读 /root、一会读 /，全都不存在，然后反复重试。
+                    "**路径规则：file_list / file_read / file_write / file_patch 里写的相对路径，" +
+                            "都相对于用户的工作目录——直接写文件名或子目录名即可（如 report.xlsx、demo/a.html）。" +
+                            "不要用 /、/root、/home、/sdcard 这类路径去猜文件在哪。**" +
+                            "如需生成文件（HTML/代码/CSV）用 file_write；需要真正的 Excel 表格用 make_xlsx（rows 二维数组）；" +
                             "需要 PDF 用 make_pdf。都写入工作目录，并在回答里告知文件名；" +
                             "已经存在的文件只改一两处时，用 file_patch（给 old/new 片段），" +
                             "不要用 file_write 重吐全文——那样每轮都要重新输出整份文件，慢且容易把已对的部分改坏；" +
@@ -1058,18 +1063,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val hasImage = history.any { it.imageB64 != null }
                 // 规划用云端：本地小模型最弱的一环是「把目标拆成步骤」，
                 // 这一环借云端，文件与命令仍然在本地执行（数据不出设备）。
-                val cloudPlan = if (selfSession?.planWithCloud == true) {
+                val cloudPlan: String?
+                var cloudPlanSkip: String? = null
+                if (selfSession?.planWithCloud == true) {
                     setProgress(sid, "正在让云端出计划…")
                     when (val r = requestCloudPlan(lastUserText)) {
-                        is PlanResult.Ok -> r.text
+                        is PlanResult.Ok -> cloudPlan = r.text
                         is PlanResult.Skip -> {
                             // 别静默退回本地：明确说一句，否则用户以为开关生效了
                             ServerProcessManager.appLog("规划用云端未生效：${r.reason}")
                             _toast.value = "规划用云端未生效：${r.reason}"
-                            null
+                            cloudPlan = null
+                            cloudPlanSkip = r.reason
                         }
                     }
-                } else null
+                } else {
+                    cloudPlan = null
+                }
                 val planHint = if (cloudPlan.isNullOrBlank()) "" else
                     "\n\n【云端给出的执行计划，照此执行，不要重新规划】\n" + cloudPlan
 
@@ -1342,6 +1352,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 for (round in 0 until roundCap) {
                     ensureActive() // 停止/切换后不再进入下一轮
 
+                    // 云端计划单独占时间线的一步：否则用户根本看不出「哪部分是云端规划的、
+                    // 哪部分是本地执行的」，也看不到云端到底给了什么。
+                    if (round == 0 && !cloudPlan.isNullOrBlank()) {
+                        steps.add(
+                            ChatStore.Step(
+                                "cloud",
+                                "云端规划（${cloudPlan.length} 字）",
+                                cloudPlan.take(3000)
+                            )
+                        )
+                        syncSteps()
+                    }
                     // 硬上限（宽松）：轮次设成「不限」也挡一下极端情况——跑了几百轮或二十分钟还没完，
                     // 大概率是模型在原地打转，收掉工具让它用文字总结，比继续空转有用。
                     if (!hardStop && (round >= HARD_ROUND_CAP ||

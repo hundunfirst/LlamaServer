@@ -2690,7 +2690,7 @@ internal fun StepRow(
     var open by remember(st.type + st.label) { mutableStateOf(st.type == "text") }
     val thinkBodyText = if (st.type == "think") (thinkBody ?: st.detail) else null
     val toolArgs = if (st.type == "tool" || st.type == "search") st.args else null
-    val toolDetail = if (st.type == "tool" || st.type == "search") st.detail else null
+    val toolDetail = if (st.type == "tool" || st.type == "search" || st.type == "cloud") st.detail else null
     val hasBody = st.type == "text" ||
             liveThink ||
             !thinkBodyText.isNullOrBlank() ||
@@ -2699,6 +2699,7 @@ internal fun StepRow(
     val stepTint = when {
         !st.ok -> MaterialTheme.colorScheme.error
         st.type == "think" -> MaterialTheme.colorScheme.tertiary
+        st.type == "cloud" -> MaterialTheme.colorScheme.secondary
         st.type == "search" -> MaterialTheme.colorScheme.primary
         st.label.startsWith("写入") || st.label.startsWith("编辑") -> MaterialTheme.colorScheme.secondary
         st.label.startsWith("读取") || st.label.startsWith("列出") -> MaterialTheme.colorScheme.primary
@@ -2726,6 +2727,7 @@ internal fun StepRow(
                     imageVector = when (st.type) {
                         "think" -> Icons.Filled.Psychology
                         "search" -> Icons.Filled.Search
+                "cloud" -> Icons.Filled.AutoAwesome
                         else -> toolStyle(st.label).icon
                     },
                     contentDescription = null,
