@@ -2004,6 +2004,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 permissionLabel = permissionLabel(cur?.permission ?: com.localllm.server.core.AppSettings.defaultPermission),
                 planMode = cur?.planMode == true,
                 autoDrive = cur?.autoDrive == true,
+                planWithCloud = cur?.planWithCloud == true,
                 onDismiss = { showAttachSheet = false },
                 onGallery = {
                     showAttachSheet = false
@@ -2035,7 +2036,8 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                     permissionEditing = true
                 },
                 onPlanMode = { on -> vm.setSessionPlanMode(activeId, on) },
-                onAutoDrive = { on -> vm.setSessionAutoDrive(activeId, on) }
+                onAutoDrive = { on -> vm.setSessionAutoDrive(activeId, on) },
+                onPlanWithCloud = { on -> vm.setSessionPlanWithCloud(activeId, on) }
             )
         }
 
@@ -2122,6 +2124,7 @@ private fun AttachSheet(
     permissionLabel: String,
     planMode: Boolean,
     autoDrive: Boolean,
+    planWithCloud: Boolean,
     onDismiss: () -> Unit,
     onGallery: () -> Unit,
     onCamera: () -> Unit,
@@ -2129,6 +2132,7 @@ private fun AttachSheet(
     onPermission: () -> Unit,
     onPlanMode: (Boolean) -> Unit,
     onAutoDrive: (Boolean) -> Unit,
+    onPlanWithCloud: (Boolean) -> Unit,
 ) {
     androidx.compose.material3.ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -2224,6 +2228,28 @@ private fun AttachSheet(
                         androidx.compose.material3.Switch(
                             checked = autoDrive,
                             onCheckedChange = onAutoDrive
+                        )
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onPlanWithCloud(!planWithCloud) }
+                            .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("规划用云端", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                if (planWithCloud) "云端只出计划，文件和命令仍在本地执行"
+                                else "关闭：全部由本地模型完成",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        androidx.compose.material3.Switch(
+                            checked = planWithCloud,
+                            onCheckedChange = onPlanWithCloud
                         )
                     }
                 }

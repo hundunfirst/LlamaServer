@@ -173,7 +173,12 @@ object ChatStore {
          * 自驱模式：模型想收尾时，先用客观判据（有没有失败、该产出的产出了没）检查一遍，
          * 没达成就有上限地继续，而不是直接停下等用户再催。
          */
-        val autoDrive: Boolean = false
+        val autoDrive: Boolean = false,
+        /**
+         * 规划用云端：先让云端大模型出一份分步计划，再交给本地模型照做。
+         * 本地小模型最弱的是「拆解任务」，而这一环正好可以借用云端；文件与命令仍在本地执行。
+         */
+        val planWithCloud: Boolean = false
     )
 
     data class Store(val activeId: String, val sessions: List<Session>)
@@ -253,7 +258,8 @@ object ChatStore {
                     o.optString("folder").takeIf { it.isNotEmpty() },
                     o.optBoolean("planMode"),
                     o.optString("permission").takeIf { it.isNotEmpty() },
-                    o.optBoolean("autoDrive")
+                    o.optBoolean("autoDrive"),
+                    o.optBoolean("planWithCloud")
                 )
             }.ifEmpty {
                 listOf(Session("1", "新会话", System.currentTimeMillis(), emptyList()))
@@ -390,6 +396,7 @@ object ChatStore {
                         s.folder?.let { put("folder", it) }
                         if (s.planMode) put("planMode", true)
                         if (s.autoDrive) put("autoDrive", true)
+                        if (s.planWithCloud) put("planWithCloud", true)
                         s.permission?.let { put("permission", it) }
                         s.endpoint?.let { e ->
                             put(

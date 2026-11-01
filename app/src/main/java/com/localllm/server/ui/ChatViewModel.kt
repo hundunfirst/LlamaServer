@@ -1056,9 +1056,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 var imageLogged = false
                 // 对话里有没有图：决定是否注入 ocr_image 工具
                 val hasImage = history.any { it.imageB64 != null }
+                // 规划用云端：本地小模型最弱的一环是「把目标拆成步骤」，
+                // 这一环借云端，文件与命令仍然在本地执行（数据不出设备）。
+                val cloudPlan = if (selfSession?.planWithCloud == true) {
+                    setProgress(sid, "正在让云端出计划…")
+                    requestCloudPlan(lastUserText)
+                } else null
+                val planHint = if (cloudPlan.isNullOrBlank()) "" else
+                    "\n\n【云端给出的执行计划，照此执行，不要重新规划】\n" + cloudPlan
+
                 val systemTextFull = (if (linkText == null) systemText
                 else systemText + "\n\n【用户消息中链接的内容（供回答参考，可能不完整）】\n" + linkText) +
-                        (if (skillHint.isBlank()) "" else "\n\n" + skillHint)
+                        (if (skillHint.isBlank()) "" else "\n\n" + skillHint) + planHint
                 // Qwen3.5 等模板硬性要求 system 只能是第一条，否则 raise_exception：
                 // 「System message must be at the beginning」。而上下文压缩产生的「历史摘要」
                 // 是以 system 角色插在历史中间的——直接让整个请求 500，且是在 prefill
@@ -2396,6 +2405,61 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (it.id == sid) it.copy(autoDrive = on) else it
         }
         saveStore()
+    }
+
+    /** 规划用云端：先让云端出计划，本地照着执行 */
+    fun setSessionPlanWithCloud(sid: String, on: Boolean) {
+        _sessions.value = _sessions.value.map {
+            if (it.id == sid) it.copy(planWithCloud = on) else it
+        }
+        saveStore()
+    }
+
+    /**
+     * 请云端出一份分步计划。失败或没配置就返回 null，这一轮退回纯本地——
+     * 不能因为"云端不可用"把整轮卡死。
+     */
+    private suspend fun requestCloudPlan(goal: String): String? {
+        if (!AppSettings.chatCloudEnabled) return null
+        val url = AppSettings.chatCloudUrl.trim().removeSuffix("/")
+        if (url.isBlank()) return null
+        val model = AppSettings.chatCloudModel.ifBlank { "default" }
+        val key = AppSettings.chatCloudKey
+        val system = "你是任务规划者。根据用户目标，输出一份可执行的分步计划：\n" +
+                "1. 只写步骤（每步做什么、要动哪个文件或路径、需要什么取舍）；\n" +
+                "2. 不要输出代码，不要写完整文件内容；\n" +
+                "3. 3-8 步为宜，每步一句话。"
+        val messages = listOf(
+            ChatClient.ChatMessage("system", system),
+            ChatClient.ChatMessage("user", goal.take(2000))
+        )
+        val sb = StringBuilder()
+        val failed = runCatching {
+            ChatClient.chatStream(
+                port = AppSettings.port,
+                messages = messages,
+                apiToken = key.ifBlank { null },
+                baseUrl = url,
+                model = model,
+                callKey = "plan-" + System.currentTimeMillis(),
+                thinking = null,
+                effort = null,
+                maxTokens = 1200,
+                codeTask = false,
+                tools = null,
+                onToolCalls = {},
+                onFinish = {},
+                onTiming = { _, _ -> },
+                onDelta = { d -> sb.append(d) },
+                onReasoning = {},
+                onFinal = { _, _, _ -> }
+            )
+        }.isFailure
+        if (failed) return null
+        val text = sb.toString().trim()
+        if (text.isBlank()) return null
+        ServerProcessManager.appLog("云端规划完成：${text.length} 字")
+        return text
     }
 
     /**
