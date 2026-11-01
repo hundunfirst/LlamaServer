@@ -659,30 +659,6 @@ fun SettingsScreen(
                 open = settingGroup == "g5"
             ) { settingGroup = if (settingGroup == "g5") null else "g5" }
             if (settingGroup == "g5") {
-            // ---- 任务清单工具 ----
-            var todoOn by remember {
-                mutableStateOf(com.localllm.server.core.AppSettings.todoToolEnabled)
-            }
-            SectionHeader(
-                title = "任务清单工具",
-                help = "开启后模型可用 todo_write 工具：多步任务先列计划、逐步执行并随时更新状态，" +
-                        "聊天里会显示 📋 任务清单卡片。关闭则只做一次性回答。立即生效。",
-                titleStyle = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(top = 8.dp)
-            )
-            QuickChips(
-                options = listOf("true" to "开启", "false" to "关闭"),
-                current = todoOn.toString()
-            ) { v ->
-                todoOn = v.toBoolean()
-                com.localllm.server.core.AppSettings.todoToolEnabled = todoOn
-            }
-
-            // 图片处理不再有「自动 / 多模态 / OCR」档位：
-            // 挂了 mmproj 的模型直接看图；纯文本模型由 ocr_image 工具按需识别文字。
-            // 用户一句「识别这张图的文字」就是触发条件，不需要全局开关。
-
-            // ---- 图片轮的联网搜索策略（隐私）----
             var imgPolicy by remember {
                 mutableStateOf(com.localllm.server.core.AppSettings.imageSearchPolicy)
             }

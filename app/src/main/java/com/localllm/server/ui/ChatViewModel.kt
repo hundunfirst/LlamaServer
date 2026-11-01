@@ -859,8 +859,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 提示词保持最小化：过多硬性约束会让小模型在思考里反复“检查规则”而失控。
                 // LaTeX 已有客户端转换器兜底，不再要求模型禁用。
                 val searchOn = AppSettings.webSearchEnabled
-                val todoOn = AppSettings.todoToolEnabled
-                val memoryOn = AppSettings.memoryEnabled
+                // 任务清单（todo_write）已移除：本地小模型基本只是在反复刷清单，
+                // 每次更新还占一次工具调用与一轮上下文，收益抵不上成本。
+                val todoOn = false
+                val memoryOn = false
 
                 // 本会话的执行权限与计划模式：权限决定「能给哪些工具」，计划模式只留读类工具。
                 // 默认值取自设置，会话可以单独覆盖（面板里切换就改这一条会话）。
@@ -894,7 +896,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 助手指令：会话级覆盖优先，否则用全局预设
                 val sessionPrompt = _sessions.value.find { it.id == _activeId.value }?.systemPrompt
                 val basePrompt = sessionPrompt ?: AppSettings.activeSysPrompt()
-                val memoryText = if (memoryOn) MemoryStore.injectText(getApplication()) else ""
+                // 长期记忆已停用：小模型不会主动写，写了也未必在后续轮次用上，
+                // 而写错的条目会一直跟着每一轮提示词走。memory.md 文件保留，不删数据。
+                val memoryText = ""
                 val memoryHint = if (memoryText.isNotBlank()) {
                     "\n\n【长期记忆（用户偏好/背景，供参考）】\n" + memoryText
                 } else ""
@@ -1191,7 +1195,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 } else filterMcpForText(mcpAgg, lastUserText)
                 val toolsJson = org.json.JSONArray().also { arr ->
                     if (searchAvailable) arr.put(WebSearch.toolJson())
-                    if (todoOn) arr.put(TodoTool.toolJson())
                     if (fileToolsOn) FileTools.toolsJson().let { fa ->
                         for (i in 0 until fa.length()) {
                             val fn = fa.getJSONObject(i).optJSONObject("function")
@@ -1205,7 +1208,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     // 内置 Linux 环境（PRoot + Ubuntu）：跑测试/git/node 的入口，跟着文件工具一起给
                     if (fileOn) arr.put(BashTool.toolJson())
-                    if (memoryOn) arr.put(MemoryStore.toolJson())
                     // OCR 工具：只有对话里真的出现过图片才注入，平时不白占 schema
                     if (hasImage) arr.put(OcrTool.toolJson())
                     // web_run 只在造物轮注入：纯提问轮模型看不到这个工具，
@@ -1739,38 +1741,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             "用户拒绝了这次操作，它没有执行。不要重复同样的调用：" +
                                     "换个做法，或先把打算做什么告诉用户。"
                         } else runCatching {
-                            if (tc.name == TodoTool.NAME) {
-                                todoCalls++
-                                if (todoCalls > TODO_UPDATE_GUARD) {
-                                    "清单已经更新了 $todoCalls 次，别再刷清单了：请在正文里给出用户要的实际内容（代码/文件）。"
-                                } else {
-                                    val todos = TodoTool.parse(tc.arguments.ifBlank { "{}" })
-                                    if (todos.isEmpty()) {
-                                        "参数无效：未能解析任务清单，请按 tasks[{title,status}] 格式重新提交。"
-                                    } else {
-                                        val list = _messages.value.toMutableList()
-                                        if (list.isNotEmpty()) {
-                                            list[list.lastIndex] = list.last().copy(todos = todos)
-                                            _messages.value = list
-                                        }
-                                        val done = todos.count { it.status == "completed" }
-                                        ServerProcessManager.appLog("任务清单更新：$done/${todos.size} 已完成")
-                                        "任务清单已更新（${done}/${todos.size} 完成）。请继续在正文中产出实际内容，完成后再次调用 ${TodoTool.NAME} 更新状态。"
-                                    }
-                                }
-                            } else if (memoryOn && tc.name == MemoryStore.TOOL_NAME) {
-                                val content = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
-                                    .optString("content")
-                                if (content.isBlank()) {
-                                    "参数无效：content 不能为空"
-                                } else {
-                                    val count = MemoryStore.append(getApplication(), content)
-                                    ServerProcessManager.appLog("长期记忆已写入：${content.take(40)}（共 $count 条）")
-                                    steps.add(ChatStore.Step("tool", "记住：${content.take(30)}", "共 $count 条记忆"))
-                                    syncSteps()
-                                    "已写入长期记忆（当前共 $count 条）。"
-                                }
-                            } else if (fileOn && tc.name in DocMaker.NAMES) {
+                            if (fileOn && tc.name in DocMaker.NAMES) {
                                 val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                                 ServerProcessManager.appLog("文档生成：${tc.name}")
                                 val r = DocMaker.execute(getApplication(), tc.name, args)

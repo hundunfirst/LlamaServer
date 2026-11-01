@@ -3130,46 +3130,6 @@ private fun MessageBubble(
                                     .padding(vertical = 4.dp)
                             )
                         }
-                        // 任务清单卡片（todo_write 产生）
-                        if (!isUser && msg.todos.isNotEmpty()) {
-                            val done = msg.todos.count { it.status == "completed" }
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(bottom = 6.dp)
-                                    .background(
-                                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.28f),
-                                        RoundedCornerShape(8.dp)
-                                    )
-                                    .padding(8.dp)
-                            ) {
-                                Text(
-                                    "📋 任务清单（$done/${msg.todos.size}）",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                msg.todos.forEach { td ->
-                                    val mark = when (td.status) {
-                                        "completed" -> "☑"
-                                        "in_progress" -> "◐"
-                                        else -> "☐"
-                                    }
-                                    Text(
-                                        "$mark ${td.title}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = when (td.status) {
-                                            "completed" -> MaterialTheme.colorScheme.onSurfaceVariant
-                                            "in_progress" -> MaterialTheme.colorScheme.primary
-                                            else -> MaterialTheme.colorScheme.onSurface
-                                        },
-                                        textDecoration = if (td.status == "completed")
-                                            androidx.compose.ui.text.style.TextDecoration.LineThrough
-                                        else null,
-                                        modifier = Modifier.padding(top = 2.dp)
-                                    )
-                                }
-                            }
-                        }
                         // 一体式过程时间线（DSH / MiMo Desktop 风格）：思考、搜索、工具调用
                         // 按原始顺序一行行交错串在一起，整块可折叠成一行摘要，正文在下面。
                         val rawReasoning = msg.reasoning?.takeIf { it.isNotBlank() }
