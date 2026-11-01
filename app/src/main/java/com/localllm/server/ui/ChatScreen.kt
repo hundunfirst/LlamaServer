@@ -48,7 +48,15 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.MoreHoriz
@@ -59,6 +67,12 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
@@ -484,11 +498,18 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     val toastMsg by vm.toast.collectAsStateWithLifecycle()
     val error by vm.error.collectAsStateWithLifecycle()
     val lastStats by vm.lastStats.collectAsStateWithLifecycle()
+    val contextUsage by vm.contextUsage.collectAsStateWithLifecycle()
+    val usage by vm.usage.collectAsStateWithLifecycle()
     val pendingImage by vm.pendingImageB64.collectAsStateWithLifecycle()
+    val imageNote by vm.pendingImageNote.collectAsStateWithLifecycle()
     val pendingFile by vm.pendingFile.collectAsStateWithLifecycle()
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val activeId by vm.activeId.collectAsStateWithLifecycle()
     var showSessions by remember { mutableStateOf(false) }
+    // 正在编辑端点的会话 id（null = 没开选择弹窗）
+    var endpointEditing by remember { mutableStateOf<String?>(null) }
+    // 正在设置文件夹的会话 id
+    var folderEditing by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
@@ -518,8 +539,59 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     var sysPromptText by remember { mutableStateOf("") }
     var editText by remember { mutableStateOf("") }
 
+    // 相册：走系统的图片选择器（Android 13+ 是系统相册 Photo Picker，旧系统回退到图库）。
+    // 之前和「文件」共用 OpenDocument，点出来是文档浏览器，跟「相册」这个名字不符。
+    val pickFromGallery = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) vm.attachImage(uri)
+    }
+
     // 附加文件：图片走多模态/OCR，文本类文件读成文本随消息发送（其余类型暂不支持）
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            val mime = context.contentResolver.getType(uri) ?: ""
+            if (mime.startsWith("image/")) vm.attachImage(uri) else vm.attachFile(uri)
+        }
+    }
+
+    // 输入区「+」面板：相册 / 拍照 / 文件（同一个入口，DSH 那种底部抽屉）
+    var showAttachSheet by remember { mutableStateOf(false) }
+    var showUsageSheet by remember { mutableStateOf(false) }
+    var showDetail by remember { mutableStateOf(false) }
+    var permissionEditing by remember { mutableStateOf(false) }
+    var cameraUri by remember { mutableStateOf<android.net.Uri?>(null) }
+
+    // 拍照：交给系统相机，结果写进 MediaStore 新建的图片条目（不需要 FileProvider）
+    val takePhoto = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        val uri = cameraUri
+        cameraUri = null
+        if (ok && uri != null) vm.attachImage(uri)
+    }
+
+    fun launchCamera() {
+        val values = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "hundun_${System.currentTimeMillis()}.jpg")
+            put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+        }
+        val uri = runCatching {
+            context.contentResolver.insert(
+                android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values
+            )
+        }.getOrNull()
+        if (uri == null) {
+            Toast.makeText(context, "无法创建照片文件", Toast.LENGTH_SHORT).show()
+            return
+        }
+        cameraUri = uri
+        runCatching { takePhoto.launch(uri) }.onFailure {
+            cameraUri = null
+            Toast.makeText(context, "没有可用的相机：${it.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // 面板里「文件」用同一套解析：文本类读成文本，其余提示不支持
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             val mime = context.contentResolver.getType(uri) ?: ""
             if (mime.startsWith("image/")) vm.attachImage(uri) else vm.attachFile(uri)
@@ -949,6 +1021,68 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
         )
     }
 
+    // 危险操作确认：命令 / 写文件 / 带写语义的 MCP 工具执行前，把要做的事原样摆给用户看
+    val toolAsk by vm.toolAsk.collectAsStateWithLifecycle()
+    toolAsk?.let { ask ->
+        AlertDialog(
+            onDismissRequest = { vm.answerToolAsk(0) },
+            title = { Text(ask.title) },
+            text = {
+                Column {
+                    Text(
+                        ask.reason,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (ask.dangerous) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        ask.subjectLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = MaterialTheme.shapes.small,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            ask.subject,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier
+                                .heightIn(max = 240.dp)
+                                .verticalScroll(rememberScrollState())
+                                .padding(8.dp)
+                        )
+                    }
+                    if (ask.canAlways) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "「总是允许」= 本会话内同类操作不再询问。",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Row {
+                    if (ask.canAlways) {
+                        TextButton(onClick = { vm.answerToolAsk(2) }) { Text("总是允许") }
+                    }
+                    TextButton(onClick = { vm.answerToolAsk(1) }) { Text("允许") }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { vm.answerToolAsk(0) }) {
+                    Text("拒绝", color = MaterialTheme.colorScheme.error)
+                }
+            }
+        )
+    }
+
     Column(modifier = modifier.fillMaxSize().imePadding()) {
         // ---- 顶栏：标题 + 渠道快捷切换 + 会话管理 ----
         var channelMenuOpen by remember { mutableStateOf(false) }
@@ -1157,6 +1291,10 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 IconButton(onClick = vm::newChat, enabled = generating.isEmpty()) {
                     Icon(Icons.Default.DeleteSweep, contentDescription = "新会话")
                 }
+                // 会话详情：轨迹 / 改动 / 文件 / 进度 / 上下文
+                IconButton(onClick = { showDetail = true }) {
+                    Icon(Icons.Default.Info, contentDescription = "会话详情")
+                }
             }
         }
 
@@ -1209,12 +1347,49 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
         }
 
         if (showSessions) {
+            // 分组可收起：会话一多，未分组那块会把正在用的挤到看不见
+            var collapsed by remember { mutableStateOf(setOf<String>()) }
             AlertDialog(
                 onDismissRequest = { showSessions = false },
                 title = { Text("会话管理") },
                 text = {
+                    val groupedSessions = sessions
+                        .sortedByDescending { it.updatedAt }
+                        .groupBy { it.folder.orEmpty() }
+                    // 一个分组都没有时不要空顶一行「未分组」，那只是噪音
+                    val showHeaders = groupedSessions.keys.any { it.isNotEmpty() }
                     LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                        items(sessions.sortedByDescending { it.updatedAt }) { s ->
+                        groupedSessions.forEach { (folderName, list) ->
+                            if (showHeaders) {
+                                item(key = "folder:" + folderName) {
+                                    val isCollapsed = folderName in collapsed
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                collapsed = if (isCollapsed) collapsed - folderName
+                                                else collapsed + folderName
+                                            }
+                                            .padding(top = 10.dp, bottom = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            (if (folderName.isEmpty()) "未分组" else "📁 " + folderName) +
+                                                    " · ${list.size}",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Text(
+                                            if (isCollapsed) "展开" else "收起",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                            }
+                            if (folderName in collapsed) return@forEach
+                            items(list) { s ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1257,12 +1432,27 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                                         fontWeight = if (s.id in generating) FontWeight.Medium
                                         else FontWeight.Normal
                                     )
+                                    // 这条会话走哪个通道：多会话并行时各绑各的（本地/云端/电脑上的模型）
+                                    Text(
+                                        "端点：" + sessionEndpointLabel(s) + " ›",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier
+                                            .clickable { endpointEditing = s.id }
+                                            .padding(top = 2.dp)
+                                    )
+                                }
+                                IconButton(onClick = { folderEditing = s.id }) {
+                                    Icon(Icons.Default.Folder, contentDescription = "文件夹",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(18.dp))
                                 }
                                 IconButton(onClick = { vm.deleteSession(s.id) }) {
                                     Icon(Icons.Default.Delete, contentDescription = "删除",
                                         tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
                                 }
                             }
+                        }
                         }
                     }
                 },
@@ -1274,6 +1464,152 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                         vm.newChat()
                         showSessions = false
                     }) { Text("新会话") }
+                }
+            )
+        }
+        // 文件夹（工作区）：给会话分组，空 = 未分组
+        folderEditing?.let { sid ->
+            val cur = sessions.find { it.id == sid }
+            var name by remember(sid) { mutableStateOf(cur?.folder ?: "") }
+            // 已有分组直接点选：手打名字打错一个字符就多出一个分组，会话散在两处
+            val existing = sessions.mapNotNull { it.folder }
+                .filter { it.isNotBlank() }.distinct().sorted()
+            AlertDialog(
+                onDismissRequest = { folderEditing = null },
+                title = { Text("文件夹") },
+                text = {
+                    Column {
+                        if (existing.isNotEmpty()) {
+                            Text(
+                                "已有文件夹",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                existing.forEach { f ->
+                                    FilterChip(
+                                        selected = name.trim() == f,
+                                        onClick = { name = f },
+                                        label = { Text(f) }
+                                    )
+                                }
+                                FilterChip(
+                                    selected = name.isBlank(),
+                                    onClick = { name = "" },
+                                    label = { Text("未分组") }
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(10.dp))
+                        }
+                        OutlinedTextField(
+                            value = name,
+                            onValueChange = { name = it },
+                            label = { Text("文件夹名（留空 = 未分组）") },
+                            singleLine = true
+                        )
+                        if (name.isNotBlank() && name.trim() !in existing) {
+                            Text(
+                                "保存后新建文件夹「${name.trim()}」",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(top = 6.dp)
+                            )
+                        }
+                        Text(
+                            "文件夹只用来归拢会话列表，不影响会话内容，也不改工作目录。",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 6.dp)
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        vm.setSessionFolder(sid, name)
+                        folderEditing = null
+                    }) { Text("保存") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { folderEditing = null }) { Text("取消") }
+                }
+            )
+        }
+        // 会话端点选择：多会话可以各走各的通道（本地 / 云端渠道 / 电脑上跑的模型）
+        endpointEditing?.let { sid ->
+            val cur = sessions.find { it.id == sid }
+            val presets = remember { com.localllm.server.core.AppSettings.loadCloudPresets() }
+            val globalLabel = if (
+                com.localllm.server.core.AppSettings.chatCloudEnabled &&
+                com.localllm.server.core.AppSettings.chatCloudUrl.isNotBlank()
+            ) {
+                "云端 " + com.localllm.server.core.AppSettings.chatCloudModel.ifBlank { "default" }
+            } else {
+                "本地服务"
+            }
+            AlertDialog(
+                onDismissRequest = { endpointEditing = null },
+                title = { Text("本会话端点") },
+                text = {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        Text(
+                            "只影响这条会话之后的发送，其他会话不受影响。" +
+                                    "电脑上跑的模型也在「设置 → 云端」里加一条 OpenAI 兼容地址即可。",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                        EndpointOption(
+                            selected = cur?.endpoint == null,
+                            title = "跟随全局（$globalLabel）",
+                            onClick = {
+                                vm.setSessionEndpoint(sid, null)
+                                endpointEditing = null
+                            }
+                        )
+                        EndpointOption(
+                            selected = cur?.endpoint?.local == true,
+                            title = "本地服务（本机 llama-server）",
+                            onClick = {
+                                vm.setSessionEndpoint(sid, ChatStore.Endpoint(local = true))
+                                endpointEditing = null
+                            }
+                        )
+                        presets.forEach { p ->
+                            val selected = cur?.endpoint?.let { !it.local && it.baseUrl == p.url } == true
+                            EndpointOption(
+                                selected = selected,
+                                title = "云端 · " + p.name.ifBlank { p.url } +
+                                        "（" + p.model.ifBlank { "默认模型" } + "）",
+                                onClick = {
+                                    vm.setSessionEndpoint(
+                                        sid,
+                                        ChatStore.Endpoint(
+                                            local = false,
+                                            baseUrl = p.url,
+                                            model = p.model,
+                                            apiKey = p.key
+                                        )
+                                    )
+                                    endpointEditing = null
+                                }
+                            )
+                        }
+                        if (presets.isEmpty()) {
+                            Text(
+                                "还没有云端渠道：去「设置 → 云端」添加一条（地址填 OpenAI 兼容的端点）。",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { endpointEditing = null }) { Text("关闭") }
                 }
             )
         }
@@ -1322,58 +1658,63 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 val waiting = !isUser && streaming && msg.content.isEmpty() && msg.reasoning.isNullOrEmpty()
                 // 思考进行中（有思考文本、正文还没开始）：思考卡显示动态"思考中"
                 val thinking = !isUser && streaming && msg.content.isEmpty() && !msg.reasoning.isNullOrEmpty()
-                MessageBubble(
-                    msg = msg,
-                    isUser = isUser,
-                    waiting = waiting,
-                    thinking = thinking,
-                    generating = streaming && i == messages.lastIndex && !isUser,
-                    showStats = (!isUser && i == messages.lastIndex && lastStats != null),
-                    stats = lastStats ?: "",
-                    onResumeTask = { vm.resumeStoppedTask(i) },
-                    showResume = i == lastStoppedIdx,
-                    menuOpen = menuIndex == i,
-                    onMenuOpen = { menuIndex = i },
-                    onMenuClose = { menuIndex = null },
-                    onCopy = {
-                        clipboard.setText(AnnotatedString(msg.content))
-                        menuIndex = null
-                        Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
-                    },
-                    onResend = {
-                        menuIndex = null
-                        if (isUser) vm.resendAt(i)
-                    },
-                    onEdit = {
-                        menuIndex = null
-                        if (isUser) {
-                            editText = msg.content
-                            editingIndex = i
+                // 会话页字号：直接给一套更大的字形，而不是缩放——缩放会让行高与字重脱节
+                androidx.compose.material3.MaterialTheme(
+                    typography = chatTypography(androidx.compose.material3.MaterialTheme.typography)
+                ) {
+                    MessageBubble(
+                        msg = msg,
+                        isUser = isUser,
+                        waiting = waiting,
+                        thinking = thinking,
+                        generating = streaming && i == messages.lastIndex && !isUser,
+                        showStats = (!isUser && i == messages.lastIndex && lastStats != null),
+                        stats = lastStats ?: "",
+                        onResumeTask = { vm.resumeStoppedTask(i) },
+                        showResume = i == lastStoppedIdx,
+                        menuOpen = menuIndex == i,
+                        onMenuOpen = { menuIndex = i },
+                        onMenuClose = { menuIndex = null },
+                        onCopy = {
+                            clipboard.setText(AnnotatedString(msg.content))
+                            menuIndex = null
+                            Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                        },
+                        onResend = {
+                            menuIndex = null
+                            if (isUser) vm.resendAt(i)
+                        },
+                        onEdit = {
+                            menuIndex = null
+                            if (isUser) {
+                                editText = msg.content
+                                editingIndex = i
+                            }
+                        },
+                        onDelete = {
+                            menuIndex = null
+                            deleteIndex = i
+                        },
+                        onOpenGenFile = { gf -> previewGenFile = gf },
+                        onReadText = { readMsg = msg },
+                        onSpeak = {
+                            val engine = tts
+                            if (engine == null || !ttsReady) {
+                                Toast.makeText(context, "朗读引擎未就绪", Toast.LENGTH_SHORT).show()
+                            } else if (engine.isSpeaking) {
+                                engine.stop()
+                            } else {
+                                engine.language = java.util.Locale.CHINA
+                                engine.speak(
+                                    msg.content.take(4000),
+                                    android.speech.tts.TextToSpeech.QUEUE_FLUSH,
+                                    null,
+                                    "msg_$i"
+                                )
+                            }
                         }
-                    },
-                    onDelete = {
-                        menuIndex = null
-                        deleteIndex = i
-                    },
-                    onOpenGenFile = { gf -> previewGenFile = gf },
-                    onReadText = { readMsg = msg },
-                    onSpeak = {
-                        val engine = tts
-                        if (engine == null || !ttsReady) {
-                            Toast.makeText(context, "朗读引擎未就绪", Toast.LENGTH_SHORT).show()
-                        } else if (engine.isSpeaking) {
-                            engine.stop()
-                        } else {
-                            engine.language = java.util.Locale.CHINA
-                            engine.speak(
-                                msg.content.take(4000),
-                                android.speech.tts.TextToSpeech.QUEUE_FLUSH,
-                                null,
-                                "msg_$i"
-                            )
-                        }
-                    }
-                )
+                    )
+                }
             }
         }
 
@@ -1472,7 +1813,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "🖼 已附带图片（已自动压缩）",
+                    "🖼 已附带图片 · " + (imageNote ?: "已处理"),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.weight(1f)
@@ -1485,33 +1826,164 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
         // 运行预览摘要行：一行，紧贴输入框上方，点开是画中画弹窗
         SandboxPanel()
 
-        Row(
+        // 计划模式：模型给了计划之后，这里一键退出计划模式并让它照着做
+        val planModeOn = sessions.find { it.id == activeId }?.planMode == true
+        val lastAssistant = messages.lastOrNull()
+        if (planModeOn && !streaming && lastAssistant?.role == "assistant" &&
+            !lastAssistant.content.isNullOrBlank()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Surface(
+                    color = MaterialTheme.colorScheme.primary,
+                    shape = RoundedCornerShape(20.dp),
+                    modifier = Modifier.clickable {
+                        vm.setSessionPlanMode(activeId, false)
+                        vm.onInput("按上面的计划执行")
+                        vm.send()
+                    }
+                ) {
+                    Text(
+                        "按计划执行",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                }
+            }
+        }
+
+        // 输入区：一个撑满宽度的胶囊输入框，按钮都嵌在框内（左：加号，右：语音/发送自动切换）。
+        // 语音和发送占同一个位置，框里有内容就变发送——两个按钮常驻会把输入宽度吃掉。
+        val canSend = input.isNotBlank() || pendingImage != null || pendingFile != null
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+            shape = RoundedCornerShape(26.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
-            IconButton(
-                onClick = {
-                    val granted = androidx.core.content.ContextCompat.checkSelfPermission(
-                        context, android.Manifest.permission.RECORD_AUDIO
-                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                    if (granted) startSpeech()
-                    else micPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
-                },
-                enabled = !streaming
+            Row(
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.Bottom
             ) {
-                Icon(
-                    Icons.Default.Mic,
-                    contentDescription = "语音输入",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                IconButton(
+                    onClick = { showAttachSheet = true },
+                    enabled = !streaming,
+                    modifier = Modifier.size(44.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Add,
+                        contentDescription = "添加附件",
+                        tint = if (streaming) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                        else MaterialTheme.colorScheme.primary
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    if (input.isEmpty()) {
+                        Text(
+                            "给 混沌智核 发消息…",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    BasicTextField(
+                        value = input,
+                        onValueChange = vm::onInput,
+                        modifier = Modifier.fillMaxWidth(),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            color = MaterialTheme.colorScheme.onSurface
+                        ),
+                        maxLines = 4,
+                        cursorBrush = androidx.compose.ui.graphics.SolidColor(
+                            MaterialTheme.colorScheme.primary
+                        )
+                    )
+                }
+                // 圆环：只在有实际用量时出现（空会话/刚切过来都没有数据）
+                usage?.let { u ->
+                    val limit = contextUsage?.second ?: 0
+                    if (limit > 0) {
+                        val pct = ((u.prompt + u.output) * 100L / limit).toInt().coerceIn(0, 100)
+                        UsageRing(pct = pct, onClick = { showUsageSheet = true })
+                    }
+                }
+                when {
+                    streaming -> IconButton(
+                        onClick = vm::stop,
+                        modifier = Modifier.size(44.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Stop,
+                            contentDescription = "停止",
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
+
+                    canSend -> IconButton(
+                        onClick = vm::send,
+                        modifier = Modifier.size(44.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.ArrowUpward,
+                            contentDescription = "发送",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    else -> IconButton(
+                        onClick = {
+                            val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                                context, android.Manifest.permission.RECORD_AUDIO
+                            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                            if (granted) startSpeech()
+                            else micPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                        },
+                        modifier = Modifier.size(44.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Mic,
+                            contentDescription = "语音输入",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
-            IconButton(
-                onClick = {
-                    pickImage.launch(
+        }
+
+        // 底部抽屉：相册 / 拍照 / 文件 + 本对话（权限、计划模式）
+        if (showAttachSheet) {
+            val cur = sessions.find { it.id == activeId }
+            AttachSheet(
+                permissionLabel = permissionLabel(cur?.permission ?: com.localllm.server.core.AppSettings.defaultPermission),
+                planMode = cur?.planMode == true,
+                onDismiss = { showAttachSheet = false },
+                onGallery = {
+                    showAttachSheet = false
+                    pickFromGallery.launch(
+                        androidx.activity.result.PickVisualMediaRequest(
+                            ActivityResultContracts.PickVisualMedia.ImageOnly
+                        )
+                    )
+                },
+                onCamera = {
+                    showAttachSheet = false
+                    launchCamera()
+                },
+                onFile = {
+                    showAttachSheet = false
+                    pickFile.launch(
                         arrayOf(
-                            "image/*", "text/*",
+                            "text/*",
                             "application/json", "application/xml", "application/javascript",
                             "application/x-yaml", "application/csv",
                             "application/pdf",
@@ -1520,43 +1992,612 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                         )
                     )
                 },
-                enabled = !streaming
-            ) {
-                Icon(
-                    Icons.Default.AttachFile,
-                    contentDescription = "附加文件（图片/文本）",
-                    tint = MaterialTheme.colorScheme.primary
+                onPermission = {
+                    showAttachSheet = false
+                    permissionEditing = true
+                },
+                onPlanMode = { on -> vm.setSessionPlanMode(activeId, on) }
+            )
+        }
+
+        // 权限档位：只影响这条会话之后的行为
+        if (permissionEditing) {
+            val curLevel = sessions.find { it.id == activeId }?.permission
+                ?: com.localllm.server.core.AppSettings.defaultPermission
+            AlertDialog(
+                onDismissRequest = { permissionEditing = false },
+                title = { Text("权限") },
+                text = {
+                    Column {
+                        Text(
+                            "执行命令、修改文件前要不要先问你。只影响这条会话。",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        PermissionOption(
+                            title = "仅可查看",
+                            desc = "只看文件，不写不改、不跑命令",
+                            selected = curLevel == "read"
+                        ) {
+                            vm.setSessionPermission(activeId, "read")
+                            permissionEditing = false
+                        }
+                        PermissionOption(
+                            title = "工作区内修改",
+                            desc = "可以改文件、跑命令，但每次动手前先问你",
+                            selected = curLevel == "workspace"
+                        ) {
+                            vm.setSessionPermission(activeId, "workspace")
+                            permissionEditing = false
+                        }
+                        PermissionOption(
+                            title = "完全权限",
+                            desc = "不再确认，直接执行（危险操作也不问）",
+                            selected = curLevel == "full"
+                        ) {
+                            vm.setSessionPermission(activeId, "full")
+                            permissionEditing = false
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { permissionEditing = false }) { Text("关闭") }
+                }
+            )
+        }
+
+        // 会话详情（轨迹 / 改动 / 文件 / 进度 / 上下文）
+        if (showDetail) {
+            val curSession = sessions.find { it.id == activeId }
+            if (curSession != null) {
+                SessionDetailDialog(
+                    session = curSession,
+                    usage = usage,
+                    contextLimit = contextUsage?.second ?: 0,
+                    onDismiss = { showDetail = false },
+                    onOpenGenFile = { gf -> previewGenFile = gf }
                 )
             }
-            OutlinedTextField(
-                value = input,
-                onValueChange = vm::onInput,
-                modifier = Modifier.weight(1f),
-                placeholder = { Text("输入消息…") },
-                maxLines = 4
+        }
+
+        // 用量面板：输入框右边圆环点开
+        val curUsage = usage
+        if (showUsageSheet && curUsage != null) {
+            UsageSheet(
+                usage = curUsage,
+                limit = contextUsage?.second ?: 0,
+                onDismiss = { showUsageSheet = false }
             )
-            if (streaming) {
-                IconButton(onClick = vm::stop) {
-                    Icon(Icons.Default.Stop, contentDescription = "停止", tint = MaterialTheme.colorScheme.error)
-                }
-            } else {
-                IconButton(
-                    onClick = vm::send,
-                    enabled = input.isNotBlank() || pendingImage != null || pendingFile != null
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送")
+        }
+    }
+}
+
+/**
+ * 输入区「+」打开的底部抽屉：相册 / 拍照 / 文件，下面是「本对话」的权限与计划模式。
+ * 常驻按钮只留一个加号——相册、文件、语音挤在同一行时，输入框会被压得很窄。
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun AttachSheet(
+    permissionLabel: String,
+    planMode: Boolean,
+    onDismiss: () -> Unit,
+    onGallery: () -> Unit,
+    onCamera: () -> Unit,
+    onFile: () -> Unit,
+    onPermission: () -> Unit,
+    onPlanMode: (Boolean) -> Unit,
+) {
+    androidx.compose.material3.ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                SheetAction(
+                    label = "相册",
+                    icon = Icons.Default.Image,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f),
+                    onClick = onGallery
+                )
+                SheetAction(
+                    label = "拍照",
+                    icon = Icons.Default.PhotoCamera,
+                    tint = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.weight(1f),
+                    onClick = onCamera
+                )
+                SheetAction(
+                    label = "文件",
+                    icon = Icons.Default.Folder,
+                    tint = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.weight(1f),
+                    onClick = onFile
+                )
+            }
+            Spacer(modifier = Modifier.height(20.dp))
+            Text(
+                "本对话",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column {
+                    SheetRow(
+                        title = "权限",
+                        value = permissionLabel + " ›",
+                        onClick = onPermission
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onPlanMode(!planMode) }
+                            .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("计划模式", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                if (planMode) "只读、先给计划，你点头再动手" else "关闭：照常执行",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        androidx.compose.material3.Switch(
+                            checked = planMode,
+                            onCheckedChange = onPlanMode
+                        )
+                    }
                 }
             }
         }
     }
 }
 
-// 一体时间线的一行（DSH 样式）：思考/中间正文/搜索/工具按原始顺序渲染，每行独立可折叠。
-// think：折叠显示预览，展开显示完整思考（限高滚动盒，长按可复制）；
+@Composable
+private fun SheetAction(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    tint: androidx.compose.ui.graphics.Color,
+    modifier: Modifier,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = modifier.clickable(onClick = onClick),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(72.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(tint.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(28.dp))
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(label, style = MaterialTheme.typography.labelMedium)
+    }
+}
+
+@Composable
+private fun SheetRow(title: String, value: String, onClick: (() -> Unit)?) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(title, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        Text(
+            value,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (onClick == null) MaterialTheme.colorScheme.onSurfaceVariant
+            else MaterialTheme.colorScheme.primary
+        )
+        if (onClick != null) {
+            Icon(
+                Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp)
+            )
+        }
+    }
+}
+
+/**
+ * 输入框右侧的上下文圆环：环长 = 占用比例，中间一位到两位百分比。
+ * 没有用量（空会话）时调用方不会渲染它。
+ */
+/** 行级增删统计：新建文件 = 全是新增；有旧内容时按「同样的行先抵消」算差集 */
+private fun diffStat(prev: String?, cur: String): Pair<Int, Int> {
+    val newLines = cur.lineSequence().toList()
+    if (prev == null) return newLines.size to 0
+    val pool = prev.lineSequence().groupingBy { it }.eachCount().toMutableMap()
+    var added = 0
+    for (line in newLines) {
+        val n = pool[line] ?: 0
+        if (n > 0) pool[line] = n - 1 else added++
+    }
+    return added to pool.values.sum()
+}
+
+/**
+ * 改动对比：行级 LCS 生成统一 diff（+ / - / 空格前缀）。
+ * 行数超过上限就退化——LCS 的 DP 是 O(n·m)，手机上几千行会卡住。
+ */
+private fun diffLines(prev: String, cur: String, limit: Int = 700): List<Pair<Char, String>> {
+    val a = prev.lineSequence().take(limit).toList()
+    val b = cur.lineSequence().take(limit).toList()
+    val dp = Array(a.size + 1) { IntArray(b.size + 1) }
+    for (i in a.indices.reversed()) {
+        for (j in b.indices.reversed()) {
+            dp[i][j] = if (a[i] == b[j]) dp[i + 1][j + 1] + 1
+            else maxOf(dp[i + 1][j], dp[i][j + 1])
+        }
+    }
+    val out = ArrayList<Pair<Char, String>>()
+    var i = 0
+    var j = 0
+    while (i < a.size && j < b.size) {
+        when {
+            a[i] == b[j] -> {
+                out += ' ' to a[i]; i++; j++
+            }
+
+            dp[i + 1][j] >= dp[i][j + 1] -> {
+                out += '-' to a[i]; i++
+            }
+
+            else -> {
+                out += '+' to b[j]; j++
+            }
+        }
+    }
+    while (i < a.size) { out += '-' to a[i]; i++ }
+    while (j < b.size) { out += '+' to b[j]; j++ }
+    return out
+}
+
+@Composable
+private fun DiffDialog(gf: ChatStore.GenFile, onDismiss: () -> Unit, onOpen: () -> Unit) {
+    val lines = remember(gf.path, gf.content, gf.prev) {
+        if (gf.prev == null) emptyList() else diffLines(gf.prev, gf.content)
+    }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    gf.path.substringAfterLast('/').ifBlank { gf.path },
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    gf.path,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                if (gf.prev == null) {
+                    Text(
+                        "这是新建的文件，共 ${gf.content.lineSequence().count()} 行。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else if (lines.isEmpty()) {
+                    Text("内容没有变化。", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    val box = rememberScrollState()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 380.dp)
+                            .verticalScroll(box)
+                    ) {
+                        lines.forEach { (sign, text) ->
+                            Text(
+                                "$sign $text",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = when (sign) {
+                                    '+' -> MaterialTheme.colorScheme.primary
+                                    '-' -> MaterialTheme.colorScheme.error
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                    TextButton(onClick = onOpen) { Text("打开文件") }
+                    TextButton(onClick = onDismiss) { Text("关闭") }
+                }
+            }
+        }
+    }
+}
+
+/** 本会话里最后一次产出的文件路径（产物卡片「定位」用） */
+@Composable
+private fun UsageRing(pct: Int, onClick: () -> Unit) {
+    val ring = when {
+        pct >= 85 -> MaterialTheme.colorScheme.error
+        pct >= 60 -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.primary
+    }
+    val track = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.15f)
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.size(30.dp)) {
+            val stroke = androidx.compose.ui.graphics.drawscope.Stroke(
+                width = 3.dp.toPx(),
+                cap = androidx.compose.ui.graphics.StrokeCap.Round
+            )
+            drawArc(
+                color = track,
+                startAngle = -90f,
+                sweepAngle = 360f,
+                useCenter = false,
+                style = stroke
+            )
+            drawArc(
+                color = ring,
+                startAngle = -90f,
+                sweepAngle = 360f * (pct.coerceIn(0, 100) / 100f),
+                useCenter = false,
+                style = stroke
+            )
+        }
+        Text(
+            "$pct",
+            style = MaterialTheme.typography.labelSmall,
+            fontSize = 9.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/** token 数：过万折成「1.5万」，跟 DSH 的读法一致 */
+internal fun compactTokens(n: Int): String =
+    if (n >= 10000) String.format(java.util.Locale.CHINA, "%.1f万", n / 10000.0) else n.toString()
+
+/**
+ * 点圆环打开的「用量」面板：上下文明细 + 本会话用量。
+ * 只做这两块——主项目没有余额/计费这回事。
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun UsageSheet(
+    usage: com.localllm.server.ui.ChatViewModel.Usage,
+    limit: Int,
+    onDismiss: () -> Unit,
+) {
+    androidx.compose.material3.ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp)
+        ) {
+            Text("用量", style = MaterialTheme.typography.titleLarge)
+            Spacer(modifier = Modifier.height(18.dp))
+
+            Text(
+                "上下文",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            val usedTotal = usage.prompt + usage.output
+            val pct = if (limit > 0) (usedTotal * 100L / limit).toInt().coerceIn(0, 100) else 0
+            UsageCard {
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(
+                        "$pct%",
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    Text(
+                        "${compactTokens(usedTotal)} / ${compactTokens(limit)}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                androidx.compose.material3.LinearProgressIndicator(
+                    progress = { pct / 100f },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp)),
+                    color = when {
+                        pct >= 85 -> MaterialTheme.colorScheme.error
+                        pct >= 60 -> MaterialTheme.colorScheme.tertiary
+                        else -> MaterialTheme.colorScheme.primary
+                    }
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    "系统 ${String.format(java.util.Locale.CHINA, "%,d", usage.systemTokens)} · " +
+                            "工具 ${String.format(java.util.Locale.CHINA, "%,d", usage.toolTokens)} · " +
+                            "消息 ${String.format(java.util.Locale.CHINA, "%,d", usage.messageTokens)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Spacer(modifier = Modifier.height(18.dp))
+            Text(
+                "本对话",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            UsageCard {
+                Row {
+                    UsageStat(compactTokens(usage.prompt), "输入", Modifier.weight(1f))
+                    UsageStat(compactTokens(usage.output), "输出", Modifier.weight(1f))
+                    UsageStat(
+                        if (usage.prompt > 0) "${usage.cacheHit * 100 / usage.prompt}%" else "—",
+                        "缓存命中",
+                        Modifier.weight(1f)
+                    )
+                }
+                Spacer(modifier = Modifier.height(14.dp))
+                Text(
+                    "共 ${usage.rounds} 轮 · 输入含缓存命中",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun UsageCard(content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        shape = RoundedCornerShape(18.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp), content = content)
+    }
+}
+
+@Composable
+private fun UsageStat(value: String, label: String, modifier: Modifier = Modifier) {
+    Column(modifier = modifier) {
+        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+// 一体时间线的一行（DSH 样式）：思考/中间正文/搜索/工具按原始顺序渲染，每行独立可折叠。// think：折叠显示预览，展开显示完整思考（限高滚动盒，长按可复制）；
 // text（中间正文）：默认展开显示迷你 markdown，可折叠；
 // tool/search：折叠显示参数/结果预览，展开成「命令|参数」+「输出」两块。
+/** 权限档位 → 面板上显示的名字 */
+private fun permissionLabel(level: String): String = when (level) {
+    "read" -> "仅可查看"
+    "full" -> "完全权限"
+    else -> "工作区内修改"
+}
+
 @Composable
-private fun StepRow(st: ChatStore.Step, thinkBody: String? = null, liveThink: Boolean = false) {
+private fun PermissionOption(
+    title: String,
+    desc: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Column(modifier = Modifier.padding(start = 4.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                desc,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/**
+ * 会话页专用的字形表：只在消息区生效，不动设置页和顶栏。
+ * 行高比字号大约 1.5 倍——手机上看长段落，行距不够会明显发闷。
+ */
+private fun chatTypography(base: androidx.compose.material3.Typography): androidx.compose.material3.Typography =
+    base.copy(
+        bodyLarge = base.bodyLarge.copy(fontSize = 17.sp, lineHeight = 26.sp),
+        bodyMedium = base.bodyMedium.copy(fontSize = 16.sp, lineHeight = 25.sp),
+        bodySmall = base.bodySmall.copy(fontSize = 14.sp, lineHeight = 21.sp),
+        labelLarge = base.labelLarge.copy(fontSize = 15.sp),
+        labelMedium = base.labelMedium.copy(fontSize = 13.sp),
+        labelSmall = base.labelSmall.copy(fontSize = 12.sp, lineHeight = 17.sp),
+        titleSmall = base.titleSmall.copy(fontSize = 15.sp),
+        titleMedium = base.titleMedium.copy(fontSize = 17.sp)
+    )
+
+/** 工具行怎么显示：图标、参数块的标签、动词。按 label 前缀判（时间线落盘的就是这些中文前缀）。 */
+private data class ToolStyle(
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val argTitle: String,
+)
+
+private fun toolStyle(label: String): ToolStyle = when {
+    label.startsWith("执行命令") || label.startsWith("运行 ") -> ToolStyle(Icons.Default.PlayArrow, "命令")
+    label.startsWith("写入") -> ToolStyle(Icons.Default.Edit, "路径")
+    label.startsWith("编辑") -> ToolStyle(Icons.Default.Edit, "路径")
+    label.startsWith("读取") -> ToolStyle(Icons.Default.Description, "路径")
+    label.startsWith("列出") -> ToolStyle(Icons.Default.List, "目录")
+    label.startsWith("搜索文件") -> ToolStyle(Icons.Default.Search, "模式")
+    label.startsWith("生成文档") -> ToolStyle(Icons.Default.InsertDriveFile, "文件")
+    label.startsWith("运行自检") -> ToolStyle(Icons.Default.Language, "页面")
+    label.startsWith("记住") -> ToolStyle(Icons.Default.Save, "内容")
+    label.startsWith("调用工具") || label.startsWith("自动修正") ->
+        ToolStyle(Icons.Default.Extension, "参数")
+    label.startsWith("已拒绝") -> ToolStyle(Icons.Default.Block, "内容")
+    label.startsWith("文件：") -> ToolStyle(Icons.Default.Edit, "参数")
+    else -> ToolStyle(Icons.Default.PlayArrow, "参数")
+}
+
+/** 从步骤参数里取被操作的文件路径（参数可能是截断的 JSON，path 总在最前面） */
+private fun pathOfStep(args: String?): String? = args?.let {
+    Regex("\"path\"\\s*:\\s*\"([^\"]+)\"").find(it)?.groupValues?.get(1)
+}
+
+@Composable
+internal fun StepRow(
+    st: ChatStore.Step,
+    thinkBody: String? = null,
+    liveThink: Boolean = false,
+    onOpenFile: ((String) -> Unit)? = null,
+) {
     // 用 type+label 当记忆键：流式更新 detail 时展开状态不重置
     var open by remember(st.type + st.label) { mutableStateOf(st.type == "text") }
     val thinkBodyText = if (st.type == "think") (thinkBody ?: st.detail) else null
@@ -1566,20 +2607,46 @@ private fun StepRow(st: ChatStore.Step, thinkBody: String? = null, liveThink: Bo
             liveThink ||
             !thinkBodyText.isNullOrBlank() ||
             toolArgs != null || toolDetail != null
-    Row(verticalAlignment = Alignment.Top) {
-        Icon(
-            imageVector = when (st.type) {
-                "think" -> Icons.Filled.Psychology
-                "search" -> Icons.Filled.Search
-                "text" -> Icons.Filled.TextFields
-                else -> Icons.Filled.PlayArrow
-            },
-            contentDescription = null,
-            modifier = Modifier.size(16.dp),
-            tint = if (st.ok) MaterialTheme.colorScheme.onSurfaceVariant
-            else MaterialTheme.colorScheme.error
-        )
-        Spacer(modifier = Modifier.width(6.dp))
+    // 每类步骤一个颜色：光靠灰色线条图标，整条时间线看起来像日志，认不出「哪几行是一次操作」
+    val stepTint = when {
+        !st.ok -> MaterialTheme.colorScheme.error
+        st.type == "think" -> MaterialTheme.colorScheme.tertiary
+        st.type == "search" -> MaterialTheme.colorScheme.primary
+        st.label.startsWith("写入") || st.label.startsWith("编辑") -> MaterialTheme.colorScheme.secondary
+        st.label.startsWith("读取") || st.label.startsWith("列出") -> MaterialTheme.colorScheme.primary
+        st.label.startsWith("运行") || st.label.startsWith("执行命令") -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Row(
+        verticalAlignment = Alignment.Top,
+        // 整行都能点：展开/折叠自由切换，不必对准右边那个小箭头。
+        // 行内的「打开文件」自己有 clickable，子节点优先，不会被这里拦掉。
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (hasBody) Modifier.clickable { open = !open } else Modifier)
+    ) {
+        // 正文是「说给用户的话」，不占图标位——让它比时间线更靠左，层级才分得开
+        if (st.type != "text") {
+            Box(
+                modifier = Modifier
+                    .size(22.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(stepTint.copy(alpha = 0.16f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = when (st.type) {
+                        "think" -> Icons.Filled.Psychology
+                        "search" -> Icons.Filled.Search
+                        else -> toolStyle(st.label).icon
+                    },
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = stepTint
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+        }
         Column(Modifier.weight(1f)) {
             when (st.type) {
                 "text" -> {
@@ -1718,7 +2785,7 @@ private fun StepRow(st: ChatStore.Step, thinkBody: String? = null, liveThink: Bo
                                                 .padding(horizontal = 8.dp, vertical = 4.dp)
                                         ) {
                                             Text(
-                                                if (st.label.startsWith("执行命令")) "命令" else "参数",
+                                                toolStyle(st.label).argTitle,
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                 modifier = Modifier.width(40.dp)
@@ -1758,18 +2825,29 @@ private fun StepRow(st: ChatStore.Step, thinkBody: String? = null, liveThink: Bo
                                             )
                                         }
                                     }
+                                    val stepPath = pathOfStep(toolArgs)
+                                    if (stepPath != null && st.ok && onOpenFile != null) {
+                                        Text(
+                                            "打开文件 ›",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier
+                                                .clickable { onOpenFile(stepPath) }
+                                                .padding(vertical = 2.dp)
+                                        )
+                                    }
                                 }
                             } else {
                                 val collapsed = when {
-                                    toolArgs != null -> "参数 " + toolArgs.take(36)
+                                    toolArgs != null ->
+                                        toolStyle(st.label).argTitle + " " + toolArgs.take(36)
                                     else -> toolDetail!!.take(36)
                                 }
                                 Text(
                                     collapsed + "…",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = if (!st.ok) MaterialTheme.colorScheme.error
-                                    else MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.clickable { open = true }
+                                    else MaterialTheme.colorScheme.primary
                                 )
                             }
                         }
@@ -1781,10 +2859,10 @@ private fun StepRow(st: ChatStore.Step, thinkBody: String? = null, liveThink: Bo
         if (hasBody) {
             Text(
                 if (open) "▾" else "▸",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 16.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                 modifier = Modifier
-                    .padding(start = 4.dp, top = 2.dp)
+                    .padding(start = 8.dp)
                     .clickable { open = !open }
             )
         }
@@ -1842,79 +2920,126 @@ private fun MessageBubble(
                     Column(Modifier.weight(1f)) {
                         // 生成的文件卡片（file_write 产生）：聊天内可见 + 预览
                         if (!isUser && msg.genFiles.isNotEmpty()) {
+                            val fileCtx = androidx.compose.ui.platform.LocalContext.current
+                            var diffTarget by remember(msg.genFiles.size) {
+                                mutableStateOf<ChatStore.GenFile?>(null)
+                            }
+                            val changed = msg.genFiles.count { it.prev != null }
+                            val created = msg.genFiles.size - changed
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(bottom = 6.dp)
                                     .background(
                                         MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                                        RoundedCornerShape(8.dp)
+                                        RoundedCornerShape(12.dp)
                                     )
-                                    .padding(8.dp)
+                                    .padding(12.dp)
                             ) {
                                 Text(
-                                    "📄 已生成文件（${msg.genFiles.size}）",
+                                    buildString {
+                                        if (changed > 0) append("改动了 $changed 个文件")
+                                        if (changed > 0 && created > 0) append("、")
+                                        if (created > 0) append("生成了 $created 个文件")
+                                    },
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
-                                val fileCtx = androidx.compose.ui.platform.LocalContext.current
+                                Spacer(modifier = Modifier.height(6.dp))
                                 msg.genFiles.forEach { gf ->
+                                    val stat = remember(gf.path, gf.content, gf.prev) {
+                                        diffStat(gf.prev, gf.content)
+                                    }
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clickable {
-                                                // 直接交给系统应用打开；没有能处理的应用才回落到内嵌预览
-                                                if (!com.localllm.server.core.FileOpener.open(fileCtx, gf.path)) {
-                                                    android.widget.Toast.makeText(
-                                                        fileCtx,
-                                                        "没有应用能打开 ${gf.path}，已切换到预览",
-                                                        android.widget.Toast.LENGTH_SHORT
-                                                    ).show()
+                                                if (!com.localllm.server.core.FileOpener
+                                                        .open(fileCtx, gf.path)
+                                                ) {
                                                     onOpenGenFile(gf)
                                                 }
                                             }
-                                            .padding(vertical = 3.dp)
+                                            .padding(vertical = 6.dp)
                                     ) {
+                                        Icon(
+                                            Icons.Default.Description,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp),
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
                                         Column(Modifier.weight(1f)) {
                                             Text(
-                                                gf.path,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.primary
+                                                gf.path.substringAfterLast('/').ifBlank { gf.path },
+                                                style = MaterialTheme.typography.bodyMedium
                                             )
                                             Text(
-                                                "${gf.content.length} 字符 · 点击用其他应用打开",
+                                                gf.path,
                                                 style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1
                                             )
                                         }
-                                        // 定位到所在文件夹：文件管理器接不住时把路径给出来，至少能手动找
-                                        Text(
-                                            "定位",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier
-                                                .clickable {
-                                                    if (!com.localllm.server.core.FileOpener
-                                                            .revealInFolder(fileCtx, gf.path)
-                                                    ) {
-                                                        android.widget.Toast.makeText(
-                                                            fileCtx,
-                                                            "文件管理器不支持打开文件夹，路径：${gf.path}",
-                                                            android.widget.Toast.LENGTH_LONG
-                                                        ).show()
-                                                    }
-                                                }
-                                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                                        )
-                                        Icon(
-                                            Icons.Default.ChevronRight,
-                                            contentDescription = "打开",
-                                            modifier = Modifier.size(16.dp),
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
+                                        if (stat.first > 0) {
+                                            Text(
+                                                "+${stat.first}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                        }
+                                        if (stat.second > 0) {
+                                            Text(
+                                                "-${stat.second}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.error
+                                            )
+                                        }
                                     }
                                 }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        "查看改动 ›",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier
+                                            .clickable {
+                                                diffTarget = msg.genFiles.lastOrNull { it.prev != null }
+                                                    ?: msg.genFiles.last()
+                                            }
+                                            .padding(vertical = 4.dp)
+                                    )
+                                    Spacer(modifier = Modifier.weight(1f))
+                                    Text(
+                                        "定位",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier
+                                            .clickable {
+                                                val lastPath = msg.genFiles.last().path
+                                                if (!com.localllm.server.core.FileOpener
+                                                        .revealInFolder(fileCtx, lastPath)
+                                                ) {
+                                                    android.widget.Toast.makeText(
+                                                        fileCtx,
+                                                        "文件管理器不支持打开文件夹，路径：$lastPath",
+                                                        android.widget.Toast.LENGTH_LONG
+                                                    ).show()
+                                                }
+                                            }
+                                            .padding(vertical = 4.dp)
+                                    )
+                                }
+                            }
+                            diffTarget?.let { gf ->
+                                DiffDialog(
+                                    gf = gf,
+                                    onDismiss = { diffTarget = null },
+                                    onOpen = { onOpenGenFile(gf) }
+                                )
                             }
                         }
                         // 任务清单卡片（todo_write 产生）
@@ -2008,7 +3133,8 @@ private fun MessageBubble(
                                         Spacer(modifier = Modifier.width(8.dp))
                                         Column(
                                             Modifier.weight(1f),
-                                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                                            // 行距 8dp：2dp 时整条时间线糊成一团，读不出「几步」
+                                            verticalArrangement = Arrangement.spacedBy(8.dp)
                                         ) {
                                             // 思考步在思考开始时就已占位（label 思考中），跟着时间线实时长
                                             msg.steps.forEach { st ->
@@ -2016,7 +3142,11 @@ private fun MessageBubble(
                                                     st = st,
                                                     thinkBody = if (st.type == "think" && thinkSteps == 1)
                                                         rawReasoning else null,
-                                                    liveThink = thinking && st.type == "think" && st.label == "思考中"
+                                                    liveThink = thinking && st.type == "think" && st.label == "思考中",
+                                                    onOpenFile = { path ->
+                                                        msg.genFiles.firstOrNull { it.path == path }
+                                                            ?.let(onOpenGenFile)
+                                                    }
                                                 )
                                             }
                                             // 老数据：只有 reasoning 没有 steps（思考未落盘的历史消息）
@@ -3039,4 +4169,33 @@ private fun ChainBuilderDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
+}
+
+/** 会话端点标签：跟随全局时把全局当前的端点写出来，免得看不出实际走哪 */
+private fun sessionEndpointLabel(s: ChatStore.Session): String {
+    val ep = s.endpoint
+    if (ep == null) {
+        val global = if (
+            com.localllm.server.core.AppSettings.chatCloudEnabled &&
+            com.localllm.server.core.AppSettings.chatCloudUrl.isNotBlank()
+        ) "云端" else "本地"
+        return "跟随全局（$global）"
+    }
+    return if (ep.local) "本地服务"
+    else ep.model.ifBlank { ep.baseUrl.ifBlank { "云端" } }
+}
+
+/** 端点选择弹窗里的一项 */
+@Composable
+private fun EndpointOption(selected: Boolean, title: String, onClick: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 6.dp)
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Text(title, style = MaterialTheme.typography.bodyMedium)
+    }
 }

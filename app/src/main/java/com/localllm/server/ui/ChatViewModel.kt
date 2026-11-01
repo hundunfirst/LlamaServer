@@ -23,6 +23,7 @@ import com.localllm.server.core.SkillChain
 import com.localllm.server.core.SkillChainFlow
 import com.localllm.server.core.ServerUiState
 import com.localllm.server.core.TodoTool
+import com.localllm.server.core.ToolGuard
 import com.localllm.server.core.ToolLoopPolicy
 import com.localllm.server.core.ToolResultBudget
 import com.localllm.server.core.UrlFetch
@@ -37,7 +38,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private var store = ChatStore.load(app)
@@ -119,10 +122,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val searchApproval: StateFlow<String?> = _searchApproval.asStateFlow()
     private var approvalDeferred: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
 
-    /** 本次发送用于 OCR 的原图（压缩图给小字识别不准）；发送后清空 */
-    @Volatile
-    private var ocrSourceB64: String? = null
-
     /** 链接抓取缓存：url → (抓取时间, 内容)，10 分钟内复用（避免重发时重复抓取） */
     private val linkCache = mutableMapOf<String, Pair<Long, String>>()
 
@@ -149,10 +148,123 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return result
     }
 
+    /** 待用户确认的危险操作（模型已发起、还没执行）；界面据此弹确认框 */
+    data class ToolAsk(
+        val title: String,
+        val subjectLabel: String,
+        val subject: String,
+        val reason: String,
+        val dangerous: Boolean,
+        val canAlways: Boolean,
+    )
+
+    private val _toolAsk = MutableStateFlow<ToolAsk?>(null)
+    val toolAsk: StateFlow<ToolAsk?> = _toolAsk.asStateFlow()
+    private var toolAskDeferred: kotlinx.coroutines.CompletableDeferred<Int>? = null
+    /** 三条会话可能同时要确认：串行排队，否则弹窗互相覆盖 */
+    private val approvalLock = kotlinx.coroutines.sync.Mutex()
+    /** 会话 id → 本会话已放行的键（bash / file_write / mcp:xxx）；危险命令不在其中 */
+    private val sessionAutoAllow = mutableMapOf<String, MutableSet<String>>()
+
+    /** 用户对确认框的回答：0=拒绝 1=允许一次 2=本会话总是允许 */
+    fun answerToolAsk(decision: Int) {
+        toolAskDeferred?.complete(decision)
+        toolAskDeferred = null
+        _toolAsk.value = null
+    }
+
+    /**
+     * 危险操作确认：返回 true 才真的执行。
+     * 超时（10 分钟没人理）按拒绝处理——宁可让模型停住，也不替用户做决定。
+     */
+    private suspend fun confirmTool(verdict: ToolGuard.Verdict?, sid: String): Boolean {
+        if (verdict == null) return true
+        if (!AppSettings.toolApprovalEnabled) return true
+        // 完全权限：会话里把权限开到 full 就是不问（计划模式除外——那时候工具本来也没给）
+        val sess = _sessions.value.find { it.id == sid }
+        if ((sess?.permission ?: AppSettings.defaultPermission) == "full" && sess?.planMode != true) {
+            return true
+        }
+        val allowed = sessionAutoAllow.getOrPut(sid) { mutableSetOf() }
+        if (verdict.autoKey != null && allowed.contains(verdict.autoKey)) return true
+        return approvalLock.withLock {
+            // 排队期间别的会话可能已经放行同类操作
+            if (verdict.autoKey != null && allowed.contains(verdict.autoKey)) return@withLock true
+            val d = kotlinx.coroutines.CompletableDeferred<Int>()
+            toolAskDeferred = d
+            _toolAsk.value = ToolAsk(
+                title = verdict.title,
+                subjectLabel = verdict.subjectLabel,
+                subject = verdict.subject,
+                reason = verdict.reason,
+                dangerous = verdict.risk == ToolGuard.Risk.DANGER,
+                canAlways = verdict.autoKey != null,
+            )
+            ServerProcessManager.appLog("等待确认：${verdict.title.removeSuffix("？")}")
+            val decision = kotlinx.coroutines.withTimeoutOrNull(600_000L) { d.await() }
+            toolAskDeferred = null
+            _toolAsk.value = null
+            when (decision) {
+                1 -> {
+                    ServerProcessManager.appLog("用户允许了一次")
+                    true
+                }
+
+                2 -> {
+                    ServerProcessManager.appLog("用户允许本会话同类操作：${verdict.autoKey}")
+                    verdict.autoKey?.let { allowed.add(it) }
+                    true
+                }
+
+                null -> {
+                    ServerProcessManager.appLog("确认超时（10 分钟），按拒绝处理")
+                    false
+                }
+
+                else -> {
+                    ServerProcessManager.appLog("用户拒绝了")
+                    false
+                }
+            }
+        }
+    }
+
     private val _lastStats = MutableStateFlow<String?>(null)
     val lastStats: StateFlow<String?> = _lastStats.asStateFlow()
 
+    /**
+     * 上一次请求的上下文占用（used, limit）；null = 还没有数据。
+     * 按会话分开存：输入框右边圆环读的是「当前会话」那一份。
+     */
+    private val _ctxBySession = MutableStateFlow<Map<String, Pair<Int, Int>>>(emptyMap())
+    val contextUsage: StateFlow<Pair<Int, Int>?> =
+        combine(_activeId, _ctxBySession) { id, m -> m[id] }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /**
+     * 上一次请求的用量明细（输入框右边圆环点开的那张卡）。
+     * 系统/工具/消息是按本轮实际下发的 prompt 估的，误差在几十分之一，用来看「谁在吃上下文」够了。
+     */
+    data class Usage(
+        val prompt: Int,
+        val output: Int,
+        val cacheHit: Int,
+        val rounds: Int,
+        val systemTokens: Int,
+        val toolTokens: Int,
+        val messageTokens: Int,
+    )
+
+    private val _usageBySession = MutableStateFlow<Map<String, Usage>>(emptyMap())
+    /** 当前会话的用量明细；切会话跟着切，后台会话跑完不会把屏幕上的数字换掉 */
+    val usage: StateFlow<Usage?> =
+        combine(_activeId, _usageBySession) { id, m -> m[id] }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
     private val _pendingImageB64 = MutableStateFlow<String?>(null)
+    /** 这次图片实际怎么处理的（原样直传 / 转码保分辨率 / 降到多大）：界面照着显示，别一律写「已压缩」 */
+    private val _pendingImageNote = MutableStateFlow<String?>(null)
+    val pendingImageNote: StateFlow<String?> = _pendingImageNote.asStateFlow()
     /** 原图 base64（仅用于 OCR，不传模型、不落盘） */
     private val _pendingImageFullB64 = MutableStateFlow<String?>(null)
 
@@ -160,9 +272,27 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val _pendingOcrText = MutableStateFlow<String?>(null)
     val pendingImageB64: StateFlow<String?> = _pendingImageB64.asStateFlow()
 
-    private var streamJob: Job? = null
-    // MCP 工具注入阈值：不超过 FULL 个就全给；超过就按关键词筛，最多注入 PICKED 个
-    private val MAX_TOOLS_FULL = 24
+    /**
+     * 每个会话一条生成任务：不同会话可以并行跑（云端 API / 本地服务 / 电脑上的模型各一条），
+     * 键是会话 id。同一条会话仍然一次只跑一个（重复发送没有意义）。
+     */
+    private val streamJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+
+    /** 同时最多几条会话在生成：再多设备扛不住，也没人看得过来 */
+    private val MAX_PARALLEL_GENERATIONS = 3
+    // MCP 工具注入阈值由设置控制（0 = 不限，全给）；超过阈值才按关键词筛
+    private val maxToolsFull: Int
+        get() = AppSettings.mcpToolFullLimit
+
+    /**
+     * 原图小于这个大小就直接原样送模型，不重编码。
+     * 之前所有图都重编码成 JPEG 85、长边压到 1024–2047：截图里的小字、小数点先糊，
+     * 模型读不出来（同一张图别的客户端不压就能认）。
+     */
+    private val IMAGE_PASSTHROUGH_BYTES = 1536 * 1024
+
+    /** 超大图才降采样，长边上限（原来的 1024–2047 太小） */
+    private val MAX_IMAGE_SIDE = 3072
 
     /**
      * 清单更新次数的**跑飞护栏**（不是步数上限）：十步的任务光打勾就要二十来次更新，
@@ -175,11 +305,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val PLAIN_ATTACH_MAX_BYTES = 32 * 1024 * 1024
 
     /**
-     * 错误提示的显示长度上限。引擎会把整段工具调用参数回显进 500 响应（实测到 30 KB+），
+     * 错误提示的显示长度上限（可在设置里调，0 = 不限）。
+     * 为什么要限：引擎会把整段工具调用参数回显进 500 响应（实测到 30 KB+），
      * 而这条文案是直接铺在聊天页上的 Text——超长文本会把 Compose 的文本测量拖死，
      * 整个界面点不动、连新会话都切不过去，只能杀进程恢复。完整内容仍然写进日志。
      */
-    private val MAX_ERROR_CHARS = 300
+    private val maxErrorChars: Int
+        get() = AppSettings.errorMaxChars
 
     /** 技能链步骤的失败标志：只看行首，避免「没有错误」这类否定句误判 */
     private val CHAIN_FAIL_MARKERS = listOf(
@@ -257,26 +389,61 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val resolver = getApplication<Application>().contentResolver
-                val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                resolver.openInputStream(uri)?.use {
-                    android.graphics.BitmapFactory.decodeStream(it, null, bounds)
+                val origBytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: throw IllegalStateException("图片读取失败")
+                // 压缩档位来自设置：默认不压缩——重编码是截图小字糊掉的主因。
+                // 但"不压缩"也有上限（6MB）：再大的图 base64 之后请求体会大到拖死 prefill。
+                val mode = AppSettings.imageCompressMode
+                val native = supportedImageMagic(origBytes)
+                // 不压缩档位的兜底上限：再往上 base64 之后请求体会把预填充拖死
+                val ORIGINAL_LIMIT = 50 * 1024 * 1024
+                val passthrough = when (mode) {
+                    "small" -> false
+                    "auto" -> native && origBytes.size <= IMAGE_PASSTHROUGH_BYTES
+                    else -> native && origBytes.size <= ORIGINAL_LIMIT
                 }
-                var sample = 1
-                val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
-                while (maxDim / (sample * 2) >= 1024) sample *= 2
-                val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
-                val bmp = resolver.openInputStream(uri)?.use {
-                    android.graphics.BitmapFactory.decodeStream(it, null, opts)
-                } ?: throw IllegalStateException("图片解码失败")
-                val baos = java.io.ByteArrayOutputStream()
-                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, baos)
-                bmp.recycle()
-                _pendingImageB64.value = android.util.Base64.encodeToString(baos.toByteArray(), android.util.Base64.NO_WRAP)
+                val b64: String = if (passthrough) {
+                    val mb = origBytes.size / 1024.0 / 1024.0
+                    _pendingImageNote.value = "原图直传 ${String.format(java.util.Locale.CHINA, "%.1f", mb)}MB（未压缩）"
+                    ServerProcessManager.appLog(
+                        "图片：${origBytes.size / 1024}KB 原样直传（未压缩，档位 $mode）"
+                    )
+                    android.util.Base64.encodeToString(origBytes, android.util.Base64.NO_WRAP)
+                } else if (mode == "original") {
+                    // 不压缩档走到这里只有两种原因：格式模型读不了（手机拍照常是 HEIC），
+                    // 或者文件超过 20MB。两种都**不降分辨率**：能换容器就换容器，
+                    // 实在太大才逐步缩边长——用户选的是「别偷偷压小」。
+                    encodeKeepingResolution(origBytes, ORIGINAL_LIMIT)
+                } else {
+                    // 自动 / 省上下文：按档位降采样
+                    val maxSide = if (mode == "small") 1600 else MAX_IMAGE_SIDE
+                    val quality = if (mode == "small") 85 else 95
+                    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    android.graphics.BitmapFactory.decodeByteArray(origBytes, 0, origBytes.size, bounds)
+                    var sample = 1
+                    val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
+                    while (maxDim / sample > maxSide) sample *= 2
+                    val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+                    val bmp = android.graphics.BitmapFactory.decodeByteArray(origBytes, 0, origBytes.size, opts)
+                        ?: throw IllegalStateException("图片解码失败")
+                    val baos = java.io.ByteArrayOutputStream()
+                    bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, baos)
+                    val outW = bmp.width
+                    val outH = bmp.height
+                    bmp.recycle()
+                    _pendingImageNote.value =
+                        "已压到 ${outW}×${outH}（${baos.size() / 1024}KB，质量 $quality）"
+                    ServerProcessManager.appLog(
+                        "图片：原图 ${origBytes.size / 1024}KB → 压缩 ${baos.size() / 1024}KB" +
+                                "（档位 $mode，长边 ≤ $maxSide，质量 $quality）"
+                    )
+                    android.util.Base64.encodeToString(baos.toByteArray(), android.util.Base64.NO_WRAP)
+                }
+                _pendingImageB64.value = b64
                 // OCR 用原图（压缩图会让小字/小数点糊掉，数字容易错）
                 runCatching {
-                    val fullBytes = resolver.openInputStream(uri)?.use { it.readBytes() }
-                    if (fullBytes != null && fullBytes.size <= 8 * 1024 * 1024) {
-                        val fullB64 = android.util.Base64.encodeToString(fullBytes, android.util.Base64.NO_WRAP)
+                    if (origBytes.size <= 8 * 1024 * 1024) {
+                        val fullB64 = android.util.Base64.encodeToString(origBytes, android.util.Base64.NO_WRAP)
                         _pendingImageFullB64.value = fullB64
                         // 附件时就跑一次本地 OCR：视觉模型读数字会错、读不清会编，
                         // 逐字原文跟图一起给模型核对（版面仍以图为准）。
@@ -300,6 +467,81 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _pendingImageB64.value = null
         _pendingImageFullB64.value = null
         _pendingOcrText.value = null
+    }
+
+    /** 只放行解码器一定认识的格式；认不出就走压缩分支，免得把奇怪字节原样喂给服务端 */
+    /**
+     * 不压缩档的转码：优先**保持原分辨率**，只在结果超过 [limit] 时才逐步缩边长。
+     * 用于两种情况——模型读不了的格式（手机拍照多是 HEIC）、以及超过上限的大图。
+     * 质量从 100 起，只在仍超标时降一档，绝不为了体积先偷偷缩小。
+     */
+    private fun encodeKeepingResolution(origBytes: ByteArray, limit: Int): String {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(origBytes, 0, origBytes.size, bounds)
+        val srcW = bounds.outWidth
+        val srcH = bounds.outHeight
+        if (srcW <= 0 || srcH <= 0) throw IllegalStateException("图片解码失败")
+
+        var maxSide = maxOf(srcW, srcH)
+        var quality = 100
+        var attempt = 0
+        while (true) {
+            attempt++
+            val opts = android.graphics.BitmapFactory.Options().apply {
+                inSampleSize = if (maxSide >= maxOf(srcW, srcH)) 1 else scaleSample(srcW, srcH, maxSide)
+            }
+            val bmp = android.graphics.BitmapFactory.decodeByteArray(origBytes, 0, origBytes.size, opts)
+                ?: throw IllegalStateException("图片解码失败")
+            val baos = java.io.ByteArrayOutputStream()
+            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, baos)
+            val outW = bmp.width
+            val outH = bmp.height
+            bmp.recycle()
+            val outBytes = baos.size()
+            if (outBytes <= limit || attempt >= 4) {
+                _pendingImageNote.value =
+                    (if (outW == srcW && outH == srcH) "转 JPEG 保持原分辨率 ${outW}×${outH}"
+                    else "转 JPEG ${outW}×${outH}（原 ${srcW}×${srcH}，超 ${limit / 1024 / 1024}MB 才缩）") +
+                            "，质量 $quality"
+                ServerProcessManager.appLog(
+                    "图片：${origBytes.size / 1024}KB → ${outBytes / 1024}KB（转 JPEG，" +
+                            if (outW == srcW && outH == srcH) "保持原分辨率 $outW×$outH"
+                            else "长边 $outW×$outH（原 $srcW×$srcH，超 ${limit / 1024}KB 才缩）" +
+                                    "，质量 $quality）"
+                )
+                return android.util.Base64.encodeToString(baos.toByteArray(), android.util.Base64.NO_WRAP)
+            }
+            // 还太大：先降质量，再缩边长
+            if (quality > 92) quality -= 4
+            else maxSide = (maxSide * 3) / 4
+        }
+    }
+
+    private fun scaleSample(w: Int, h: Int, maxSide: Int): Int {
+        var sample = 1
+        val dim = maxOf(w, h)
+        while (dim / sample > maxSide) sample *= 2
+        return sample
+    }
+
+    private fun supportedImageMagic(b: ByteArray): Boolean {
+        if (b.size < 12) return false
+        val jpeg = b[0] == 0xFF.toByte() && b[1] == 0xD8.toByte()
+        val png = b[0] == 0x89.toByte() && b[1] == 0x50.toByte() &&
+                b[2] == 0x4E.toByte() && b[3] == 0x47.toByte()
+        val gif = b[0] == 'G'.code.toByte() && b[1] == 'I'.code.toByte() && b[2] == 'F'.code.toByte()
+        val webp = b[0] == 'R'.code.toByte() && b[1] == 'I'.code.toByte() &&
+                b[2] == 'F'.code.toByte() && b[3] == 'F'.code.toByte()
+        return jpeg || png || gif || webp
+    }
+
+    /** data URL 的 mime：原样直传时要按真实格式标注（PNG 截图标成 JPEG 服务端解不开） */
+    private fun imageMimeOf(b64: String): String = when {
+        b64.startsWith("/9j/") -> "image/jpeg"
+        b64.startsWith("iVBOR") -> "image/png"
+        b64.startsWith("R0lGOD") -> "image/gif"
+        b64.startsWith("UklGR") -> "image/webp"
+        else -> "image/jpeg"
     }
 
     // ---- 文本类附件（文档/代码等）：读成文本随消息一起发送 ----
@@ -346,8 +588,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 } else {
                     // 纯文本只挡「读进内存会出事」的体量；至于太大装不进上下文，后面有按预算的截断
                     // （原来是 256KB 直接拒绝，比实际需要的严格得多，几十万字的日志/代码就发不进来）
-                    if (bytes.size > PLAIN_ATTACH_MAX_BYTES) {
-                        _error.value = "文本文件超过 ${PLAIN_ATTACH_MAX_BYTES / 1024 / 1024}MB，请分段发送"
+                    if (AppSettings.attachmentMaxMb > 0 &&
+                        bytes.size > AppSettings.attachmentMaxMb.toLong() * 1024 * 1024
+                    ) {
+                        _error.value = "文本文件超过 ${AppSettings.attachmentMaxMb}MB，" +
+                                "请分段发送（上限可在 设置 → 图片压缩 附近调大，或设为不限）"
                         return@launch
                     }
                     String(bytes, Charsets.UTF_8)
@@ -372,57 +617,87 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _input.value = ""
         _pendingImageB64.value = null
         _pendingFile.value = null
-        ocrSourceB64 = _pendingImageFullB64.value
+        val ocrSource = _pendingImageFullB64.value
         _pendingImageFullB64.value = null
         val ocrText = _pendingOcrText.value
         _pendingOcrText.value = null
         val content = if (file != null) {
-            // 附件按上下文预算截断：避免 prompt 超限或预填充过慢
-            val ctx = AppSettings.effectiveCtx(AppSettings.selectedModelPath)
-            val historyEst = _messages.value.sumOf { estimateTokens(it.content) }
-            val budgetTokens = (ctx * 0.45).toInt() - historyEst - 1024
-            val maxChars = maxOf(500, (budgetTokens * 1.6).toInt())
+            // 附件截断比例可配：0 = 不按比例截断，交给模型自己的上下文上限去报错
+            val pct = AppSettings.attachmentBudgetPct
             val raw = file.second
-            val kept = if (raw.length > maxChars) raw.take(maxChars) else raw
+            val kept = if (pct <= 0) raw else {
+                val ctx = AppSettings.effectiveCtx(AppSettings.selectedModelPath)
+                val historyEst = _messages.value.sumOf { estimateTokens(it.content) }
+                val budgetTokens = (ctx * (pct / 100.0)).toInt() - historyEst - 1024
+                val maxChars = maxOf(500, (budgetTokens * 1.6).toInt())
+                if (raw.length > maxChars) raw.take(maxChars) else raw
+            }
             val note = if (kept.length < raw.length)
-                "\n[附件过长已截断：原文 " + raw.length + " 字，本次仅发送前 " + kept.length + " 字]"
+                "\n[附件过长已截断：原文 " + raw.length + " 字，本次仅发送前 " + kept.length +
+                        " 字（可在设置里把「附件占上下文」调到不限）]"
             else ""
             ServerProcessManager.appLog(
                 "附件 " + file.first + "：" + raw.length + " 字，估算 ~" + estimateTokens(raw) +
-                        " tokens；预算 " + budgetTokens + "，实际发送 " + kept.length + " 字" +
+                        " tokens；占上下文上限 $pct%，实际发送 " + kept.length + " 字" +
                         if (note.isEmpty()) "" else "（已截断）"
             )
             "【附件：" + file.first + "】\n```\n" + kept + "\n```" + note + "\n\n" + text
         } else {
             text
         }
-        val fallback = when {
-            image != null -> "请描述这张图片"
-            file != null -> "请阅读附件内容"
-            else -> text
+        // 只上传图/文件、没打字时不再自动补「请描述这张图片」这类指令：
+        // 用户要的是把东西丢给模型，不是让模型按我们预设的句式回答。
+        // 内容保持空串，图片本身随消息发出；任务快照里用占位名只是为了界面上有标题。
+        val goalPlaceholder = when {
+            image != null -> "（图片）"
+            file != null -> "（附件）"
+            else -> ""
         }
-        append(ChatStore.Msg("user", content.ifBlank { fallback }, image, ocrText = ocrText))
+        append(ChatStore.Msg("user", content, image, ocrText = ocrText))
         append(
             ChatStore.Msg(
                 "assistant", "",
-                task = ChatStore.TaskState(goal = content.ifBlank { fallback }.take(300))
+                task = ChatStore.TaskState(goal = content.ifBlank { goalPlaceholder }.take(300))
             )
         )
-        doStream()
+        doStream(ocrSource)
     }
 
     /**
-     * 单请求模型：已经有会话在生成时，别处不让发新请求。
-     * 返回 true 表示被挡住（并在状态行说明是哪条会话在跑）。
+     * 并行限制：同一条会话一次只跑一个（重复发送没有意义）；
+     * 不同会话可以同时生成，总数不超过 MAX_PARALLEL_GENERATIONS。
      */
     private fun blockIfBusy(): Boolean {
-        val sid = _generating.value.firstOrNull() ?: return false
-        if (sid == _activeId.value) return true
-        val title = _sessions.value.find { it.id == sid }?.title ?: "另一条会话"
-        val hint = "「$title」正在生成，切过去可停止，或等它跑完"
-        _lastStats.value = hint
-        _toast.value = hint
-        return true
+        val sid = _activeId.value
+        if (sid in _generating.value) {
+            _lastStats.value = "本会话正在生成，稍等或先停止"
+            _toast.value = "本会话正在生成，稍等或先停止"
+            return true
+        }
+        if (_generating.value.size >= MAX_PARALLEL_GENERATIONS) {
+            val hint = "已有 ${_generating.value.size} 条会话在生成（上限 $MAX_PARALLEL_GENERATIONS），" +
+                    "等一条跑完再发"
+            _lastStats.value = hint
+            _toast.value = hint
+            return true
+        }
+        return false
+    }
+
+    /** 本会话实际使用的端点：会话级覆盖优先，否则跟随全局（云端开关 + 当前渠道） */
+    private fun endpointFor(sid: String): ChatStore.Endpoint {
+        _sessions.value.find { it.id == sid }?.endpoint?.let { return it }
+        val globalCloud = AppSettings.chatCloudEnabled && AppSettings.chatCloudUrl.isNotBlank()
+        return if (globalCloud) {
+            ChatStore.Endpoint(
+                local = false,
+                baseUrl = AppSettings.chatCloudUrl,
+                model = AppSettings.chatCloudModel.ifBlank { "default" },
+                apiKey = AppSettings.chatCloudKey
+            )
+        } else {
+            ChatStore.Endpoint(local = true)
+        }
     }
 
     fun resendAt(index: Int) {
@@ -445,7 +720,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         doStream()
     }
 
-    private fun doStream() {
+    private fun doStream(ocrSource: String? = null) {
         // 生成归属于发起它的会话：后续所有增量/收尾都按 sid 找会话，不再看当前在哪个会话
         val sid = _activeId.value
         // 已经发出新指令 = 放弃之前被中断的任务：收掉旧续跑入口，
@@ -461,8 +736,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 } else m
             }
         }
-        streamJob = viewModelScope.launch {
-            _generating.value = _generating.value + sid
+        streamJobs[sid] = viewModelScope.launch {
+            _generating.update { it + sid }
             _error.value = null
             _lastStats.value = null
             // 技能链走执行器：每步一次生成、失败可换方案。
@@ -474,8 +749,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 runSkillChain(sid, chain, goalText)
                 return@launch
             }
-            // 模型“答完又想再答”（单次生成内二次思考）时自动截断本轮
-            var autoStopped = false
             // 复读中断标记（正文里同一段反复出现；实测会把 file_write 的 JSON 撑爆）
             var repetitionAborted = false
             // 工具调用参数被写崩时的降级重试：catch 里拿不到 try 内的局部变量，这里先留出口。
@@ -493,9 +766,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // LaTeX 已有客户端转换器兜底，不再要求模型禁用。
                 val searchOn = AppSettings.webSearchEnabled
                 val todoOn = AppSettings.todoToolEnabled
-                val fileOn = AppSettings.fileToolsEnabled && AppSettings.workDirTreeUri.isNotBlank()
-                val sandboxOn = AppSettings.webSandboxEnabled
                 val memoryOn = AppSettings.memoryEnabled
+
+                // 本会话的执行权限与计划模式：权限决定「能给哪些工具」，计划模式只留读类工具。
+                // 默认值取自设置，会话可以单独覆盖（面板里切换就改这一条会话）。
+                val selfSession = _sessions.value.find { it.id == sid }
+                val permission = selfSession?.permission ?: AppSettings.defaultPermission
+                val planMode = selfSession?.planMode == true
+                val readOnly = permission == "read" || planMode
+                val fullAccess = permission == "full" && !planMode
+                // 授权过工作目录就注入文件工具；读类（列/读/搜）在只读与计划模式下都要留着——
+                // 制定计划前总得能看现状，砍光了模型只能瞎猜。
+                val fileToolsOn = AppSettings.fileToolsEnabled && AppSettings.workDirTreeUri.isNotBlank()
+                // 写类（写入/编辑/生成文档）和跑命令只在非只读时给
+                val fileOn = !readOnly && fileToolsOn
+                val sandboxOn = !readOnly && AppSettings.webSandboxEnabled
                 // 隐私护栏：本轮用户消息含图片（可能是身份证/证件等敏感件）→ 不注入任何联网搜索工具，
                 // 并把模型幻觉出的 web_search 调用靠白名单挡掉（OCR 文字不会流向搜索引擎）。
                 val turnHasImage = _messages.value.dropLast(1).lastOrNull()?.imageB64 != null
@@ -594,6 +879,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     "不要输出思考过程，直接用中文回答；要产出成品时照常调用工具。"
                 }) + if (searchAvailable) {
                     "今天是${today}。涉及最新信息时，先用 web_search 工具联网查询再回答，不要臆造日期。"
+                } else "" + if (planMode) {
+                    // 计划模式的要点是「别给成品」。上一版只说「先给计划」，实测模型会理解成
+                    // 「把 HTML 完整写出来给你看」，等于绕过了计划。
+                    "【计划模式，必须遵守】这一轮只输出计划，不要产出成品：\n" +
+                            "1. 不要输出 HTML / CSS / JS / Python 等代码，不要贴任何文件的完整内容；\n" +
+                            "2. 只写分步计划：每步做什么、要动哪个文件（路径）、需要用户确认的取舍；\n" +
+                            "3. 需要先了解现状时，可以用读取类工具（列目录 / 读文件 / 搜索）；\n" +
+                            "4. 最后用一句话问用户是否按这个计划执行。\n" +
+                            "用户确认后会退出计划模式，那时才真正创建文件。"
+                } else if (permission == "read") {
+                    "【仅可查看】这一轮只能读取信息，不要写文件、不要执行会改变系统状态的命令。"
                 } else ""
                 // 用户最后一条消息里若含链接 → 抓取内容（GitHub 走 README 特判）
                 // 注意：内容必须并入首条 system 文案——部分模板（Qwen）要求 system 只能在开头
@@ -676,7 +972,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     parts.put(
                                         org.json.JSONObject().put("type", "image_url").put(
                                             "image_url",
-                                            org.json.JSONObject().put("url", "data:image/jpeg;base64,${m.imageB64}")
+                                            org.json.JSONObject().put(
+                                                "url",
+                                                "data:" + imageMimeOf(m.imageB64) + ";base64," + m.imageB64
+                                            )
                                         )
                                     )
                                     ChatClient.ChatMessage(m.role, parts)
@@ -714,7 +1013,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 }
                             }
                         }
-                val cloud = AppSettings.chatCloudEnabled && AppSettings.chatCloudUrl.isNotBlank()
+                // 端点按会话取：会话级覆盖优先，否则跟随全局
+                val ep = endpointFor(sid)
+                val cloud = !ep.local
                 // 代码/工具类任务用低温采样：量化模型在语法层抽风的概率明显下降。
                 // 关键词判据是启发式的，误判影响很小（只是温度低一点），不必做成开关。
                 val codeWordPattern = Regex(
@@ -726,9 +1027,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
                 // HTTP MCP 多服务器：聚合已启用服务器的工具（mcp__服务器__工具 前缀防冲突），并记录路由
                 val mcpRoute = mutableMapOf<String, Pair<String, String>>() // 完整名 → (url, 原始工具名)
-                // 本消息内每个 MCP 工具「同一组参数」连续失败的次数：够了就拦住，
-                // 不让模型拿着同样的调用反复烧 token。换了参数就重新计数——那是在按建议往前走。
-                val mcpFailures = mutableMapOf<String, Pair<String, Int>>()
                 val mcpAgg = org.json.JSONArray()
                 AppSettings.loadMcpServers().filter { it.enabled && !AppSettings.pureMode }.forEach { s ->
                     val prefix = "mcp__" + s.name.map { c -> if (c.isLetterOrDigit()) c else '_' }
@@ -766,7 +1064,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val mcpAll = AppSettings.mcpToolMode == "all"
                 val mcpSel = if (mcpAll) {
                     (0 until mcpAgg.length()).mapNotNull { mcpAgg.optJSONObject(it) }
-                } else if (mcpAgg.length() > MAX_TOOLS_FULL) {
+                } else if (maxToolsFull > 0 && mcpAgg.length() > maxToolsFull) {
                     // 两阶段：先让模型只从「名字+一句话描述」的清单里挑工具，
                     // 再把这些工具的完整 schema 注入主请求。清单约 1/8 体积，
                     // 换掉动辄 9K token 的全量注入。挑不出东西时退回关键词筛。
@@ -776,8 +1074,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val toolsJson = org.json.JSONArray().also { arr ->
                     if (searchAvailable) arr.put(WebSearch.toolJson())
                     if (todoOn) arr.put(TodoTool.toolJson())
-                    if (fileOn) FileTools.toolsJson().let { fa ->
-                        for (i in 0 until fa.length()) arr.put(fa.getJSONObject(i))
+                    if (fileToolsOn) FileTools.toolsJson().let { fa ->
+                        for (i in 0 until fa.length()) {
+                            val fn = fa.getJSONObject(i).optJSONObject("function")
+                            val name = fn?.optString("name") ?: ""
+                            // 只读/计划模式下不给写类工具：模型看不到就不会去试
+                            if (readOnly && (name == FileTools.TOOL_WRITE || name == FileTools.TOOL_PATCH)) {
+                                continue
+                            }
+                            arr.put(fa.getJSONObject(i))
+                        }
                     }
                     // 内置 Linux 环境（PRoot + Ubuntu）：跑测试/git/node 的入口，跟着文件工具一起给
                     if (fileOn) arr.put(BashTool.toolJson())
@@ -805,7 +1111,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 ServerProcessManager.appLog(
                     "聊天：发送（" +
-                            (if (cloud) "云端 ${AppSettings.chatCloudModel.ifBlank { "default" }}" else "本地") +
+                            (if (cloud) "云端 ${ep.model.ifBlank { "default" }}" else "本地") +
                             " · 历史 ${payloadMsgs.size - 1} 条" +
                             (toolsJson?.let { " · 工具 ${it.length()} 个" } ?: "") +
                             (if (searchAvailable) " · 搜索开" else "") +
@@ -822,8 +1128,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 var searchCount = 0
                 var todoCalls = 0
                 var sandboxCalls = 0
-                // 上一次自检的报错指纹：两次一模一样 = 没有进展（代替「最多 6 次」的计数上限）
-                var lastSandboxErrors: String? = null
                 val searchCap = AppSettings.searchMaxCalls.let { if (it <= 0) Int.MAX_VALUE else it }
                 var loggedNoSearch = false
                 // 执行步骤时间线（思考/搜索/工具），落到消息上供 UI 展示
@@ -869,11 +1173,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // OCR 工具的数据源与次数限制：优先用本轮原图（分辨率更高），否则回落到历史里最近一张；
                 // 一轮最多识别两次，否则模型可能在工具循环里反复识别同一张图。
                 val ocrImageB64: String? =
-                    ocrSourceB64 ?: history.lastOrNull { it.imageB64 != null }?.imageB64
+                    ocrSource ?: history.lastOrNull { it.imageB64 != null }?.imageB64
                 var ocrCalls = 0
                 var truncFix = 0
-                // 「只宣告下一步、不调工具」的催办次数（详见 ToolLoopPolicy.stalledWithoutActing）
-                var stallNudges = 0
+                // 「只宣告下一步、不调工具」不再催办：模型写到哪就停在哪，由用户决定是否继续
                 val searchSources = mutableListOf<WebSearch.Result>()
                 var timingNote: String? = null
 
@@ -886,17 +1189,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 var answeredNaturally = false
                 for (round in 0 until roundCap) {
                     ensureActive() // 停止/切换后不再进入下一轮
-                    // 提前强制：已搜过但走到第4轮仍无正文 → 立即移除搜索工具，逼模型作答
-                    val forceNoTools = searchAvailable && round >= 3 &&
-                            _messages.value.lastOrNull()?.content.isNullOrEmpty() == true &&
-                            // 中间正文已落成 text 步也算有产出（正文区此时是空的）
-                            steps.none { it.type == "text" }
-                    if ((forceNoTools || (searchAvailable && searchCount >= searchCap)) && !loggedNoSearch) {
+                    // 只按用户设的配额收口；「连续多轮没正文就逼模型作答」那条围栏已去掉：
+                    // 多步任务本来就常常连跑几轮工具不带正文，它会把正常的流程掐断。
+                    val searchExhausted = searchAvailable && searchCount >= searchCap
+                    if (searchExhausted && !loggedNoSearch) {
                         loggedNoSearch = true
-                        ServerProcessManager.appLog(
-                            if (forceNoTools) "连续多轮未产出正文，本轮移除搜索工具（强制模型作答）"
-                            else "搜索配额已用尽，本轮起移除搜索工具（强制模型产出回答）"
-                        )
+                        ServerProcessManager.appLog("搜索配额已用尽，本轮起移除搜索工具（强制模型产出回答）")
                     }
                     if (round > 0) {
                         ServerProcessManager.appLog("工具回传完成，第 ${round + 1} 轮继续生成…")
@@ -937,10 +1235,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     ChatClient.chatStream(
                         port = AppSettings.port,
                         messages = apiMsgs,
-                        apiToken = if (cloud) AppSettings.chatCloudKey.ifBlank { null }
+                        apiToken = if (cloud) ep.apiKey.ifBlank { null }
                                    else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
-                        baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
-                        model = if (cloud) AppSettings.chatCloudModel.ifBlank { "default" } else "local",
+                        baseUrl = if (cloud) ep.baseUrl else null,
+                        model = if (cloud) ep.model.ifBlank { "default" } else "local",
+                        // chat 请求按会话标识登记，停止时只断这一条（多会话并行）
+                        callKey = sid,
                         // 本地走 jinja 模板真开关；云端模板自管不干预。
                         // 只下发模型模板认的参数（检测见 GgufInspector.deepInfo）
                         thinking = thinkSwitch(cloud),
@@ -948,8 +1248,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         // 本地生成上限：退化复读时不至于跑到撑满上下文
                         maxTokens = if (cloud) null else AppSettings.effectiveOut(AppSettings.selectedModelPath),
                         codeTask = codeTask,
-                        // 搜索配额用尽 / 多轮无正文 → 不再提供搜索工具（防止弱模型空转到轮数上限、永远不回答）
-                        tools = if (forceNoTools || (searchAvailable && searchCount >= searchCap)) toolsNoSearch else toolsJson,
+                        // 搜索配额用尽 → 不再提供搜索工具（防止弱模型空转到轮数上限、永远不回答）
+                        tools = if (searchExhausted) toolsNoSearch else toolsJson,
                         onToolCalls = { toolCalls = it },
                         onFinish = { finishReason = it },
                         onTiming = { ttfb, firstToken ->
@@ -990,7 +1290,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                         ServerProcessManager.appLog(
                                             "检测到输出复读，已中断本轮（已生成 $roundChars 字）"
                                         )
-                                        ChatClient.abort()
+                                        ChatClient.abort(sid)
                                     }
                                 }
                             }
@@ -998,17 +1298,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         onReasoning = { r ->
                             when {
                                 !AppSettings.thinkEnabled || !isGenerating(sid) -> Unit
-                                // 正文已开始却再次思考 = 模型要“换条路再答一遍”（实测同一次生成内
-                                // 想→答→再想→再答）。罗马只走一次：截断本轮，保住已生成的回答。
-                                contentStarted -> {
-                                    if (!autoStopped) {
-                                        autoStopped = true
-                                        ServerProcessManager.appLog(
-                                            "检测到正文后模型再次思考，已自动截断本轮（防止重复作答）"
-                                        )
-                                        ChatClient.abort()
-                                    }
-                                }
+                                // 正文开始后模型再思考也照单全收（不再截断本轮）：思考行跟着时间线继续长
                                 else -> {
                                     if (thinkStartedAt == 0L) {
                                         thinkStartedAt = System.currentTimeMillis()
@@ -1035,6 +1325,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             // 上下文占用 = 本次输入 + 刚生成的回复（下一轮会话的实际起点）
                             serverStats = "共 $tokens token$tpsPart" +
                                     ctxNote(prompt + tokens)
+                            val ctxLimit = AppSettings.effectiveCtx(AppSettings.selectedModelPath)
+                            if (ctxLimit > 0) {
+                                // 按会话存：三条会话并行时，后台那条跑完不该改掉屏幕上这条的数字
+                                _ctxBySession.update { it + (sid to ((prompt + tokens) to ctxLimit)) }
+                            }
+                            // 用量明细：系统提示词与工具 schema 是本轮真正下发的那两份，
+                            // 剩下的差额全算消息——比按历史重算接近真实 prefill。
+                            val sysTok = estimateTokens(systemMerged)
+                            val toolTok = estimateTokens(
+                                (if (searchExhausted) toolsNoSearch else toolsJson).toString()
+                            )
+                            _usageBySession.update {
+                                it + (sid to Usage(
+                                    prompt = prompt,
+                                    output = tokens,
+                                    cacheHit = ChatClient.lastCacheHitFor(sid),
+                                    rounds = round + 1,
+                                    systemTokens = sysTok,
+                                    toolTokens = toolTok,
+                                    messageTokens = (prompt + tokens - sysTok - toolTok).coerceAtLeast(0),
+                                ))
+                            }
                             // 超过 85% 就标记，让这一轮结束后自动压缩——再往后很容易在
                             // 下一轮中途撞顶（表现为莫名其妙的截断或答非所问）
                             val ctx = AppSettings.effectiveCtx(AppSettings.selectedModelPath)
@@ -1055,8 +1367,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     // file_read，被判成幻觉丢掉，那正是当时唯一该做的动作，整轮就停在那句上。
                     // 判断「模型是不是已经答完了」这件事不该由启发式猜：调用了就执行，
                     // 真跑错由工具结果自己说话（错误会回传给模型）。
-                    val unfinishedTodos = _messages.value.lastOrNull()?.todos
-                        ?.any { it.status != "completed" } == true
                     val validCalls = run {
                         val ok = toolCalls.filter { it.name in injectedNames }
                         val ignored = toolCalls.map { it.name }.toSet() - ok.map { it.name }.toSet()
@@ -1086,52 +1396,40 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             syncSteps()
                             continue
                         }
-                        // 只写了一句「现在执行删除操作：」就停——这不是答复，是下一步的宣告。
-                        // 以前这里直接当答复收尾（真机现场：正文 108 字、零工具调用，任务原地不动），
-                        // 现在催它真调工具，同一轮最多催 2 次。
-                        val stalled = isGenerating(sid) && ToolLoopPolicy.stalledWithoutActing(
-                            unfinishedTodos = unfinishedTodos,
-                            answerText = roundText.toString(),
-                            hasToolCalls = toolCalls.isNotEmpty(),
-                            nudged = stallNudges
-                        )
-                        if (stalled) {
-                            stallNudges++
-                            apiMsgs = apiMsgs +
-                                    ChatClient.ChatMessage("assistant", roundText.toString().trim()) +
-                                    ChatClient.ChatMessage(
-                                        "user",
-                                        "上一条只写了下一步要做什么，还没有真正调用工具。" +
-                                                "现在直接调用需要的那一个工具把这一步做掉，" +
-                                                "不要再重复计划，也不要重新开头。"
-                                    )
-                            ServerProcessManager.appLog(
-                                "模型只宣告下一步、未调用任何工具，催办第 $stallNudges 次：" +
-                                        roundText.toString().trim().takeLast(40)
-                            )
-                            steps.add(
-                                ChatStore.Step("tool", "模型停在计划上，催它动手（第 $stallNudges 次）")
-                            )
-                            syncSteps()
-                            continue
-                        }
-                        // 最终回复：合并统计（含本次问答总耗时，从发送算起）
+                        // 最终回复：先把可能还在流式的思考行收尾（正文开始后模型也可能再思考）
+                        settleThink()
                         val usedSec = (System.currentTimeMillis() - sendStartedAt) / 1000.0
                         val timing = timingNote?.let { "$it · " } ?: ""
                         val secPart = " · 用时 ${String.format("%.1f", usedSec)}s"
-                        if (serverStats != null) {
-                            _lastStats.value = timing + serverStats + secPart
+                        // 缓存命中：本地引擎每次请求都会报「复用了多少 prompt token」，
+                        // 多轮对话里这个数越高说明前缀复用越好（不用反复预填充）
+                        val cachePart = ChatClient.lastCacheHit.let {
+                            if (it > 0) " · 缓存命中 $it" else ""
+                        }
+                        val finalStats = if (serverStats != null) {
+                            timing + serverStats + cachePart + secPart
                         } else if (deltaCount > 0 && firstDeltaMs > 0) {
                             val genSecs = (System.currentTimeMillis() - firstDeltaMs) / 1000.0
                             if (genSecs > 0.05) {
                                 val tps = deltaCount / genSecs
-                                _lastStats.value = timing +
-                                        "共 $deltaCount token · ${String.format("%.1f", tps)} tok/s" + secPart
+                                timing + "共 $deltaCount token · ${String.format("%.1f", tps)} tok/s" + secPart
                             } else {
-                                _lastStats.value = timing + "共 $deltaCount token" + secPart
+                                timing + "共 $deltaCount token" + secPart
                             }
                         } else {
-                            _lastStats.value = (timing + "用时 ${String.format("%.1f", usedSec)}s").trim('·', ' ')
+                            (timing + "用时 ${String.format("%.1f", usedSec)}s").trim('·', ' ')
+                        }
+                        // 统计行只写给当前会话：后台会话跑完别把屏幕上的数字换掉
+                        if (_activeId.value == sid) _lastStats.value = finalStats
+                        // 这一轮的耗时与 token 落到消息上：会话详情页的轨迹/上下文 tab 靠它
+                        val turnMs = System.currentTimeMillis() - sendStartedAt
+                        val turnUsage = _usageBySession.value[sid]
+                        appendToLastInline(sid) { m ->
+                            m.copy(
+                                elapsedMs = turnMs,
+                                promptTokens = turnUsage?.prompt ?: deltaCount,
+                                outputTokens = turnUsage?.output ?: deltaCount
+                            )
                         }
                         // 搜索来源 → 消息 sources 字段（UI 渲染为可点击列表，不再塞进正文文本）
                         if (searchSources.isNotEmpty()) {
@@ -1208,7 +1506,35 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     )
                         validCalls.forEach { tc ->
-                        val result = runCatching {
+                        // 危险动作先要用户点头：命令、写/改文件、带写语义的 MCP 工具都在这里拦下。
+                        // 读类动作不打扰——否则每轮都要点好几次「允许」，人就会闭眼乱点。
+                        val verdict = when {
+                            fileOn && tc.name == BashTool.NAME -> ToolGuard.assessBash(
+                                org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                    .optString("command")
+                            )
+
+                            fileOn && tc.name in FileTools.NAMES -> ToolGuard.assessFile(
+                                tc.name, org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                            )
+
+                            mcpRoute.containsKey(tc.name) -> ToolGuard.assessMcp(
+                                tc.name, org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                            )
+
+                            else -> null
+                        }
+                        val result = if (verdict != null && !confirmTool(verdict, sid)) {
+                            ServerProcessManager.appLog("用户拒绝执行工具：${tc.name}")
+                            steps.add(
+                                ChatStore.Step(
+                                    "tool", "已拒绝：${tc.name}", verdict.subject.take(200), ok = false
+                                )
+                            )
+                            syncSteps()
+                            "用户拒绝了这次操作，它没有执行。不要重复同样的调用：" +
+                                    "换个做法，或先把打算做什么告诉用户。"
+                        } else runCatching {
                             if (tc.name == TodoTool.NAME) {
                                 todoCalls++
                                 if (todoCalls > TODO_UPDATE_GUARD) {
@@ -1293,8 +1619,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     "Linux 命令完成：${if (failed) "失败" else "成功"}（${r.length} 字符回传）"
                                 )
                                 r
-                            } else if (fileOn && tc.name in FileTools.NAMES) {
+                            } else if (fileToolsOn && tc.name in FileTools.NAMES) {
                                 val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                // 只读/计划模式兜底：写类工具没注入，但历史里可能残留调用
+                                if (readOnly &&
+                                    (tc.name == FileTools.TOOL_WRITE || tc.name == FileTools.TOOL_PATCH)
+                                ) {
+                                    "当前是只读/计划模式，不能写文件。请把计划或完整内容直接说给用户，" +
+                                            "等用户确认后再执行。"
+                                } else {
                                 ServerProcessManager.appLog("文件工具：${tc.name}")
                                 val r = FileTools.execute(
                                     getApplication(),
@@ -1326,7 +1659,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                             if (list.isNotEmpty()) {
                                                 val last = list.last()
                                                 val merged = (last.genFiles.filter { it.path != p0 } +
-                                                        ChatStore.GenFile(p0, body)).takeLast(5)
+                                                        ChatStore.GenFile(
+                                                            p0, body,
+                                                            last.genFiles.firstOrNull { it.path == p0 }?.content
+                                                        )).takeLast(5)
                                                 list[list.lastIndex] = last.copy(genFiles = merged)
                                                 _messages.value = list
                                             }
@@ -1341,15 +1677,33 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                         if (list.isNotEmpty()) {
                                             val last = list.last()
                                             val merged = (last.genFiles.filter { it.path != p0 } +
-                                                    ChatStore.GenFile(p0, body)).takeLast(5)
+                                                    ChatStore.GenFile(
+                                                        p0, body,
+                                                        last.genFiles.firstOrNull { it.path == p0 }?.content
+                                                    )).takeLast(5)
                                             list[list.lastIndex] = last.copy(genFiles = merged)
                                             _messages.value = list
                                         }
                                     }
                                 }
+                                // 时间线标题按动作走：「写入 番茄钟.html」比「文件：file_write」好读，
+                                // 也让每一行能按种类配图标（见 ChatScreen.toolStyle）
+                                val fileVerb = when (tc.name) {
+                                    FileTools.TOOL_WRITE -> "写入"
+                                    FileTools.TOOL_PATCH -> "编辑"
+                                    FileTools.TOOL_READ -> "读取"
+                                    FileTools.TOOL_LIST -> "列出"
+                                    else -> "搜索文件"
+                                }
+                                val fileTarget = if (tc.name == FileTools.TOOL_GREP) {
+                                    args.optString("pattern")
+                                } else {
+                                    args.optString("path").substringAfterLast('/')
+                                        .ifBlank { args.optString("path") }
+                                }
                                 steps.add(
                                     ChatStore.Step(
-                                        "tool", "文件：${tc.name}", detail.take(800),
+                                        "tool", "$fileVerb $fileTarget", detail.take(800),
                                         args = args.toString().take(600),
                                         ok = !r.trimStart().startsWith("错误")
                                     )
@@ -1357,6 +1711,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 syncSteps()
                                 ServerProcessManager.appLog("文件工具完成：$detail")
                                 r
+                                }
                             } else if (sandboxOn && tc.name == WebRunTool.NAME) {
                                 sandboxCalls++
                                 val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
@@ -1369,14 +1724,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 )
                                 syncSteps()
                                 val r = WebRunTool.execute(getApplication(), args)
-                                // 不再用「最多跑 6 次」这类计数上限：改错一次再跑一次本来就是工作方式，
-                                // 计数只会把还在推进的任务掐掉。真正的死循环判据是「没有任何进展」——
-                                // 两次报的错一模一样，说明上一轮修改没起作用，该收尾而不是再跑。
-                                val sig = r.lineSequence()
-                                    .filter { it.trimStart().startsWith("✗") }
-                                    .joinToString("|").take(400)
-                                val noProgress = ToolLoopPolicy.noProgress(sig, lastSandboxErrors)
-                                lastSandboxErrors = sig.ifEmpty { null }
+                                // 自检跑多少次都行：模型自己决定什么时候停（不再用「两次同样报错 = 无进展」判据）
                                 // 只记真正的错误：自检干净通过时报告第一行是「页面存活，无报错」，
                                 // 把它当错误存下来会让续跑误以为上次没过
                                 appendToLastInline(sid) { m ->
@@ -1393,15 +1741,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     )
                                 }
                                 ServerProcessManager.appLog(
-                                    "沙箱自检完成：" +
-                                            (r.lineSequence().firstOrNull() ?: "") +
-                                            if (noProgress) "（与上次报错相同，判定无进展）" else ""
+                                    "沙箱自检完成：" + (r.lineSequence().firstOrNull() ?: "")
                                 )
-                                if (noProgress) {
-                                    r + "\n\n【提醒】这次报的错和上一次完全相同，说明刚才的修改没起作用。" +
-                                            "请不要再重复运行自检：直接给出当前最终版本的文件，" +
-                                            "并在正文里说明还有哪些检查项没通过。"
-                                } else r
+                                r
                             } else if (tc.name == "web_search") {
                                 val query = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                                     .optString("query")
@@ -1461,16 +1803,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                                 val route = mcpRoute[tc.name]
                                     ?: throw IllegalStateException("未路由的工具：${tc.name}")
-                                val argSig = args.toString()
-                                val prevFail = mcpFailures[tc.name]
-                                val failedBefore = if (prevFail != null && prevFail.first == argSig) prevFail.second else 0
-                                if (failedBefore >= 2) {
-                                    ServerProcessManager.appLog(
-                                        "MCP：${tc.name} 用同一组参数已失败 $failedBefore 次，不再调用"
-                                    )
-                                    "工具「${route.second}」用这组参数已经失败 $failedBefore 次，同样的调用不要再发；" +
-                                            "要么按上面的原因改参数，要么改用其他工具，或者直接回答。"
-                                } else {
+                                // 同一组参数失败多少次都照常调用：错误会回传给模型，由它决定改参数还是换路
+                                run {
                                     ServerProcessManager.appLog("MCP 调用：${tc.name}")
                                     var firstTry =
                                         runCatching { McpHttpClient.callTool(route.first, null, route.second, args) }
@@ -1501,7 +1835,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     }
                                     firstTry.fold(
                                             onSuccess = { r ->
-                                                mcpFailures.remove(tc.name)
                                                 McpArgRepair.rememberedWorkspaceId(r)?.let {
                                                     mcpWorkspaceIds[route.first] = it
                                                 }
@@ -1520,7 +1853,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                             onFailure = { e ->
                                                 if (e is kotlinx.coroutines.CancellationException) throw e
                                                 // 失败也要落成可见的一步，否则界面上一片正常、实际什么都没发生
-                                                mcpFailures[tc.name] = argSig to (failedBefore + 1)
                                                 // 同批工具名传进去：缺工作区/会话这类错要能点名「先调哪个」
                                                 val msg = McpHttpClient.explain(
                                                     route.second, e, mcpRoute.values.map { it.second }
@@ -1549,7 +1881,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         // 回传前按窗口预算压一次：一次读取吐回 9 万字曾把上下文从 15.5k 顶到 108.6k，
                         // 下一轮直接 201837 token 超窗 400，整轮白跑。宽松裁剪，正常大小完全不受影响。
                         val budget = ToolResultBudget.budgetChars(
-                            AppSettings.effectiveCtx(AppSettings.selectedModelPath)
+                            AppSettings.effectiveCtx(AppSettings.selectedModelPath),
+                            AppSettings.toolResultBudgetPct
                         )
                         val fitted = ToolResultBudget.trim(result, budget)
                         if (fitted.truncated) {
@@ -1563,67 +1896,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     apiMsgs = newMsgs
                 }
 
-                // 兜底：无正文，或只列了清单就报"已完成"（产出过短）→ 强制无工具直接产出
-                val lastContentNow = messagesOf(sid).lastOrNull()?.content.orEmpty()
-                // 但如果这一轮真的动过手（写文件 / 局部修改 / 跑过自检），没正文是正常的——
-                // 代码任务本来就把产出放在工具调用里，强行插一轮"别调工具直接答"会打断正在进行的修复
-                val productive = usedTools.any {
-                    it == WebRunTool.NAME || it == FileTools.TOOL_WRITE || it == FileTools.TOOL_PATCH
-                }
-                // 中间正文落成 text 步后，正文区为空不代表没产出——时间线里已有消息行
-                val hasProseSteps = steps.any { it.type == "text" }
-                val needsRealOutput = !productive && !hasProseSteps && (
-                        lastContentNow.isBlank() ||
-                                (lastContentNow.length < 120 && todoCalls > 0)
-                        )
-                if (isGenerating(sid) && !autoStopped && needsRealOutput) {
-                    ServerProcessManager.appLog(
-                        if (lastContentNow.isBlank()) "无正文输出，改用无工具模式强制回答…"
-                        else "疑似只报进度未产出内容（${lastContentNow.length} 字），强制直接产出…"
-                    )
-                    var forcedStats: String? = null
-                    runCatching {
-                        ChatClient.chatStream(
-                            port = AppSettings.port,
-                            messages = apiMsgs + listOf(
-                                ChatClient.ChatMessage(
-                                    "user",
-                                    if (todoCalls > 0)
-                                        "请直接输出用户要的实际内容（完整代码/文件内容），不要只描述进度，也不要再调用工具。"
-                                    else
-                                        "请直接用中文简要回答上面的问题，不要再调用任何工具。"
-                                )
-                            ),
-                            apiToken = if (cloud) AppSettings.chatCloudKey.ifBlank { null }
-                                       else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
-                            baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
-                            model = if (cloud) AppSettings.chatCloudModel.ifBlank { "default" } else "local",
-                            thinking = thinkSwitch(cloud),
-                            effort = thinkEffort(cloud),
-                            maxTokens = if (cloud) null else AppSettings.effectiveOut(AppSettings.selectedModelPath),
-                            tools = null,
-                            onDelta = { d ->
-                                if (isGenerating(sid)) {
-                                    appendToLastInline(sid) { it.copy(content = it.content + d) }
-                                }
-                            },
-                            onReasoning = { r ->
-                                if (AppSettings.thinkEnabled && isGenerating(sid)) {
-                                    appendToLastInline(sid) {
-                                        it.copy(reasoning = (it.reasoning ?: "") + r)
-                                    }
-                                }
-                            },
-                            onFinal = { tokens, tps, prompt ->
-                                val tpsPart = if (tps > 0) " · ${String.format("%.1f", tps)} tok/s" else ""
-                                forcedStats = "共 $tokens token$tpsPart" + ctxNote(prompt + tokens) +
-                                        " · 用时 ${String.format("%.1f", (System.currentTimeMillis() - sendStartedAt) / 1000.0)}s"
-                            }
-                        )
-                    }.onFailure { ServerProcessManager.appLog("强制回答失败：${it.message}") }
-                    forcedStats?.let { _lastStats.value = it }
-                    ServerProcessManager.appLog("聊天：完成 · ${_lastStats.value ?: "（无统计）"}")
-                }
+                // 不再「无正文就强行再发一次无工具请求」：模型不写正文就是不写，
+                // 由用户决定追问或继续（2026-10-30 用户决定）。
 
                 if (usedTools.isNotEmpty()) {
                     val base = _lastStats.value ?: ""
@@ -1645,10 +1919,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                if (autoStopped) {
-                    // 主动截断导致的断连：不是错误，给出截断统计
-                    _lastStats.value = "共 $abortDeltas token · 已截断重复思考"
-                } else if (repetitionAborted) {
+                if (repetitionAborted) {
                     // 复读中断：模型在长字符串里打转，与其等它把预算烧完（实测十几分钟）
                     // 不如立刻停，让用户点「继续」换分段写法
                     _lastStats.value = "输出陷入复读，已中断（$abortDeltas token）"
@@ -1680,6 +1951,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             } finally {
+                // 被停止/出错时可能还停在「思考中」：就地收尾，别让时间线留一行永远转圈
+                appendToLastInline(sid) { m ->
+                    if (m.steps.none { it.type == "think" && it.label == "思考中" }) m
+                    else m.copy(
+                        steps = m.steps.map {
+                            if (it.type == "think" && it.label == "思考中") {
+                                it.copy(label = "思考（已中断）")
+                            } else it
+                        }
+                    )
+                }
                 val msgs = messagesOf(sid)
                 val last = msgs.lastOrNull()
                 // 只有「彻底空」才删。之前只判正文为空，导致点停止时
@@ -1699,7 +1981,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 heartbeat?.cancel()
                 persistSession(sid)
-                _generating.value = _generating.value - sid
+                _generating.update { it - sid }
+                streamJobs.remove(sid)
                 setProgress(sid, null)
                 // 上一轮把上下文吃得太满 → 自动压一次。放在 generating 清掉之后，
                 // 否则 compressContext 会自检「正在生成中」直接返回。
@@ -1722,24 +2005,30 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 停止：先关门（回调失效）→ 立即断连（思考流也停）→ 取消协程 → 落盘已生成部分 */
-    fun stop() {
-        val sid = _generating.value.firstOrNull() ?: _activeId.value
-        ServerProcessManager.appLog("用户手动停止生成")
+    /** 停掉指定会话的生成（不动别的会话） */
+    private fun stopSession(sid: String) {
         // 立刻复位按钮状态，不等协程真正感知取消（阻塞读可能要等到下一行 SSE）
-        _generating.value = _generating.value - sid
+        _generating.update { it - sid }
         setProgress(sid, null)
-        ChatClient.abort()
-        streamJob?.cancel()
-        streamJob = null
+        // 被取消的协程不会走 confirmTool 的收尾：确认框留在这儿会挡住下一次操作
+        _toolAsk.value = null
+        toolAskDeferred = null
+        ChatClient.abort(sid)
+        streamJobs.remove(sid)?.cancel()
         // 标记为「被打断」：界面于是显示「继续这个任务」，且状态已落盘，重开 App 也能续
-        sid?.let { s ->
-            appendToLastInline(s) { m ->
-                if (m.role == "assistant" && m.task != null) m.copy(task = m.task.copy(stopped = true))
-                else m
-            }
+        appendToLastInline(sid) { m ->
+            if (m.role == "assistant" && m.task != null) m.copy(task = m.task.copy(stopped = true))
+            else m
         }
         persistSession(sid)
+    }
+
+    /** 停止当前会话：先关门（回调失效）→ 立即断连（思考流也停）→ 取消协程 → 落盘已生成部分。
+     *  只停当前会话，别的会话照常并行跑。 */
+    fun stop() {
+        val sid = _activeId.value
+        ServerProcessManager.appLog("用户手动停止生成（会话 $sid）")
+        stopSession(sid)
     }
 
     /**
@@ -1809,7 +2098,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 新建会话并切换（保留当前会话内容） */
     fun newChat() {
-        if (blockIfBusy()) return
         persist()
         val id = System.nanoTime().toString()
         val s = ChatStore.Session(id, "新会话", System.currentTimeMillis(), emptyList())
@@ -1817,6 +2105,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _activeId.value = id
         _messages.value = emptyList()
         _lastStats.value = null
+        clearPendingAttachments()
         saveStore()
     }
 
@@ -1830,11 +2119,48 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _activeId.value = id
         _messages.value = _sessions.value.find { it.id == id }?.messages ?: emptyList()
         _lastStats.value = null
+        // 附件属于「这条会话正要发的那条消息」：切会话必须清掉，
+        // 否则上一条会话选的图会跟着进到新会话里（看起来就像记忆串了）
+        clearPendingAttachments()
+        saveStore()
+    }
+
+    /** 清掉待发送的图片/文件附件（切会话、新建会话时用） */
+    private fun clearPendingAttachments() {
+        _pendingImageB64.value = null
+        _pendingImageFullB64.value = null
+        _pendingOcrText.value = null
+        _pendingFile.value = null
+        _pendingImageNote.value = null
+    }
+
+    /** 把会话放进某个文件夹（工作区）；null = 未分组 */
+    fun setSessionFolder(sid: String, folder: String?) {
+        val name = folder?.trim()?.takeIf { it.isNotEmpty() }
+        _sessions.value = _sessions.value.map {
+            if (it.id == sid) it.copy(folder = name) else it
+        }
+        saveStore()
+    }
+
+    /** 本会话的执行权限：read / workspace / full；null = 跟随全局默认 */
+    fun setSessionPermission(sid: String, level: String?) {
+        _sessions.value = _sessions.value.map {
+            if (it.id == sid) it.copy(permission = level) else it
+        }
+        saveStore()
+    }
+
+    /** 计划模式：只读 + 先给计划，等用户点头再执行 */
+    fun setSessionPlanMode(sid: String, on: Boolean) {
+        _sessions.value = _sessions.value.map {
+            if (it.id == sid) it.copy(planMode = on) else it
+        }
         saveStore()
     }
 
     fun deleteSession(id: String) {
-        if (isGenerating(id)) stop()
+        if (isGenerating(id)) stopSession(id)
         val remaining = _sessions.value.filterNot { it.id == id }.ifEmpty {
             listOf(ChatStore.Session("1", "新会话", System.currentTimeMillis(), emptyList()))
         }
@@ -1844,6 +2170,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             _messages.value = remaining.first().messages
         }
         saveStore()
+    }
+
+    /**
+     * 给会话绑定端点：null = 跟随全局。多会话并行时各绑各的（本地 / 某个云端渠道 / 电脑上的模型）。
+     * 只影响之后的发送，正在跑的这一轮不受影响。
+     */
+    fun setSessionEndpoint(sid: String, endpoint: ChatStore.Endpoint?) {
+        _sessions.value = _sessions.value.map {
+            if (it.id == sid) it.copy(endpoint = endpoint) else it
+        }
+        saveStore()
+        ServerProcessManager.appLog(
+            "会话端点：" + (endpoint?.let {
+                if (it.local) "本地服务" else "${it.baseUrl}（${it.model.ifBlank { "default" }}）"
+            } ?: "跟随全局")
+        )
     }
 
     /** 粗略 token 估算：汉字约 1 token，其它字符约 1/4 token */
@@ -1896,7 +2238,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (!isDefaultTitle) return
         val buf = StringBuilder()
         runCatching {
-            val cloud = AppSettings.chatCloudEnabled && AppSettings.chatCloudUrl.isNotBlank()
+            val ep = endpointFor(id)
+            val cloud = !ep.local
             ChatClient.chatStream(
                 port = AppSettings.port,
                 messages = listOf(
@@ -1909,16 +2252,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         "用户：" + userText.take(300) + "\n助手：" + assistantText.take(300)
                     )
                 ),
-                apiToken = if (cloud) AppSettings.chatCloudKey.ifBlank { null }
+                apiToken = if (cloud) ep.apiKey.ifBlank { null }
                            else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
-                baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
-                model = if (cloud) AppSettings.chatCloudModel.ifBlank { "default" } else "local",
+                baseUrl = if (cloud) ep.baseUrl else null,
+                model = if (cloud) ep.model.ifBlank { "default" } else "local",
                 thinking = if (cloud) null else false,
                 maxTokens = 60,
                 tools = null,
                 onDelta = { d -> buf.append(d) },
                 onReasoning = {},
-                onFinal = { _, _, _ -> }
+                onFinal = { _, _, _ -> },
+                callKey = "title:$id"
             )
         }.onFailure { ServerProcessManager.appLog("自动标题失败：${it.message}") }
         val title = buf.toString().trim().trim('"', '“', '”', '。', ' ')
@@ -1971,7 +2315,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         arr: org.json.JSONArray, text: String
     ): List<org.json.JSONObject> {
         val all = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
-        if (all.size <= MAX_TOOLS_FULL) return all
+        if (maxToolsFull <= 0 || all.size <= maxToolsFull) return all
         val keys = Regex("[A-Za-z_]{3,}|[\\u4e00-\\u9fa5]{2,}")
             .findAll(text.lowercase())
             .map { it.value }
@@ -2163,11 +2507,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         saveStore(sessions, activeId)
     }
 
+    /** 多会话并行时会有多条生成同时收尾/落盘：串行化整份存档写入，避免两份内容互相覆盖踩坏 JSON */
+    private val storeWriteLock = Any()
+
     private fun saveStore(
         sessions: List<ChatStore.Session> = _sessions.value,
         activeId: String = _activeId.value
     ) {
-        ChatStore.save(getApplication(), ChatStore.Store(activeId, sessions))
+        synchronized(storeWriteLock) {
+            ChatStore.save(getApplication(), ChatStore.Store(activeId, sessions))
+        }
     }
 
 
@@ -2188,13 +2537,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val sid = _activeId.value
-        streamJob = viewModelScope.launch {
-            _generating.value = _generating.value + sid
+        streamJobs[sid] = viewModelScope.launch {
+            _generating.update { it + sid }
             _error.value = null
             _lastStats.value = "正在压缩上下文…"
             ServerProcessManager.appLog("上下文压缩：将前 ${old.size} 条消息总结为摘要…")
             try {
-                val cloud = AppSettings.chatCloudEnabled && AppSettings.chatCloudUrl.isNotBlank()
+                val ep = endpointFor(sid)
+                val cloud = !ep.local
                 val sb = StringBuilder()
                 old.forEach { m ->
                     val who = when (m.role) {
@@ -2215,16 +2565,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         ),
                         ChatClient.ChatMessage("user", sb.toString())
                     ),
-                    apiToken = if (cloud) AppSettings.chatCloudKey.ifBlank { null }
+                    apiToken = if (cloud) ep.apiKey.ifBlank { null }
                                else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
-                    baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
-                    model = if (cloud) AppSettings.chatCloudModel.ifBlank { "default" } else "local",
+                    baseUrl = if (cloud) ep.baseUrl else null,
+                    model = if (cloud) ep.model.ifBlank { "default" } else "local",
                     thinking = if (cloud) null else false,
                     maxTokens = if (cloud) null else 1024,
                     tools = null,
                     onDelta = { d -> if (isGenerating(sid)) summary.append(d) },
                     onReasoning = {},
-                    onFinal = { _, _, _ -> }
+                    onFinal = { _, _, _ -> },
+                    callKey = sid
                 )
                 val text = summary.toString().trim()
                 if (text.isBlank()) {
@@ -2247,7 +2598,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 _error.value = "压缩失败：${e.message}"
                 ServerProcessManager.appLog("上下文压缩失败：${e.message}")
             } finally {
-                _generating.value = _generating.value - sid
+                _generating.update { it - sid }
                 setProgress(sid, null)
             }
         }
@@ -2262,7 +2613,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         systemText: String,
         history: List<ChatStore.Msg>
     ): Boolean {
-        val cloud = AppSettings.chatCloudEnabled && AppSettings.chatCloudUrl.isNotBlank()
+        val ep = endpointFor(sid)
+        val cloud = !ep.local
         val msgs = listOf(
             ChatClient.ChatMessage(
                 "system",
@@ -2275,16 +2627,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             ChatClient.chatStream(
                 port = AppSettings.port,
                 messages = msgs,
-                apiToken = if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
+                apiToken = if (cloud) ep.apiKey.ifBlank { null }
+                           else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
                 onDelta = { d ->
                     if (d.isNotEmpty()) {
                         wrote = true
                         appendToLastInline(sid) { it.copy(content = (it.content ?: "") + d) }
                     }
                 },
-                baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
-                model = if (cloud) AppSettings.chatCloudModel.ifBlank { "local" } else "local",
-                tools = null
+                baseUrl = if (cloud) ep.baseUrl else null,
+                model = if (cloud) ep.model.ifBlank { "local" } else "local",
+                tools = null,
+                callKey = sid
             )
         }
         return ok.isSuccess && wrote
@@ -2307,7 +2661,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val fallback = chain.fallbackSkillId?.let { skills[it] }
         if (stepSkills.all { it == null }) {
             _error.value = "这条技能链里的技能都被删掉了，请重新配置"
-            _generating.value = _generating.value - sid
+            _generating.update { it - sid }
             return
         }
         val sys = AppSettings.activeSysPrompt().ifBlank { "你是一个严谨的中文助手，回答用中文。" }
@@ -2331,11 +2685,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 ServerProcessManager.appLog("技能链 第 ${index + 1} 步：${sk.name}")
                 val prompt = sk.prompt + "\n\n【输入】\n" + input
-                var text = runChainStep(sys, prompt)
+                var text = runChainStep(sid, sys, prompt)
                 var failed = looksLikeFailure(text)
                 if (failed && fallback != null) {
                     ServerProcessManager.appLog("第 ${index + 1} 步判定失败，改用备用技能：${fallback.name}")
                     val alt = runChainStep(
+                        sid,
                         sys,
                         fallback.prompt + "\n\n【上一次尝试没能完成本步，请换一种可行做法重做】\n【输入】\n" + input
                     )
@@ -2383,26 +2738,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             ServerProcessManager.appLog("技能链失败：${e.message}")
             _error.value = friendlyError(e)
         } finally {
-            _generating.value = _generating.value - sid
+            _generating.update { it - sid }
             setProgress(sid, null)
             persistSession(sid)
         }
     }
 
     /** 跑一步：一次不带动工具的生成，返回完整文本 */
-    private suspend fun runChainStep(system: String, prompt: String): String {
+    private suspend fun runChainStep(sid: String, system: String, prompt: String): String {
         val sb = StringBuilder()
-        val cloud = AppSettings.chatCloudEnabled && AppSettings.chatCloudUrl.isNotBlank()
+        val ep = endpointFor(sid)
+        val cloud = !ep.local
         ChatClient.chatStream(
             port = AppSettings.port,
             messages = listOf(
                 ChatClient.ChatMessage("system", system),
                 ChatClient.ChatMessage("user", prompt)
             ),
-            apiToken = if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
+            apiToken = if (cloud) ep.apiKey.ifBlank { null }
+                       else if (AppSettings.apiTokenEnabled) AppSettings.apiToken else null,
             onDelta = { d -> sb.append(d) },
-            baseUrl = if (cloud) AppSettings.chatCloudUrl else null,
-            model = if (cloud) AppSettings.chatCloudModel.ifBlank { "local" } else "local"
+            baseUrl = if (cloud) ep.baseUrl else null,
+            model = if (cloud) ep.model.ifBlank { "local" } else "local",
+            callKey = sid
         )
         return sb.toString()
     }
@@ -2454,9 +2812,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     "。多数情况是某次工具调用一次读回了太大的内容——让它分小段读（指定行数/范围），" +
                     "或点输入框上方的「压缩上下文」把历史压一压再重试。"
         }
-        // 兜底分支可能是几十 KB 的原始响应体，必须截断（原因见 MAX_ERROR_CHARS）
+        // 兜底分支可能是几十 KB 的原始响应体，必须截断（原因见 maxErrorChars）
         else -> (e.message ?: "请求失败").let {
-            if (it.length <= MAX_ERROR_CHARS) it else it.take(MAX_ERROR_CHARS) + "…（完整内容见日志）"
+            if (maxErrorChars <= 0 || it.length <= maxErrorChars) it
+            else it.take(maxErrorChars) + "…（完整内容见日志）"
         }
     }
 
