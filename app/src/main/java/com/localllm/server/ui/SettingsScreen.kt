@@ -80,7 +80,7 @@ fun SettingsScreen(
             SectionHeader(
                 title = "服务设置",
                 help = "修改后需重启服务生效。",
-                titleStyle = MaterialTheme.typography.headlineSmall
+                titleStyle = MaterialTheme.typography.bodyLarge
             )
 
             Row(
@@ -385,180 +385,6 @@ fun SettingsScreen(
                 )
             }
 
-            // ---- 定时任务 ----
-            var schedTasks by remember {
-                mutableStateOf(com.localllm.server.core.ScheduledTasks.load(fileCtx))
-            }
-            var schedEditing by remember {
-                mutableStateOf<com.localllm.server.core.ScheduledTasks.Task?>(null)
-            }
-            var schedAdding by remember { mutableStateOf(false) }
-            SectionHeader(
-                title = "定时任务",
-                help = "到点把一条指令排进任务队列，并发一条通知；点通知打开 App 就开始执行。\n\n" +
-                        "为什么不是完全无人值守：后台拉起本地引擎、以及与界面共用同一份会话存储这两件事" +
-                        "还没做，硬说\"全自动\"只会让你以为跑了而其实没跑。\n\n" +
-                        "另：定时任务会真的耗电——锁屏时大模型跑一轮，手机是明显发热的。",
-                titleStyle = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(top = 12.dp)
-            )
-            if (schedTasks.isEmpty()) {
-                Text(
-                    "还没有定时任务",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            schedTasks.forEach { task ->
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(task.name, style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            task.describe() + " · " + task.prompt.take(24),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    androidx.compose.material3.Switch(
-                        checked = task.enabled,
-                        onCheckedChange = { on ->
-                            val next = schedTasks.map {
-                                if (it.id == task.id) it.copy(enabled = on) else it
-                            }
-                            schedTasks = next
-                            com.localllm.server.core.ScheduledTasks.save(fileCtx, next)
-                            if (on) com.localllm.server.core.ScheduledTasks.scheduleNext(fileCtx, task.copy(enabled = true))
-                            else com.localllm.server.core.ScheduledTasks.cancel(fileCtx, task)
-                        }
-                    )
-                    Text(
-                        "删除",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier
-                            .clickable {
-                                val next = schedTasks.filterNot { it.id == task.id }
-                                schedTasks = next
-                                com.localllm.server.core.ScheduledTasks.save(fileCtx, next)
-                                com.localllm.server.core.ScheduledTasks.cancel(fileCtx, task)
-                            }
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
-                    )
-                }
-            }
-            OutlinedButton(
-                onClick = { schedAdding = true },
-                modifier = Modifier.padding(top = 4.dp)
-            ) { Text("添加定时任务") }
-            if (schedAdding || schedEditing != null) {
-                val editing = schedEditing
-                var name by remember(schedAdding, editing?.id) {
-                    mutableStateOf(editing?.name ?: "")
-                }
-                var prompt by remember(schedAdding, editing?.id) {
-                    mutableStateOf(editing?.prompt ?: "")
-                }
-                var mode by remember(schedAdding, editing?.id) {
-                    mutableStateOf(if ((editing?.everyMinutes ?: 0) > 0) "interval" else "daily")
-                }
-                var minutes by remember(schedAdding, editing?.id) {
-                    mutableStateOf((editing?.everyMinutes ?: 60).toString())
-                }
-                var hourText by remember(schedAdding, editing?.id) {
-                    mutableStateOf((editing?.dailyHour ?: 8).toString())
-                }
-                var minuteText by remember(schedAdding, editing?.id) {
-                    mutableStateOf((editing?.dailyMinute ?: 0).toString())
-                }
-                AlertDialog(
-                    onDismissRequest = { schedAdding = false; schedEditing = null },
-                    title = { Text(if (editing == null) "添加定时任务" else "编辑定时任务") },
-                    text = {
-                        Column(Modifier.verticalScroll(rememberScrollState())) {
-                            CompactField(
-                                value = name,
-                                onValueChange = { name = it },
-                                label = "名称",
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            CompactField(
-                                value = prompt,
-                                onValueChange = { prompt = it },
-                                label = "到点要执行的指令",
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            QuickChips(
-                                options = listOf("daily" to "每天定时", "interval" to "每隔一段时间"),
-                                current = mode
-                            ) { mode = it }
-                            if (mode == "daily") {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    CompactField(
-                                        value = hourText,
-                                        onValueChange = { hourText = it.filter(Char::isDigit) },
-                                        label = "时（0-23）",
-                                        number = true,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    CompactField(
-                                        value = minuteText,
-                                        onValueChange = { minuteText = it.filter(Char::isDigit) },
-                                        label = "分（0-59）",
-                                        number = true,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                }
-                            } else {
-                                CompactField(
-                                    value = minutes,
-                                    onValueChange = { minutes = it.filter(Char::isDigit) },
-                                    label = "每多少分钟",
-                                    number = true,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            val nm = name.trim().ifBlank { "定时任务" }
-                            val pr = prompt.trim()
-                            if (pr.isNotEmpty()) {
-                                val task = com.localllm.server.core.ScheduledTasks.Task(
-                                    id = editing?.id ?: ("sched-" + System.currentTimeMillis()),
-                                    name = nm,
-                                    prompt = pr,
-                                    everyMinutes = if (mode == "interval")
-                                        (minutes.toIntOrNull() ?: 60).coerceIn(5, 1440) else 0,
-                                    dailyHour = (hourText.toIntOrNull() ?: 8).coerceIn(0, 23),
-                                    dailyMinute = (minuteText.toIntOrNull() ?: 0).coerceIn(0, 59),
-                                    enabled = true
-                                )
-                                val next = schedTasks.filterNot { it.id == task.id } + task
-                                schedTasks = next
-                                com.localllm.server.core.ScheduledTasks.save(fileCtx, next)
-                                com.localllm.server.core.ScheduledTasks.scheduleNext(fileCtx, task)
-                                android.widget.Toast.makeText(
-                                    fileCtx, "已添加：${task.describe()}",
-                                    android.widget.Toast.LENGTH_SHORT
-                                ).show()
-                            }
-                            schedAdding = false
-                            schedEditing = null
-                        }) { Text("保存") }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { schedAdding = false; schedEditing = null }) { Text("取消") }
-                    }
-                )
-            }
-
             // ---- 危险操作确认 ----
             var approvalOn by remember {
                 mutableStateOf(com.localllm.server.core.AppSettings.toolApprovalEnabled)
@@ -806,6 +632,181 @@ fun SettingsScreen(
                 open = settingGroup == "g5"
             ) { settingGroup = if (settingGroup == "g5") null else "g5" }
             if (settingGroup == "g5") {
+            // ---- 定时任务 ----
+            val schedCtx = androidx.compose.ui.platform.LocalContext.current
+            var schedTasks by remember {
+                mutableStateOf(com.localllm.server.core.ScheduledTasks.load(schedCtx))
+            }
+            var schedEditing by remember {
+                mutableStateOf<com.localllm.server.core.ScheduledTasks.Task?>(null)
+            }
+            var schedAdding by remember { mutableStateOf(false) }
+            SectionHeader(
+                title = "定时任务",
+                help = "到点把一条指令排进任务队列，并发一条通知；点通知打开 App 就开始执行。\n\n" +
+                        "为什么不是完全无人值守：后台拉起本地引擎、以及与界面共用同一份会话存储这两件事" +
+                        "还没做，硬说\"全自动\"只会让你以为跑了而其实没跑。\n\n" +
+                        "另：定时任务会真的耗电——锁屏时大模型跑一轮，手机是明显发热的。",
+                titleStyle = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.padding(top = 12.dp)
+            )
+            if (schedTasks.isEmpty()) {
+                Text(
+                    "还没有定时任务",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            schedTasks.forEach { task ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(task.name, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            task.describe() + " · " + task.prompt.take(24),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = task.enabled,
+                        onCheckedChange = { on ->
+                            val next = schedTasks.map {
+                                if (it.id == task.id) it.copy(enabled = on) else it
+                            }
+                            schedTasks = next
+                            com.localllm.server.core.ScheduledTasks.save(schedCtx, next)
+                            if (on) com.localllm.server.core.ScheduledTasks.scheduleNext(schedCtx, task.copy(enabled = true))
+                            else com.localllm.server.core.ScheduledTasks.cancel(schedCtx, task)
+                        }
+                    )
+                    Text(
+                        "删除",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier
+                            .clickable {
+                                val next = schedTasks.filterNot { it.id == task.id }
+                                schedTasks = next
+                                com.localllm.server.core.ScheduledTasks.save(schedCtx, next)
+                                com.localllm.server.core.ScheduledTasks.cancel(schedCtx, task)
+                            }
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                    )
+                }
+            }
+            OutlinedButton(
+                onClick = { schedAdding = true },
+                modifier = Modifier.padding(top = 4.dp)
+            ) { Text("添加定时任务") }
+            if (schedAdding || schedEditing != null) {
+                val editing = schedEditing
+                var name by remember(schedAdding, editing?.id) {
+                    mutableStateOf(editing?.name ?: "")
+                }
+                var prompt by remember(schedAdding, editing?.id) {
+                    mutableStateOf(editing?.prompt ?: "")
+                }
+                var mode by remember(schedAdding, editing?.id) {
+                    mutableStateOf(if ((editing?.everyMinutes ?: 0) > 0) "interval" else "daily")
+                }
+                var minutes by remember(schedAdding, editing?.id) {
+                    mutableStateOf((editing?.everyMinutes ?: 60).toString())
+                }
+                var hourText by remember(schedAdding, editing?.id) {
+                    mutableStateOf((editing?.dailyHour ?: 8).toString())
+                }
+                var minuteText by remember(schedAdding, editing?.id) {
+                    mutableStateOf((editing?.dailyMinute ?: 0).toString())
+                }
+                AlertDialog(
+                    onDismissRequest = { schedAdding = false; schedEditing = null },
+                    title = { Text(if (editing == null) "添加定时任务" else "编辑定时任务") },
+                    text = {
+                        Column(Modifier.verticalScroll(rememberScrollState())) {
+                            CompactField(
+                                value = name,
+                                onValueChange = { name = it },
+                                label = "名称",
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            CompactField(
+                                value = prompt,
+                                onValueChange = { prompt = it },
+                                label = "到点要执行的指令",
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            QuickChips(
+                                options = listOf("daily" to "每天定时", "interval" to "每隔一段时间"),
+                                current = mode
+                            ) { mode = it }
+                            if (mode == "daily") {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    CompactField(
+                                        value = hourText,
+                                        onValueChange = { hourText = it.filter(Char::isDigit) },
+                                        label = "时（0-23）",
+                                        number = true,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    CompactField(
+                                        value = minuteText,
+                                        onValueChange = { minuteText = it.filter(Char::isDigit) },
+                                        label = "分（0-59）",
+                                        number = true,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                            } else {
+                                CompactField(
+                                    value = minutes,
+                                    onValueChange = { minutes = it.filter(Char::isDigit) },
+                                    label = "每多少分钟",
+                                    number = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            val nm = name.trim().ifBlank { "定时任务" }
+                            val pr = prompt.trim()
+                            if (pr.isNotEmpty()) {
+                                val task = com.localllm.server.core.ScheduledTasks.Task(
+                                    id = editing?.id ?: ("sched-" + System.currentTimeMillis()),
+                                    name = nm,
+                                    prompt = pr,
+                                    everyMinutes = if (mode == "interval")
+                                        (minutes.toIntOrNull() ?: 60).coerceIn(5, 1440) else 0,
+                                    dailyHour = (hourText.toIntOrNull() ?: 8).coerceIn(0, 23),
+                                    dailyMinute = (minuteText.toIntOrNull() ?: 0).coerceIn(0, 59),
+                                    enabled = true
+                                )
+                                val next = schedTasks.filterNot { it.id == task.id } + task
+                                schedTasks = next
+                                com.localllm.server.core.ScheduledTasks.save(schedCtx, next)
+                                com.localllm.server.core.ScheduledTasks.scheduleNext(schedCtx, task)
+                                android.widget.Toast.makeText(
+                                    schedCtx, "已添加：${task.describe()}",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                            schedAdding = false
+                            schedEditing = null
+                        }) { Text("保存") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { schedAdding = false; schedEditing = null }) { Text("取消") }
+                    }
+                )
+            }
+
             // ---- 任务清单工具 ----
             var todoOn by remember {
                 mutableStateOf(com.localllm.server.core.AppSettings.todoToolEnabled)
