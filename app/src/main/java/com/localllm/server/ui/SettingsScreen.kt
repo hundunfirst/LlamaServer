@@ -756,6 +756,7 @@ fun SettingsScreen(
                 )
             }
 
+            }
             GroupHeader(
                 title = "搜索与网络",
                 summary = "任务清单、联网搜索策略与配额",
@@ -841,7 +842,6 @@ fun SettingsScreen(
                 com.localllm.server.core.AppSettings.searchFetchFullText = fetchFull
             }
 
-            }
             // 这一段原本跟「服务设置」同组，但中间隔着别的组，展开后内容会落到下面几个组的标题后面，
             // 看起来像串行。给它自己的组头，保证每组内容紧跟自己的标题。
             GroupHeader(
