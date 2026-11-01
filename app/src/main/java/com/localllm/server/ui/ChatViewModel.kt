@@ -1066,29 +1066,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val cloudPlan: String?
                 var cloudPlanSkip: String? = null
                 if (selfSession?.planWithCloud == true) {
-                    // 追问轮沿用上一份计划：用户说「继续」「为什么第三列不对」时，
-                    // 重新规划既费一次调用，又可能给出与当前执行状态接不上的新计划。
-                    val cached = planCache[sid]
-                    val fresh = cached != null &&
-                            System.currentTimeMillis() - cached.second < PLAN_REUSE_MS
-                    if (fresh && looksLikeFollowUp(lastUserText)) {
-                        ServerProcessManager.appLog("沿用上次云端计划（追问轮不重新规划）")
-                        cloudPlan = cached!!.first
-                    } else {
-                        setProgress(sid, "正在让云端出计划…")
-                        when (val r = requestCloudPlan(lastUserText)) {
-                            is PlanResult.Ok -> {
-                                planCache[sid] = r.text to System.currentTimeMillis()
-                                cloudPlan = r.text
-                            }
+                    // 一次性：拿到计划就把开关关掉。用户不用再想「这一轮算不算追问」，
+                    // 也不会在不知情的情况下被多扣几次云端调用。
+                    setProgress(sid, "正在让云端出计划…")
+                    when (val r = requestCloudPlan(lastUserText)) {
+                        is PlanResult.Ok -> {
+                            cloudPlan = r.text
+                            setSessionPlanWithCloud(sid, false)
+                            _toast.value = "云端计划已拿到，开关已自动关闭"
+                            ServerProcessManager.appLog("规划用云端已完成，开关自动关闭")
+                        }
 
-                            is PlanResult.Skip -> {
-                                // 别静默退回本地：明确说一句，否则用户以为开关生效了
-                                ServerProcessManager.appLog("规划用云端未生效：${r.reason}")
-                                _toast.value = "规划用云端未生效：${r.reason}"
-                                cloudPlan = null
-                                cloudPlanSkip = r.reason
-                            }
+                        is PlanResult.Skip -> {
+                            // 没成功就不关：关掉等于悄悄改了用户的设置，他下次还会以为开着
+                            ServerProcessManager.appLog("规划用云端未生效：${r.reason}")
+                            _toast.value = "规划用云端未生效：${r.reason}"
+                            cloudPlan = null
+                            cloudPlanSkip = r.reason
                         }
                     }
                 } else {
@@ -2449,18 +2443,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (it.id == sid) it.copy(autoDrive = on) else it
         }
         saveStore()
-    }
-
-    /** 「规划用云端」的最近一份计划：sid → (计划正文, 时间)。追问轮直接复用，省一次云端调用 */
-    private val planCache = mutableMapOf<String, Pair<String, Long>>()
-    private val PLAN_REUSE_MS = 10 * 60_000L
-
-    /** 看起来是在追问/接着上一轮，而不是给了个新目标 */
-    private fun looksLikeFollowUp(text: String): Boolean {
-        val t = text.trim()
-        if (t.length <= 12) return true
-        val keys = listOf("继续", "接着", "然后", "下一步", "再", "为什么", "怎么", "这个", "那个", "它")
-        return keys.any { t.startsWith(it) }
     }
 
     /** 规划用云端：先让云端出计划，本地照着执行 */

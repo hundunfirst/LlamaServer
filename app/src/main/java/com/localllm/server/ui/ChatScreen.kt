@@ -2298,7 +2298,7 @@ private fun AttachSheet(
                         Column(modifier = Modifier.weight(1f)) {
                             Text("规划用云端", style = MaterialTheme.typography.bodyMedium)
                             Text(
-                                if (planWithCloud) "云端只出计划，文件和命令仍在本地执行"
+                                if (planWithCloud) "用一次就自动关闭；云端只出计划，文件和命令仍在本地"
                                 else "关闭：全部由本地模型完成",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
