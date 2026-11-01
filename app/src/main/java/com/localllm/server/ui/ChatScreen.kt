@@ -2763,6 +2763,7 @@ internal fun StepRow(
         st.label.startsWith("运行") || st.label.startsWith("执行命令") -> MaterialTheme.colorScheme.tertiary
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
+    androidx.compose.foundation.text.selection.SelectionContainer {
     Row(
         verticalAlignment = Alignment.Top,
         // 整行都能点：展开/折叠自由切换，不必对准右边那个小箭头。
@@ -2891,13 +2892,11 @@ internal fun StepRow(
                                         .heightIn(max = 260.dp)
                                         .verticalScroll(scroll)
                                 ) {
-                                    androidx.compose.foundation.text.selection.SelectionContainer {
                                         Text(
                                             latexToUnicode(thinkBodyText ?: ""),
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
-                                    }
                                 }
                             } else {
                                 // 折叠预览：进行中取最近段首行、完成取全文首行（DSH 规则）
@@ -3013,6 +3012,7 @@ internal fun StepRow(
                     .clickable { open = !open }
             )
         }
+    }
     }
 }
 
