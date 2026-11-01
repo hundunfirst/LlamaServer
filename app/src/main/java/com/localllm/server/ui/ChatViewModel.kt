@@ -2462,9 +2462,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 "1. 只写步骤（每步做什么、要动哪个文件或路径、需要什么取舍）；\n" +
                 "2. 不要输出代码，不要写完整文件内容；\n" +
                 "3. 3-8 步为宜，每步一句话。"
+        // 云端看不到手机上的目录，只能凭目标猜路径。把工作目录顶层清单一起发过去，
+        // 计划里的路径才落得住（否则它会规划出 /path/to/your/file.csv 这类东西）。
+        val dirHint = runCatching {
+            kotlinx.coroutines.withContext(Dispatchers.IO) {
+                FileTools.execute(getApplication(), FileTools.TOOL_LIST, org.json.JSONObject())
+            }
+        }.getOrNull()?.takeIf { !it.startsWith("错误") }?.take(1500)
+
+        val userMsg = buildString {
+            append(goal.take(1500))
+            if (!dirHint.isNullOrBlank()) {
+                append("\n\n【当前工作目录的顶层内容（规划时按这些真实路径来，不要编造路径）】\n")
+                append(dirHint)
+            }
+        }
         val messages = listOf(
             ChatClient.ChatMessage("system", system),
-            ChatClient.ChatMessage("user", goal.take(2000))
+            ChatClient.ChatMessage("user", userMsg)
         )
         val sb = StringBuilder()
         val error = runCatching {
