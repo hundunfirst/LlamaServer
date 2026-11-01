@@ -72,50 +72,6 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             GroupHeader(
-                title = "服务与模型",
-                summary = "端口、上下文、引擎参数、模型渠道",
-                open = settingGroup == "g1"
-            ) { settingGroup = if (settingGroup == "g1") null else "g1" }
-            if (settingGroup == "g1") {
-            SectionHeader(
-                title = "服务设置",
-                help = "修改后需重启服务生效。",
-                titleStyle = MaterialTheme.typography.bodyLarge
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("思考模式", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        if (settings.thinkEnabled) "开启：展示🧠思考过程（可折叠，立即生效）"
-                        else "关闭：抑制思考直接作答，速度优先（立即生效，少数模型仍会思考）",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = settings.thinkEnabled,
-                    onCheckedChange = { v -> vm.updateThinkEnabled(v) }
-                )
-            }
-            // 思考等级：只有模板认 reasoning_effort 的模型会用到（模型页标签里能看到）
-            Text(
-                "思考等级（仅对模板认 reasoning_effort 的模型生效；模型页点标签可看该模型支持哪种）",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-            QuickChips(
-                options = listOf("" to "模型默认", "low" to "低", "medium" to "中", "high" to "高"),
-                current = settings.reasoningEffort
-            ) { v -> vm.updateReasoningEffort(v) }
-
-            }
-            GroupHeader(
                 title = "对话与提示",
                 summary = "助手指令、长期记忆",
                 open = settingGroup == "g2"
@@ -221,7 +177,7 @@ fun SettingsScreen(
             }
             GroupHeader(
                 title = "文件与图片",
-                summary = "工作目录、全盘访问、危险确认、图片压缩、附件上限",
+                summary = "授权目录、全盘访问、回收站、危险确认、图片与附件上限",
                 open = settingGroup == "g3"
             ) { settingGroup = if (settingGroup == "g3") null else "g3" }
             if (settingGroup == "g3") {
@@ -512,7 +468,7 @@ fun SettingsScreen(
             }
             GroupHeader(
                 title = "运行与策略",
-                summary = "代码自检、主题、MCP 注入、轮次上限、纯净模式",
+                summary = "思考模式、代码自检、主题、MCP 注入、轮次上限、纯净模式、定时任务",
                 open = settingGroup == "g4"
             ) { settingGroup = if (settingGroup == "g4") null else "g4" }
             if (settingGroup == "g4") {
@@ -626,12 +582,6 @@ fun SettingsScreen(
             }
 
             }
-            GroupHeader(
-                title = "搜索与网络",
-                summary = "任务清单、图片轮搜索策略、次数上限、抓取正文",
-                open = settingGroup == "g5"
-            ) { settingGroup = if (settingGroup == "g5") null else "g5" }
-            if (settingGroup == "g5") {
             // ---- 定时任务 ----
             val schedCtx = androidx.compose.ui.platform.LocalContext.current
             var schedTasks by remember {
@@ -807,6 +757,12 @@ fun SettingsScreen(
                 )
             }
 
+            GroupHeader(
+                title = "搜索与网络",
+                summary = "任务清单、联网搜索策略与配额",
+                open = settingGroup == "g5"
+            ) { settingGroup = if (settingGroup == "g5") null else "g5" }
+            if (settingGroup == "g5") {
             // ---- 任务清单工具 ----
             var todoOn by remember {
                 mutableStateOf(com.localllm.server.core.AppSettings.todoToolEnabled)
@@ -894,6 +850,43 @@ fun SettingsScreen(
                 open = settingGroup == "g7"
             ) { settingGroup = if (settingGroup == "g7") null else "g7" }
             if (settingGroup == "g7") {
+            SectionHeader(
+            title = "思考模式",
+                help = "修改后需重启服务生效。",
+                titleStyle = MaterialTheme.typography.bodyLarge
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("思考模式", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        if (settings.thinkEnabled) "开启：展示🧠思考过程（可折叠，立即生效）"
+                        else "关闭：抑制思考直接作答，速度优先（立即生效，少数模型仍会思考）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = settings.thinkEnabled,
+                    onCheckedChange = { v -> vm.updateThinkEnabled(v) }
+                )
+            }
+            // 思考等级：只有模板认 reasoning_effort 的模型会用到（模型页标签里能看到）
+            Text(
+                "思考等级（仅对模板认 reasoning_effort 的模型生效；模型页点标签可看该模型支持哪种）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+            QuickChips(
+                options = listOf("" to "模型默认", "low" to "低", "medium" to "中", "high" to "高"),
+                current = settings.reasoningEffort
+            ) { v -> vm.updateReasoningEffort(v) }
+
             // ---- 模型渠道（无开关：选谁用谁；启动本地服务自动回本地） ----
             SectionHeader(
                 title = "模型渠道",
