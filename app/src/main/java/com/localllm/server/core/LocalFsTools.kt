@@ -84,14 +84,18 @@ object LocalFsTools {
         val children = dir.listFiles()?.sortedWith(
             compareByDescending<File> { it.isDirectory }.thenBy { it.name.lowercase() }
         ).orEmpty()
-        if (children.isEmpty()) return "（目录为空）"
+        // 同上：Android 11+ 删掉的文件还在同目录，只是名字带 .trashed- 前缀
+        val live = children.filterNot { it.name.startsWith(".trashed-") }
+        val trashed = children.size - live.size
+        val tail = if (trashed > 0) "（另有 $trashed 个文件在回收站，已隐藏）" else ""
+        if (live.isEmpty()) return "（目录为空）" + tail
         val sb = StringBuilder("目录内容（最多 $MAX_LIST_ENTRIES 项）：\n")
-        children.take(MAX_LIST_ENTRIES).forEach { f ->
+        live.take(MAX_LIST_ENTRIES).forEach { f ->
             sb.append(if (f.isDirectory) "[目录] " else "[文件] ").append(f.name)
             if (f.isFile) sb.append("  ").append(f.length()).append(" B")
             sb.append('\n')
         }
-        return sb.toString().trimEnd()
+        return sb.toString().trimEnd() + if (tail.isEmpty()) "" else "\n" + tail
     }
 
     private fun read(context: Context, path: String, offsetIn: Int, limitIn: Int): String {

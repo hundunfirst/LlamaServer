@@ -195,15 +195,20 @@ object FileTools {
         else find(root, path) ?: throw IllegalStateException("目录不存在：$path")
         if (!dir.isDirectory) throw IllegalStateException("不是目录：$path")
         val files = dir.listFiles()
-        if (files.isEmpty()) return "（目录为空）"
+        // Android 11+ 的回收站：删掉的文件 30 天内仍躺在同一目录里（名字带 .trashed- 前缀），
+        // 而 SAF 报的是**原始显示名**——不滤掉的话，模型会以为删过的文件还在，还可能去读/写它们。
+        val live = files.filterNot { it.uri.toString().contains(".trashed-") }
+        val trashed = files.size - live.size
+        val tail = if (trashed > 0) "（另有 $trashed 个文件在回收站，已隐藏）" else ""
+        if (live.isEmpty()) return "（目录为空）" + tail
         val sb = StringBuilder("目录内容（最多 $MAX_LIST_ENTRIES 项）：\n")
-        files.take(MAX_LIST_ENTRIES).forEach { f ->
+        live.take(MAX_LIST_ENTRIES).forEach { f ->
             sb.append(if (f.isDirectory) "[目录] " else "[文件] ")
                 .append(f.name ?: "?")
             if (f.isFile) sb.append("  ").append(f.length()).append(" B")
             sb.append('\n')
         }
-        return sb.toString().trimEnd()
+        return sb.toString().trimEnd() + if (tail.isEmpty()) "" else "\n" + tail
     }
 
     private fun readFile(
