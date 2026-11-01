@@ -9,6 +9,7 @@ import com.localllm.server.core.ChatClient
 import com.localllm.server.core.ChatStore
 import com.localllm.server.core.DocExtract
 import com.localllm.server.core.DocMaker
+import com.localllm.server.core.FileSnapshots
 import com.localllm.server.core.FileTools
 import com.localllm.server.core.GgufInspector
 import com.localllm.server.core.LinuxRuntime
@@ -82,6 +83,39 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** 一次性提示（生成完成等），界面消费后清空 */
     private val _toast = MutableStateFlow<String?>(null)
     val toast: StateFlow<String?> = _toast.asStateFlow()
+
+    /** 排队中的指令：本会话在生成时发来的下一条，跑完自动开始 */
+    data class QueuedTask(val sid: String, val text: String)
+
+    private val _taskQueue = MutableStateFlow<List<QueuedTask>>(emptyList())
+    val taskQueue: StateFlow<List<QueuedTask>> = _taskQueue.asStateFlow()
+
+    private fun enqueue(sid: String, text: String) {
+        _taskQueue.update { it + QueuedTask(sid, text) }
+        ServerProcessManager.appLog("指令已排队（共 ${_taskQueue.value.size} 条）：${text.take(40)}")
+    }
+
+    /** 一轮跑完后取出本会话的下一条排队指令；没有就什么都不做 */
+    private fun drainQueue(sid: String) {
+        if (sid in _generating.value) return
+        val next = _taskQueue.value.firstOrNull { it.sid == sid } ?: return
+        _taskQueue.update { it - next }
+        if (_activeId.value != sid) {
+            // 用户已经切走了：留一条提示，切回来再说，不擅自换会话
+            _toast.value = "「${next.text.take(20)}」还在队列里，切回该会话后会自动继续"
+            _taskQueue.update { it + next }
+            return
+        }
+        ServerProcessManager.appLog("开始执行排队指令：${next.text.take(40)}")
+        _input.value = next.text
+        send()
+    }
+
+    /** 清空排队（用户主动丢弃时用） */
+    fun clearQueue() {
+        ServerProcessManager.appLog("已清空排队指令（${_taskQueue.value.size} 条）")
+        _taskQueue.value = emptyList()
+    }
 
     /** 各会话的生成进度（“342 token · 28.1 tok/s”），用于全局运行中指示 */
     private val _progress = MutableStateFlow<Map<String, String>>(emptyMap())
@@ -670,8 +704,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun blockIfBusy(): Boolean {
         val sid = _activeId.value
         if (sid in _generating.value) {
-            _lastStats.value = "本会话正在生成，稍等或先停止"
-            _toast.value = "本会话正在生成，稍等或先停止"
+            // 本会话在生成：把这条指令排队，跑完自动接着做，而不是让它丢掉
+            val pending = _input.value.trim()
+            if (pending.isNotEmpty()) {
+                enqueue(sid, pending)
+                _input.value = ""
+                _lastStats.value = "已排队（第 ${_taskQueue.value.size} 个），当前任务结束会自动开始"
+                _toast.value = "已排队：当前任务结束后自动开始"
+            } else {
+                _lastStats.value = "本会话正在生成，稍等或先停止"
+                _toast.value = "本会话正在生成，稍等或先停止"
+            }
             return true
         }
         if (_generating.value.size >= MAX_PARALLEL_GENERATIONS) {
@@ -1629,6 +1672,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                             "等用户确认后再执行。"
                                 } else {
                                 ServerProcessManager.appLog("文件工具：${tc.name}")
+                                // 写入前留一份现状：产物卡上的「撤销」靠它退回本次写入之前
+                                if (tc.name == FileTools.TOOL_WRITE || tc.name == FileTools.TOOL_PATCH) {
+                                    FileSnapshots.capture(
+                                        getApplication(),
+                                        getApplication<Application>().filesDir,
+                                        sid,
+                                        args.optString("path")
+                                    )
+                                }
                                 val r = FileTools.execute(
                                     getApplication(),
                                     tc.name,
@@ -2001,6 +2053,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val ok = _error.value == null
                     _toast.value = if (ok) "「$title」已生成完成" else "「$title」生成失败：${_error.value}"
                 }
+                // 这一轮结束了：还有排队的指令就接着做（延后一点，让收尾落盘先完成）
+                viewModelScope.launch {
+                    kotlinx.coroutines.delay(300)
+                    drainQueue(sid)
+                }
             }
         }
     }
@@ -2157,6 +2214,36 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (it.id == sid) it.copy(planMode = on) else it
         }
         saveStore()
+    }
+
+    /**
+     * 撤销某个文件最近一次写入：恢复到写入前的状态（本次新建的就删掉），
+     * 并把产物卡回退。返回一句能直接弹给用户的话。
+     */
+    fun undoFileWrite(sid: String, path: String): String {
+        val app = getApplication<Application>()
+        val base = app.filesDir
+        val snap = FileSnapshots.latest(base, sid, path)
+        val result = FileSnapshots.restore(app, base, sid, path)
+        if (result.startsWith("已撤销")) {
+            FileSnapshots.forget(base, sid, path)
+            writeMessages(sid, messagesOf(sid).map { m ->
+                if (m.genFiles.none { it.path == path }) m
+                else m.copy(
+                    genFiles = m.genFiles.mapNotNull { gf ->
+                        when {
+                            gf.path != path -> gf
+                            // 原本存在 → 卡片内容换回旧版（不再有 prev，什么都不用撤销了）
+                            snap != null && snap.existed -> ChatStore.GenFile(path, snap.content ?: "", null)
+                            // 本次新建又被撤销 → 文件已不存在，卡片跟着撤掉
+                            else -> null
+                        }
+                    }
+                )
+            })
+        }
+        ServerProcessManager.appLog("撤销写入：$path → $result")
+        return result
     }
 
     fun deleteSession(id: String) {

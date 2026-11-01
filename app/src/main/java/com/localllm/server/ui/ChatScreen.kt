@@ -502,6 +502,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     val usage by vm.usage.collectAsStateWithLifecycle()
     val pendingImage by vm.pendingImageB64.collectAsStateWithLifecycle()
     val imageNote by vm.pendingImageNote.collectAsStateWithLifecycle()
+    val queue by vm.taskQueue.collectAsStateWithLifecycle()
     val pendingFile by vm.pendingFile.collectAsStateWithLifecycle()
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val activeId by vm.activeId.collectAsStateWithLifecycle()
@@ -1696,6 +1697,11 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                             deleteIndex = i
                         },
                         onOpenGenFile = { gf -> previewGenFile = gf },
+                        onUndoFile = { path ->
+                            val msg = vm.undoFileWrite(activeId, path)
+                            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT)
+                                .show()
+                        },
                         onReadText = { readMsg = msg },
                         onSpeak = {
                             val engine = tts
@@ -1825,6 +1831,32 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
 
         // 运行预览摘要行：一行，紧贴输入框上方，点开是画中画弹窗
         SandboxPanel()
+
+        // 排队中的指令：本会话在生成时发来的下一条，跑完自动开始
+        val myQueue = queue.filter { it.sid == activeId }
+        if (myQueue.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "排队 ${myQueue.size} 条 · 下一条：" + myQueue.first().text.take(24),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "清空",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .clickable { vm.clearQueue() }
+                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                )
+            }
+        }
 
         // 计划模式：模型给了计划之后，这里一键退出计划模式并让它照着做
         val planModeOn = sessions.find { it.id == activeId }?.planMode == true
@@ -2890,6 +2922,7 @@ private fun MessageBubble(
     onDelete: () -> Unit,
     onSpeak: () -> Unit = {},
     onOpenGenFile: (com.localllm.server.core.ChatStore.GenFile) -> Unit = {},
+    onUndoFile: ((String) -> Unit)? = null,
     onReadText: () -> Unit = {},
     onResumeTask: () -> Unit = {},
     showResume: Boolean = false
@@ -2995,6 +3028,16 @@ private fun MessageBubble(
                                                 "-${stat.second}",
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.error
+                                            )
+                                        }
+                                        onUndoFile?.let { undo ->
+                                            Text(
+                                                "撤销",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier
+                                                    .clickable { undo(gf.path) }
+                                                    .padding(start = 8.dp, top = 4.dp, bottom = 4.dp)
                                             )
                                         }
                                     }
