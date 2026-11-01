@@ -72,110 +72,6 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             GroupHeader(
-                title = "对话与提示",
-                summary = "助手指令、长期记忆",
-                open = settingGroup == "g2"
-            ) { settingGroup = if (settingGroup == "g2") null else "g2" }
-            if (settingGroup == "g2") {
-            // ---- 助手指令（全局预设）----
-            var sysPresets by remember {
-                mutableStateOf(com.localllm.server.core.AppSettings.loadSysPresets())
-            }
-            var activeSys by remember {
-                mutableStateOf(
-                    com.localllm.server.core.AppSettings.activeSysPresetId
-                        .ifBlank { com.localllm.server.core.AppSettings.loadSysPresets().firstOrNull()?.id ?: "" }
-                )
-            }
-            var showPresetMgr by remember { mutableStateOf(false) }
-            SectionHeader(
-                title = "助手指令（system prompt）",
-                help = "给所有会话的默认指令，可保存多套预设随时切换；单个会话可在聊天页右上角 🧠 按钮里单独覆盖。",
-                titleStyle = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(top = 8.dp)
-            )
-            QuickChips(
-                options = sysPresets.map { it.id to it.name },
-                current = activeSys
-            ) { v ->
-                activeSys = v
-                com.localllm.server.core.AppSettings.activeSysPresetId = v
-            }
-            OutlinedButton(onClick = { showPresetMgr = true }) { Text("管理预设…") }
-            if (showPresetMgr) {
-                SysPresetDialog(onDismiss = {
-                    showPresetMgr = false
-                    sysPresets = com.localllm.server.core.AppSettings.loadSysPresets()
-                    activeSys = com.localllm.server.core.AppSettings.activeSysPresetId
-                        .ifBlank { sysPresets.firstOrNull()?.id ?: "" }
-                })
-            }
-
-            // ---- 长期记忆 ----
-            val memCtx = androidx.compose.ui.platform.LocalContext.current
-            var memOn by remember {
-                mutableStateOf(com.localllm.server.core.AppSettings.memoryEnabled)
-            }
-            var memText by remember { mutableStateOf("") }
-            var showMem by remember { mutableStateOf(false) }
-            SectionHeader(
-                title = "长期记忆",
-                help = "把关于你的长期信息（偏好/背景/称呼）保存在本地 memory.md，每次对话自动注入；" +
-                        "模型在你说「记住…」时会用 memory_write 工具追加。仅存本机，不上传。可随时清空。",
-                titleStyle = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(top = 8.dp)
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    com.localllm.server.core.MemoryStore.load(memCtx).size.let { "$it 条记忆" },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f)
-                )
-                OutlinedButton(onClick = {
-                    memText = com.localllm.server.core.MemoryStore.load(memCtx).joinToString("\n")
-                    showMem = true
-                }) { Text("查看/编辑") }
-            }
-            QuickChips(
-                options = listOf("true" to "开启", "false" to "关闭"),
-                current = memOn.toString()
-            ) { v ->
-                memOn = v.toBoolean()
-                com.localllm.server.core.AppSettings.memoryEnabled = memOn
-            }
-            if (showMem) {
-                AlertDialog(
-                    onDismissRequest = { showMem = false },
-                    title = { Text("长期记忆") },
-                    text = {
-                        CompactFieldMultiline(
-                            value = memText,
-                            onValueChange = { memText = it },
-                            label = "每行一条（可直接编辑）",
-                            minHeight = 220
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            runCatching {
-                                java.io.File(memCtx.filesDir, "memory.md").writeText(memText)
-                            }
-                            showMem = false
-                        }) { Text("保存") }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = {
-                            com.localllm.server.core.MemoryStore.clear(memCtx)
-                            memText = ""
-                            showMem = false
-                        }) { Text("清空", color = MaterialTheme.colorScheme.error) }
-                    }
-                )
-            }
-
-            }
-            GroupHeader(
                 title = "文件与图片",
                 summary = "授权目录、全盘访问、回收站、危险确认、图片与附件上限",
                 open = settingGroup == "g3"
@@ -763,7 +659,6 @@ fun SettingsScreen(
                 open = settingGroup == "g5"
             ) { settingGroup = if (settingGroup == "g5") null else "g5" }
             if (settingGroup == "g5") {
-            }
             // ---- 任务清单工具 ----
             var todoOn by remember {
                 mutableStateOf(com.localllm.server.core.AppSettings.todoToolEnabled)
@@ -844,6 +739,7 @@ fun SettingsScreen(
 
             // 这一段原本跟「服务设置」同组，但中间隔着别的组，展开后内容会落到下面几个组的标题后面，
             // 看起来像串行。给它自己的组头，保证每组内容紧跟自己的标题。
+            }
             GroupHeader(
                 title = "引擎与模型",
                 summary = "模型渠道、MCP 服务器、NPU、加载模式、KV 缓存",
