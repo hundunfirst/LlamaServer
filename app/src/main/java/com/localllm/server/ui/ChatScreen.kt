@@ -1702,6 +1702,11 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                             android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT)
                                 .show()
                         },
+                        onSaveSkill = {
+                            val msg = vm.saveFlowAsSkill(activeId, i)
+                            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT)
+                                .show()
+                        },
                         onReadText = { readMsg = msg },
                         onSpeak = {
                             val engine = tts
@@ -2948,6 +2953,7 @@ private fun MessageBubble(
     onSpeak: () -> Unit = {},
     onOpenGenFile: (com.localllm.server.core.ChatStore.GenFile) -> Unit = {},
     onUndoFile: ((String) -> Unit)? = null,
+    onSaveSkill: (() -> Unit)? = null,
     onReadText: () -> Unit = {},
     onResumeTask: () -> Unit = {},
     showResume: Boolean = false
@@ -3109,6 +3115,20 @@ private fun MessageBubble(
                                     onOpen = { onOpenGenFile(gf) }
                                 )
                             }
+                        }
+                        // 跑通的多步流程：可以就地沉淀成技能，下次遇到类似目标直接套用
+                        val flowSteps = msg.steps.count { it.type == "tool" || it.type == "search" }
+                        if (!isUser && !generating && onSaveSkill != null && flowSteps >= 3 &&
+                            msg.steps.all { it.ok } && msg.task?.stopped != true
+                        ) {
+                            Text(
+                                "把这 $flowSteps 步存为技能",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .clickable { onSaveSkill() }
+                                    .padding(vertical = 4.dp)
+                            )
                         }
                         // 任务清单卡片（todo_write 产生）
                         if (!isUser && msg.todos.isNotEmpty()) {

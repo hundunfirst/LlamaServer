@@ -20,6 +20,7 @@ import com.localllm.server.core.OcrIntent
 import com.localllm.server.core.OcrTool
 import com.localllm.server.core.RepeatGuard
 import com.localllm.server.core.ServerProcessManager
+import com.localllm.server.core.Skill
 import com.localllm.server.core.SkillChain
 import com.localllm.server.core.SkillChainFlow
 import com.localllm.server.core.ServerUiState
@@ -2374,7 +2375,42 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 撤销某个文件最近一次写入：恢复到写入前的状态（本次新建的就删掉），
+     * 把这一轮跑通的流程沉淀成技能：以后遇到类似目标可以直接套用。
+     * 只收「做成了」的流程（有工具步骤、没有失败步骤），不把闲聊和失败的尝试变成技能。
+     */
+    fun saveFlowAsSkill(sid: String, msgIndex: Int): String {
+        val msg = messagesOf(sid).getOrNull(msgIndex) ?: return "找不到这条消息"
+        val flow = msg.steps.filter { it.type == "tool" || it.type == "search" }
+        if (flow.isEmpty()) return "这一轮没有可沉淀的步骤"
+        if (flow.any { !it.ok }) return "这一轮有失败的步骤，先做成再存更可靠"
+        val goal = msg.task?.goal?.takeIf { it.isNotBlank() }
+            ?: messagesOf(sid).lastOrNull { it.role == "user" }?.content?.take(80)
+            ?: "未命名流程"
+        val name = goal.lineSequence().first().trim().take(20).ifBlank { "未命名流程" }
+        val prompt = buildString {
+            append("（以下是从一次成功执行里沉淀的做法，遇到类似目标可以照做；场景不同就调整。）\n")
+            append("目标示例：").append(goal.take(120)).append("\n\n")
+            append("已验证的步骤：\n")
+            flow.forEachIndexed { idx, st ->
+                append(idx + 1).append(". ").append(st.label.take(80))
+                st.args?.takeIf { it.isNotBlank() }?.let {
+                    append("\n   参数：").append(it.take(160))
+                }
+                append('\n')
+            }
+        }
+        val skill = Skill(
+            id = "auto-" + System.currentTimeMillis(),
+            name = name,
+            desc = "自动沉淀：${flow.size} 步流程",
+            prompt = prompt
+        )
+        AppSettings.saveSkills(AppSettings.loadSkills() + skill)
+        ServerProcessManager.appLog("流程已存为技能：$name（${flow.size} 步）")
+        return "已存为技能「$name」"
+    }
+
+    /** 撤销某个文件最近一次写入：恢复到写入前的状态（本次新建的就删掉），
      * 并把产物卡回退。返回一句能直接弹给用户的话。
      */
     fun undoFileWrite(sid: String, path: String): String {
