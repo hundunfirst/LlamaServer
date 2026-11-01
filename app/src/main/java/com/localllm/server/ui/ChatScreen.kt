@@ -3232,8 +3232,24 @@ private fun MessageBubble(
                                                         rawReasoning else null,
                                                     liveThink = thinking && st.type == "think" && st.label == "思考中",
                                                     onOpenFile = { path ->
-                                                        msg.genFiles.firstOrNull { it.path == path }
-                                                            ?.let(onOpenGenFile)
+                                                        // 产物列表里有内容的走内嵌预览；
+                                                        // 「读取」出来的文件不在产物列表里，交给系统应用打开，
+                                                        // 打不开就直接说清楚，别让按钮点下去什么都不发生。
+                                                        val inCard = msg.genFiles.firstOrNull { it.path == path }
+                                                        if (inCard != null) {
+                                                            onOpenGenFile(inCard)
+                                                        } else if (!com.localllm.server.core.FileOpener
+                                                                .open(context, path)
+                                                        ) {
+                                                            val tail = if (path.startsWith("/"))
+                                                                "（绝对路径没有系统授权，无法交给别的应用）"
+                                                            else ""
+                                                            android.widget.Toast.makeText(
+                                                                context,
+                                                                "没有应用能打开 $path$tail",
+                                                                android.widget.Toast.LENGTH_LONG
+                                                            ).show()
+                                                        }
                                                     }
                                                 )
                                             }
