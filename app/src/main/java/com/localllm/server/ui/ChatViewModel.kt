@@ -2433,16 +2433,30 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         data class Skip(val reason: String) : PlanResult
     }
 
+    /**
+     * 挑一个端点来做规划：优先当前选中的那个，否则用预设里第一个有地址的。
+     * 注意**不看 chatCloudEnabled**——那句话的意思是"聊天走不走云端"，
+     * 而这里要的恰恰是"聊天在本地、规划借云端"，用它会把这个功能直接掐死。
+     */
+    private fun planEndpoint(): Triple<String, String, String?>? {
+        val presets = AppSettings.loadCloudPresets().filter { it.url.isNotBlank() }
+        if (presets.isEmpty()) return null
+        val currentUrl = AppSettings.chatCloudUrl.trim().removeSuffix("/")
+        val preset = presets.firstOrNull { it.url.trim().removeSuffix("/") == currentUrl }
+            ?: presets.first()
+        return Triple(
+            preset.url.trim().removeSuffix("/"),
+            preset.model.ifBlank { "default" },
+            preset.key.ifBlank { null }
+        )
+    }
+
     private suspend fun requestCloudPlan(goal: String): PlanResult {
-        if (!AppSettings.chatCloudEnabled) {
-            return PlanResult.Skip("「模型渠道」里还没启用云端端点")
-        }
-        val url = AppSettings.chatCloudUrl.trim().removeSuffix("/")
-        if (url.isBlank()) {
-            return PlanResult.Skip("「模型渠道」里云端地址是空的")
-        }
-        val model = AppSettings.chatCloudModel.ifBlank { "default" }
-        val key = AppSettings.chatCloudKey
+        val ep = planEndpoint()
+            ?: return PlanResult.Skip("「模型渠道」里还没有可用的端点（需要在「配置模型」里加一条带地址的接口）")
+        val url = ep.first
+        val model = ep.second
+        val key = ep.third
         val system = "你是任务规划者。根据用户目标，输出一份可执行的分步计划：\n" +
                 "1. 只写步骤（每步做什么、要动哪个文件或路径、需要什么取舍）；\n" +
                 "2. 不要输出代码，不要写完整文件内容；\n" +
@@ -2456,7 +2470,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             ChatClient.chatStream(
                 port = AppSettings.port,
                 messages = messages,
-                apiToken = key.ifBlank { null },
+                apiToken = key,
                 baseUrl = url,
                 model = model,
                 callKey = "plan-" + System.currentTimeMillis(),
