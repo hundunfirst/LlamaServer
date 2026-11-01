@@ -89,9 +89,9 @@ object LocalFsTools {
         val trashed = children.size - live.size
         val tail = if (trashed > 0) "（另有 $trashed 个文件在回收站，已隐藏）" else ""
         if (live.isEmpty()) return "（目录为空）" + tail
-        val sb = StringBuilder("目录内容（最多 $MAX_LIST_ENTRIES 项）：\n")
-        live.take(MAX_LIST_ENTRIES).forEach { f ->
-            sb.append(if (f.isDirectory) "[目录] " else "[文件] ").append(f.name)
+        val sb = StringBuilder("目录内容（共 ${live.size} 项，本次列出 ${minOf(live.size, MAX_LIST_ENTRIES)} 项）：\n")
+        live.take(MAX_LIST_ENTRIES).forEachIndexed { idx, f ->
+            sb.append("${idx + 1}. ").append(if (f.isDirectory) "[目录] " else "[文件] ").append(f.name)
             if (f.isFile) sb.append("  ").append(f.length()).append(" B")
             sb.append('\n')
         }

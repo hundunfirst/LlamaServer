@@ -68,7 +68,8 @@ object FileTools {
         return JSONArray().apply {
             put(
                 fn(
-                    TOOL_LIST, "列出授权目录下的文件（相对路径）",
+                    TOOL_LIST, "列出目录内容。返回带编号和总数；向用户转述时请保留序号与全部条目，" +
+                            "不要合并相似的名字、不要省略",
                     JSONObject().put("path", pathProp), emptyList()
                 )
             )
@@ -232,9 +233,11 @@ object FileTools {
         val trashed = files.size - live.size
         val tail = if (trashed > 0) "（另有 $trashed 个文件在回收站，已隐藏）" else ""
         if (live.isEmpty()) return "（目录为空）" + tail
-        val sb = StringBuilder("目录内容（最多 $MAX_LIST_ENTRIES 项）：\n")
-        live.take(MAX_LIST_ENTRIES).forEach { f ->
-            sb.append(if (f.isDirectory) "[目录] " else "[文件] ")
+        // 编号 + 总数：模型是「复述」这份清单而不是逐行誊抄，会合并相邻的相似条目。
+        // 带上序号与总数，漏抄或多抄都看得出来（实测：两条都叫「跑单记账_…」时漏掉了其中一条）。
+        val sb = StringBuilder("目录内容（共 ${live.size} 项，本次列出 ${minOf(live.size, MAX_LIST_ENTRIES)} 项）：\n")
+        live.take(MAX_LIST_ENTRIES).forEachIndexed { idx, f ->
+            sb.append("${idx + 1}. ").append(if (f.isDirectory) "[目录] " else "[文件] ")
                 .append(f.name ?: "?")
             if (f.isFile) sb.append("  ").append(f.length()).append(" B")
             sb.append('\n')
