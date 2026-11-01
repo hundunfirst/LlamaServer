@@ -548,6 +548,23 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
         if (uri != null) vm.attachImage(uri)
     }
 
+    // 剪贴板里复制了文件时给一个「插入路径」入口：
+    // Android 的文本框不接受粘贴文件（剪贴板是 content:// URI），
+    // 但用户复制文件的意图通常就是引用它——换成路径插进输入框，模型自己会 file_read。
+    val clipMgr = context.getSystemService(android.content.ClipboardManager::class.java)
+    var clipRef by remember { mutableStateOf<Pair<String, String>?>(null) }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val handler = android.os.Handler(context.mainLooper)
+        val listener = android.content.ClipboardManager.OnPrimaryClipChangedListener {
+            val clip = runCatching { clipMgr?.primaryClip }.getOrNull()
+            val uri = if (clip != null && clip.itemCount > 0) clip.getItemAt(0).uri else null
+            val resolved = uri?.let { com.localllm.server.core.FileRef.resolve(context, it) }
+            handler.post { clipRef = resolved }
+        }
+        runCatching { clipMgr?.addPrimaryClipChangedListener(listener) }
+        onDispose { runCatching { clipMgr?.removePrimaryClipChangedListener(listener) } }
+    }
+
     // 附加文件：图片走多模态/OCR，文本类文件读成文本随消息发送（其余类型暂不支持）
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -1831,6 +1848,46 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 )
                 TextButton(onClick = { previewImageB64 = pendingImage }) { Text("预览") }
                 TextButton(onClick = vm::clearPendingImage) { Text("移除") }
+            }
+        }
+
+        // 剪贴板里的文件 → 一键插入路径（等价于桌面端「粘贴文件」）
+        clipRef?.let { (name, path) ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "📎 剪贴板：$name",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "插入路径",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .clickable {
+                            val cur = input
+                            vm.onInput(
+                                if (cur.isBlank() || cur.endsWith(" ")) cur + path + " "
+                                else "$cur $path "
+                            )
+                            clipRef = null
+                        }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+                Text(
+                    "忽略",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .clickable { clipRef = null }
+                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                )
             }
         }
 
