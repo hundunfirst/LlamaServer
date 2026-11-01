@@ -93,13 +93,15 @@ fun ModelConfigDialog(vm: MainViewModel, onDismiss: () -> Unit) {
         ?: "未选择"
 
     var suppliers by remember { mutableStateOf(AppSettings.loadCloudPresets()) }
+    // 初始高亮看「聊天渠道指向哪个供应商」，不看 chatCloudEnabled——
+    // 后者表示"聊天现在走不走云端"，用它判断会让弹窗每次都回到「本地模型」，
+    // 上次选的那个看着就像没保存。
     var activeTarget by remember {
         val saved = AppSettings.loadCloudPresets()
+        val curUrl = AppSettings.chatCloudUrl.trim().removeSuffix("/")
         mutableStateOf(
-            if (!AppSettings.chatCloudEnabled || AppSettings.chatCloudUrl.isBlank()) "local"
-            else saved.firstOrNull {
-                it.url.trim().removeSuffix("/") == AppSettings.chatCloudUrl.trim().removeSuffix("/")
-            }?.id ?: "local"
+            if (curUrl.isBlank()) "local"
+            else saved.firstOrNull { it.url.trim().removeSuffix("/") == curUrl }?.id ?: "local"
         )
     }
     var selId by remember { mutableStateOf(activeTarget) }
