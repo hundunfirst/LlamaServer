@@ -929,11 +929,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             }
                         }
                 val fileHint = if (fileOn) {
-                    // 路径约定写在最前面：实测小模型会把「工作目录」和「根目录 / 系统目录」混着用，
-                    // 一会读 /root、一会读 /，全都不存在，然后反复重试。
-                    "**路径规则：file_list / file_read / file_write / file_patch 里写的相对路径，" +
-                            "都相对于用户的工作目录——直接写文件名或子目录名即可（如 report.xlsx、demo/a.html）。" +
-                            "不要用 /、/root、/home、/sdcard 这类路径去猜文件在哪。**" +
+                    // 路径约定要短、要分句：实测小模型会把「工作目录」和「Linux 容器的 /root」混着用，
+                    // 一会读 /root、一会读 /，全都不存在，然后反复重试到轮次耗尽。
+                    "文件工具用相对路径，直接写文件名或子目录名（如 report.xlsx、demo/a.html），" +
+                            "它们都在用户的工作目录里。不要用 /、/root、/home、/sdcard 去猜文件在哪。" +
+                            "run_bash 是另一个 Linux 环境，里面没有用户的文件，不要用 bash 找文件。" +
                             "如需生成文件（HTML/代码/CSV）用 file_write；需要真正的 Excel 表格用 make_xlsx（rows 二维数组）；" +
                             "需要 PDF 用 make_pdf。都写入工作目录，并在回答里告知文件名；" +
                             "已经存在的文件只改一两处时，用 file_patch（给 old/new 片段），" +

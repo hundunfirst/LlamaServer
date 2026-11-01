@@ -235,7 +235,11 @@ object FileTools {
         if (live.isEmpty()) return "（目录为空）" + tail
         // 编号 + 总数：模型是「复述」这份清单而不是逐行誊抄，会合并相邻的相似条目。
         // 带上序号与总数，漏抄或多抄都看得出来（实测：两条都叫「跑单记账_…」时漏掉了其中一条）。
-        val sb = StringBuilder("目录内容（共 ${live.size} 项，本次列出 ${minOf(live.size, MAX_LIST_ENTRIES)} 项）：\n")
+        // 抬头再明说一次「要读就直接用下面的文件名」——小模型列完目录还会去 bash 里找文件。
+        val sb = StringBuilder(
+            "工作目录内容（共 ${live.size} 项，本次列出 ${minOf(live.size, MAX_LIST_ENTRIES)} 项）。" +
+                    "要读/改其中某个文件，直接把下面的文件名当 path 传给 file_read / file_patch：\n"
+        )
         live.take(MAX_LIST_ENTRIES).forEachIndexed { idx, f ->
             sb.append("${idx + 1}. ").append(if (f.isDirectory) "[目录] " else "[文件] ")
                 .append(f.name ?: "?")

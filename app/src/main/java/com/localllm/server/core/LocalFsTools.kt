@@ -89,7 +89,10 @@ object LocalFsTools {
         val trashed = children.size - live.size
         val tail = if (trashed > 0) "（另有 $trashed 个文件在回收站，已隐藏）" else ""
         if (live.isEmpty()) return "（目录为空）" + tail
-        val sb = StringBuilder("目录内容（共 ${live.size} 项，本次列出 ${minOf(live.size, MAX_LIST_ENTRIES)} 项）：\n")
+        val sb = StringBuilder(
+            "目录内容（共 ${live.size} 项，本次列出 ${minOf(live.size, MAX_LIST_ENTRIES)} 项）。" +
+                    "要读/改其中某个文件，直接把文件名或完整路径传给 file_read / file_patch：\n"
+        )
         live.take(MAX_LIST_ENTRIES).forEachIndexed { idx, f ->
             sb.append("${idx + 1}. ").append(if (f.isDirectory) "[目录] " else "[文件] ").append(f.name)
             if (f.isFile) sb.append("  ").append(f.length()).append(" B")
