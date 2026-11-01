@@ -119,7 +119,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
                 val sid = o.optString("sid")
                 val text = o.optString("text")
-                if (sid.isBlank() || text.isBlank()) null else QueuedTask(sid, text)
+                // 定时任务写进来的条目没有 sid：落到当前会话
+                if (text.isBlank()) null else QueuedTask(sid.ifBlank { _activeId.value }, text)
             }
             if (list.isNotEmpty()) {
                 _taskQueue.value = list

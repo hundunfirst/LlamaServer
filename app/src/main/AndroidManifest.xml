@@ -51,5 +51,10 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="on_device_llm_inference_server" />
         </service>
+
+        <!-- 定时任务到点唤醒：只做「排入队列 + 发通知」，不在这里起引擎 -->
+        <receiver
+            android:name=".core.TaskAlarmReceiver"
+            android:exported="false" />
     </application>
 </manifest>

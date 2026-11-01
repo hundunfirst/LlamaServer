@@ -20,6 +20,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handleShareIntent(intent)
+        // 闹钟在进程被杀后不会自己保留：每次启动重新登记定时任务
+        runCatching { com.localllm.server.core.ScheduledTasks.rescheduleAll(this) }
         if (Build.VERSION.SDK_INT >= 33) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
