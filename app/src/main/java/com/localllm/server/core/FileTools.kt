@@ -157,6 +157,37 @@ object FileTools {
     /** 展示名（设置页用） */
     fun rootName(context: Context): String? = rootDir(context)?.name
 
+    // ---- 回收站：Android 11+ 删掉的文件 30 天内仍躺在工作目录里，占空间但看不见 ----
+
+    private fun trashEntries(root: DocumentFile): List<DocumentFile> =
+        root.listFiles().filter { it.uri.toString().contains(".trashed-") }
+
+    /** (条目数, 占用字节)；递归算大小，目录也算进去 */
+    fun trashSummary(context: Context): Pair<Int, Long> {
+        val root = rootDir(context) ?: return 0 to 0L
+        val entries = trashEntries(root)
+        return entries.size to entries.sumOf { sizeOf(it) }
+    }
+
+    private fun sizeOf(d: DocumentFile): Long =
+        if (d.isFile) d.length() else d.listFiles().sumOf { sizeOf(it) }
+
+    /** 真删回收站条目，返回 (删掉, 失败)。目录必须递归删——DocumentFile 删非空目录会失败。 */
+    fun purgeTrash(context: Context): Pair<Int, Int> {
+        val root = rootDir(context) ?: return 0 to 0
+        var ok = 0
+        var fail = 0
+        trashEntries(root).forEach { e ->
+            if (runCatching { deleteRecursive(e) }.getOrDefault(false)) ok++ else fail++
+        }
+        return ok to fail
+    }
+
+    private fun deleteRecursive(d: DocumentFile): Boolean {
+        if (d.isDirectory) d.listFiles().forEach { deleteRecursive(it) }
+        return runCatching { d.delete() }.getOrDefault(false)
+    }
+
     private fun segments(path: String): List<String> =
         path.replace('\\', '/').split('/').filter { it.isNotBlank() && it != "." }
 

@@ -314,6 +314,77 @@ fun SettingsScreen(
                 }) { Text(if (storageGranted) "已授权" else "开启全盘访问") }
             }
 
+            // ---- 工作目录回收站 ----
+            // Android 11+ 删掉的文件 30 天内仍留在工作目录里（名字带 .trashed-），占空间且看不见。
+            var trashCount by remember { mutableStateOf<Int?>(null) }
+            var trashBytes by remember { mutableStateOf(0L) }
+            var purgePending by remember { mutableStateOf(false) }
+            var purging by remember { mutableStateOf(false) }
+            val trashScope = androidx.compose.runtime.rememberCoroutineScope()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    when {
+                        trashCount == null -> "回收站：点右侧扫描（删掉的文件 30 天内仍占空间）"
+                        trashCount == 0 -> "回收站是空的"
+                        else -> "回收站里有 ${trashCount} 项，共 ${trashBytes / 1024} KB"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                OutlinedButton(
+                    onClick = {
+                        purging = true
+                        trashScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            val (n, b) = com.localllm.server.core.FileTools.trashSummary(fileCtx)
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                purging = false
+                                trashCount = n
+                                trashBytes = b
+                                if (n > 0) purgePending = true
+                            }
+                        }
+                    },
+                    enabled = !purging && workDirName.isNotBlank()
+                ) { Text(if (purging) "…" else "清理回收站") }
+            }
+            if (purgePending) {
+                AlertDialog(
+                    onDismissRequest = { purgePending = false },
+                    title = { Text("永久删除回收站里 ${trashCount ?: 0} 项？") },
+                    text = {
+                        Text(
+                            "共 ${trashBytes / 1024} KB，删除后无法恢复。\n\n" +
+                                    "只清理工作目录（$workDirName）下的回收站文件，不动其他位置。"
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            purgePending = false
+                            purging = true
+                            trashScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                val (ok, fail) = com.localllm.server.core.FileTools.purgeTrash(fileCtx)
+                                val (n, b) = com.localllm.server.core.FileTools.trashSummary(fileCtx)
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                    purging = false
+                                    trashCount = n
+                                    trashBytes = b
+                                    android.widget.Toast.makeText(
+                                        fileCtx,
+                                        if (fail == 0) "已删除 $ok 项"
+                                        else "删除 $ok 项，$fail 项失败（可能被系统占用）",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            }
+                        }) { Text("永久删除", color = MaterialTheme.colorScheme.error) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { purgePending = false }) { Text("取消") }
+                    }
+                )
+            }
+
             // ---- 危险操作确认 ----
             var approvalOn by remember {
                 mutableStateOf(com.localllm.server.core.AppSettings.toolApprovalEnabled)
