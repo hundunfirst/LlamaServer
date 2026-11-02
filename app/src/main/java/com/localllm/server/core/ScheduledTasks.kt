@@ -15,11 +15,13 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * 定时任务：到点把一条指令排进任务队列，并发通知提醒（点通知打开 App 就开始跑）。
+ * 定时任务：到点由 [ScheduledRunner] 决定怎么跑。
  *
- * 为什么是「排进队列 + 通知」而不是静默跑完：真正无人值守要解决两件事——
- * 后台拉起引擎、以及后台实例与界面实例共用同一份会话存储。这两件没做之前，
- * 谎称"全自动"只会让人以为任务跑了而其实没有。
+ * - 无人值守开着（默认）：后台拉起本地引擎 → 在当前会话里跑一轮 → 发结果通知；
+ * - 关掉：退回老行为，只把指令排进队列 + 发通知，点开 App 才跑。
+ *
+ * 能做到无人值守的两个前提本轮已补上：后台能拉起引擎（ServerService 是前台服务），
+ * 以及后台与界面共用同一份会话（ChatViewModel 改成进程内单例）。
  *
  * 调度用 AlarmManager.setExactAndAllowWhileIdle：本项目 targetSdk=28，
  * Android 12+ 的精确闹钟权限（SCHEDULE_EXACT_ALARM）不适用，不需要额外授权。
@@ -37,7 +39,9 @@ object ScheduledTasks {
         val dailyHour: Int = 8,
         val dailyMinute: Int = 0,
         val enabled: Boolean = true,
-        val lastRunAt: Long = 0
+        val lastRunAt: Long = 0,
+        /** 上一次执行的结果摘要（“完成 · 812 字” / “失败：引擎没起来”），空 = 没跑过 */
+        val lastNote: String = ""
     ) {
         fun describe(): String =
             if (everyMinutes > 0) "每 $everyMinutes 分钟"
@@ -75,7 +79,8 @@ object ScheduledTasks {
                     dailyHour = o.optInt("dailyHour", 8),
                     dailyMinute = o.optInt("dailyMinute", 0),
                     enabled = o.optBoolean("enabled", true),
-                    lastRunAt = o.optLong("lastRunAt")
+                    lastRunAt = o.optLong("lastRunAt"),
+                    lastNote = o.optString("lastNote")
                 )
             }
         }.getOrDefault(emptyList())
@@ -90,9 +95,20 @@ object ScheduledTasks {
                     .put("everyMinutes", t.everyMinutes)
                     .put("dailyHour", t.dailyHour).put("dailyMinute", t.dailyMinute)
                     .put("enabled", t.enabled).put("lastRunAt", t.lastRunAt)
+                    .put("lastNote", t.lastNote)
             )
         }
         runCatching { file(context).writeText(arr.toString()) }
+    }
+
+    /** 记一次执行结果（时间 + 一句话摘要），界面上能直接看到「上次跑了没、结果如何」 */
+    fun markRun(context: Context, taskId: String, note: String, at: Long = System.currentTimeMillis()) {
+        val tasks = load(context)
+        if (tasks.none { it.id == taskId }) return
+        save(
+            context,
+            tasks.map { if (it.id == taskId) it.copy(lastRunAt = at, lastNote = note) else it }
+        )
     }
 
     private fun file(context: Context) = File(context.filesDir, "scheduled_tasks.json")
@@ -137,28 +153,67 @@ object ScheduledTasks {
 
     // ---- 通知 ----
 
-    fun notifyPending(context: Context, task: Task) {
-        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+    private fun ensureChannel(nm: NotificationManager) {
         runCatching {
             nm.createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "定时任务", NotificationManager.IMPORTANCE_DEFAULT).apply {
-                    description = "定时任务到点提醒"
+                    description = "定时任务到点提醒与结果"
                 }
             )
         }
-        val open = PendingIntent.getActivity(
+    }
+
+    private fun openApp(context: Context, task: Task): PendingIntent =
+        PendingIntent.getActivity(
             context, task.id.hashCode(),
             Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+
+    /** 排队提醒：只在「未开启无人值守」时用 */
+    fun notifyPending(context: Context, task: Task) {
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        ensureChannel(nm)
         val n = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_server)
             .setContentTitle("定时任务：${task.name}")
             .setContentText("已排入队列，点开立即执行：${task.prompt.take(40)}")
             .setStyle(NotificationCompat.BigTextStyle().bigText(task.prompt))
-            .setContentIntent(open)
+            .setContentIntent(openApp(context, task))
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .build()
+        runCatching { nm.notify(task.id.hashCode(), n) }
+    }
+
+    /** 后台已经开始跑了：这条通知用来解释「手机为什么突然发热」 */
+    fun notifyRunning(context: Context, task: Task) {
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        ensureChannel(nm)
+        val n = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_server)
+            .setContentTitle("定时任务执行中：${task.name}")
+            .setContentText("后台拉起本地引擎并开始跑这一轮，跑完会通知你")
+            .setContentIntent(openApp(context, task))
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+        runCatching { nm.notify(task.id.hashCode(), n) }
+    }
+
+    /** 跑完了：正文摘要放在通知里，点开进会话看全文 */
+    fun notifyResult(context: Context, task: Task, ok: Boolean, text: String) {
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        ensureChannel(nm)
+        val body = text.trim().ifBlank { if (ok) "已完成（没有正文）" else "失败" }
+        val n = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_server)
+            .setContentTitle((if (ok) "定时任务已完成：" else "定时任务失败：") + task.name)
+            .setContentText(body.take(80))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body.take(1200)))
+            .setContentIntent(openApp(context, task))
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build()
@@ -167,8 +222,8 @@ object ScheduledTasks {
 }
 
 /**
- * 闹钟到点：把任务写进排队文件并提醒；同时把下一次闹钟登记好。
- * 只做「排队 + 通知」——后台真正跑起来要等下一次前台会话读队列。
+ * 闹钟到点：交给 [ScheduledRunner] 决定是「后台直接跑」还是「排队 + 通知」，
+ * 顺手把下一次闹钟登记好（进程被杀也不影响下一次触发）。
  */
 class TaskAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -176,14 +231,12 @@ class TaskAlarmReceiver : BroadcastReceiver() {
         val tasks = ScheduledTasks.load(context)
         val task = tasks.firstOrNull { it.id == id && it.enabled } ?: return
 
-        PendingQueue.append(context, task.prompt)
-        ServerProcessManager.appLog("定时任务到点：${task.name}（已排入队列）")
-        ScheduledTasks.notifyPending(context, task)
-
-        ScheduledTasks.save(
-            context,
-            tasks.map { if (it.id == id) it.copy(lastRunAt = System.currentTimeMillis()) else it }
-        )
+        runCatching { ScheduledRunner.fire(context, task) }
+            .onFailure {
+                ServerProcessManager.appLog("定时任务触发失败（${task.name}）：${it.message}")
+                ScheduledTasks.markRun(context, task.id, "失败：${it.message?.take(60)}")
+            }
+        // 先把下一次登记好：本轮就算出错，明天的闹钟也得在
         ScheduledTasks.scheduleNext(context, task)
     }
 }

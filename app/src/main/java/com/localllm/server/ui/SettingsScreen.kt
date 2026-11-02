@@ -488,13 +488,39 @@ fun SettingsScreen(
             var schedAdding by remember { mutableStateOf(false) }
             SectionHeader(
                 title = "定时任务",
-                help = "到点把一条指令排进任务队列，并发一条通知；点通知打开 App 就开始执行。\n\n" +
-                        "为什么不是完全无人值守：后台拉起本地引擎、以及与界面共用同一份会话存储这两件事" +
-                        "还没做，硬说\"全自动\"只会让你以为跑了而其实没跑。\n\n" +
+                help = "到点由 App 自己执行这条指令，跑完发一条通知（含结果摘要，点开进会话看全文）。\n\n" +
+                        "无人值守开着时：后台会自己拉起本地引擎（前台服务，会看到「推理服务」通知），" +
+                        "跑完如果引擎是这次临时拉起的就顺手关掉；结果追加在你当前所在的会话里，" +
+                        "和手动排队的位置一致，不会另开一条找不到的会话。\n\n" +
+                        "关掉无人值守就退回老样子：只排进队列 + 发通知，点开 App 才开始跑。\n\n" +
                         "另：定时任务会真的耗电——锁屏时大模型跑一轮，手机是明显发热的。",
                 titleStyle = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(top = 12.dp)
             )
+            var schedAutoRun by remember {
+                mutableStateOf(com.localllm.server.core.AppSettings.scheduledAutoRun)
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("无人值守（后台自动执行）", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (schedAutoRun) "到点自己在后台跑完，不用打开 App"
+                        else "到点只排队+通知，点开 App 才跑",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = schedAutoRun,
+                    onCheckedChange = { on ->
+                        schedAutoRun = on
+                        com.localllm.server.core.AppSettings.scheduledAutoRun = on
+                    }
+                )
+            }
             if (schedTasks.isEmpty()) {
                 Text(
                     "还没有定时任务",
@@ -514,6 +540,17 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        // 上次到底跑了没、结果如何：无人值守最怕「以为跑了其实没跑」
+                        if (task.lastRunAt > 0) {
+                            Text(
+                                "上次 " + java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.CHINA)
+                                    .format(java.util.Date(task.lastRunAt)) +
+                                        (if (task.lastNote.isBlank()) "" else " · " + task.lastNote),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                maxLines = 1
+                            )
+                        }
                     }
                     androidx.compose.material3.Switch(
                         checked = task.enabled,
@@ -631,7 +668,10 @@ fun SettingsScreen(
                                         (minutes.toIntOrNull() ?: 60).coerceIn(5, 1440) else 0,
                                     dailyHour = (hourText.toIntOrNull() ?: 8).coerceIn(0, 23),
                                     dailyMinute = (minuteText.toIntOrNull() ?: 0).coerceIn(0, 59),
-                                    enabled = true
+                                    enabled = true,
+                                    // 编辑时保留上次执行记录，别把「跑过没」一起清掉
+                                    lastRunAt = editing?.lastRunAt ?: 0,
+                                    lastNote = editing?.lastNote ?: ""
                                 )
                                 val next = schedTasks.filterNot { it.id == task.id } + task
                                 schedTasks = next

@@ -4,6 +4,10 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 /** 多会话持久化：单文件 JSON，含活动会话指针 */
 object ChatStore {
@@ -130,8 +134,83 @@ object ChatStore {
         val elapsedMs: Long = 0,
         /** 这一轮的实际用 token：输入（含缓存命中）与输出；0 = 老数据 */
         val promptTokens: Int = 0,
-        val outputTokens: Int = 0
+        val outputTokens: Int = 0,
+        /**
+         * 这条消息产生的时间戳。0 = 老数据（升级前没记），界面就不显示时间，
+         * 而不是拿「现在」去冒充——往上翻的时候看到错的时间比没有更糟。
+         */
+        val at: Long = 0
     )
+
+    // ---- 消息时间显示（纯函数，便于单测；now 显式传入，避免测试跟着系统时钟走）----
+
+    private fun sameYear(a: Long, b: Long): Boolean {
+        val ca = Calendar.getInstance().apply { timeInMillis = a }
+        val cb = Calendar.getInstance().apply { timeInMillis = b }
+        return ca.get(Calendar.YEAR) == cb.get(Calendar.YEAR)
+    }
+
+    /** 相差几个自然日（按日历日算，不是按 24 小时算） */
+    private fun dayGap(at: Long, now: Long): Long {
+        fun midnight(t: Long) = Calendar.getInstance().apply {
+            timeInMillis = t
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        return Math.round((midnight(now) - midnight(at)).toDouble() / 86_400_000.0)
+    }
+
+    private fun weekday(at: Long): String =
+        SimpleDateFormat("EEEE", Locale.CHINA).format(Date(at))
+
+    /** 是否同一天（隔日才插一条日期分隔） */
+    internal fun sameDay(a: Long, b: Long): Boolean =
+        a > 0 && b > 0 && dayGap(a, b) == 0L
+
+    /**
+     * 日期分隔条的文字：今天 / 昨天 / 星期几（一周内）/ 几月几日 / 带年份。
+     * 往上翻时先看这一条就知道是哪天，不必逐条读时间戳。
+     */
+    internal fun dayLabel(at: Long, now: Long = System.currentTimeMillis()): String {
+        if (at <= 0) return ""
+        return when {
+            dayGap(at, now) <= 0L -> "今天"
+            dayGap(at, now) == 1L -> "昨天"
+            dayGap(at, now) in 2L..6L -> weekday(at)
+            sameYear(at, now) -> SimpleDateFormat("M月d日", Locale.CHINA).format(Date(at))
+            else -> SimpleDateFormat("yyyy年M月d日", Locale.CHINA).format(Date(at))
+        }
+    }
+
+    /**
+     * 单条消息的时间标签。今天的只给时间，越久远给的日期越完整——
+     * 一条消息上同时显示「昨天 14:23」这种组合，才不用去数日期分隔条。
+     */
+    internal fun stampLabel(at: Long, now: Long = System.currentTimeMillis()): String {
+        if (at <= 0) return ""
+        val hm = SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(at))
+        return when {
+            dayGap(at, now) <= 0L -> hm
+            dayGap(at, now) == 1L -> "昨天 $hm"
+            dayGap(at, now) in 2L..6L -> "${weekday(at)} $hm"
+            sameYear(at, now) -> SimpleDateFormat("M月d日 HH:mm", Locale.CHINA).format(Date(at))
+            else -> SimpleDateFormat("yyyy年M月d日 HH:mm", Locale.CHINA).format(Date(at))
+        }
+    }
+
+    /** 一轮生成耗时：几十秒就写秒，超过一分钟写分秒 */
+    internal fun elapsedLabel(ms: Long): String {
+        if (ms <= 0) return ""
+        val totalSec = Math.round(ms / 1000.0)
+        return if (totalSec < 60) "${totalSec}秒"
+        else {
+            val m = totalSec / 60
+            val s = totalSec % 60
+            if (s == 0L) "${m}分" else "${m}分${s}秒"
+        }
+    }
 
     /**
      * 会话级端点覆盖：null = 跟随全局设置。
@@ -228,6 +307,7 @@ object ChatStore {
                     elapsedMs = m.optLong("elapsedMs"),
                     promptTokens = m.optInt("promptTokens"),
                     outputTokens = m.optInt("outputTokens"),
+                        at = m.optLong("at"),
                         task = m.optJSONObject("task")?.let { t ->
                             TaskState(
                                 goal = t.optString("goal"),
@@ -329,6 +409,7 @@ object ChatStore {
         if (m.elapsedMs > 0) o.put("elapsedMs", m.elapsedMs)
         if (m.promptTokens > 0) o.put("promptTokens", m.promptTokens)
         if (m.outputTokens > 0) o.put("outputTokens", m.outputTokens)
+                if (m.at > 0) o.put("at", m.at)
                 if (m.reasoning != null) o.put("reasoning", m.reasoning)
                 if (m.steps.isNotEmpty()) {
                     val sArr = JSONArray()

@@ -1668,80 +1668,87 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 }
             }
             itemsIndexed(messages) { i, msg ->
-                if (msg.role == "system") {
-                    SummaryCard(msg.content)
-                    return@itemsIndexed
-                }
-                val isUser = msg.role == "user"
-                val waiting = !isUser && streaming && msg.content.isEmpty() && msg.reasoning.isNullOrEmpty()
-                // 思考进行中（有思考文本、正文还没开始）：思考卡显示动态"思考中"
-                val thinking = !isUser && streaming && msg.content.isEmpty() && !msg.reasoning.isNullOrEmpty()
-                // 会话页字号：直接给一套更大的字形，而不是缩放——缩放会让行高与字重脱节
-                androidx.compose.material3.MaterialTheme(
-                    typography = chatTypography(androidx.compose.material3.MaterialTheme.typography)
-                ) {
-                    MessageBubble(
-                        msg = msg,
-                        isUser = isUser,
-                        waiting = waiting,
-                        thinking = thinking,
-                        generating = streaming && i == messages.lastIndex && !isUser,
-                        showStats = (!isUser && i == messages.lastIndex && lastStats != null),
-                        stats = lastStats ?: "",
-                        onResumeTask = { vm.resumeStoppedTask(i) },
-                        showResume = i == lastStoppedIdx,
-                        menuOpen = menuIndex == i,
-                        onMenuOpen = { menuIndex = i },
-                        onMenuClose = { menuIndex = null },
-                        onCopy = {
-                            clipboard.setText(AnnotatedString(msg.content))
-                            menuIndex = null
-                            Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
-                        },
-                        onResend = {
-                            menuIndex = null
-                            if (isUser) vm.resendAt(i)
-                        },
-                        onEdit = {
-                            menuIndex = null
-                            if (isUser) {
-                                editText = msg.content
-                                editingIndex = i
-                            }
-                        },
-                        onDelete = {
-                            menuIndex = null
-                            deleteIndex = i
-                        },
-                        onOpenGenFile = { gf -> previewGenFile = gf },
-                        onUndoFile = { path ->
-                            val msg = vm.undoFileWrite(activeId, path)
-                            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT)
-                                .show()
-                        },
-                        onSaveSkill = {
-                            val msg = vm.saveFlowAsSkill(activeId, i)
-                            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT)
-                                .show()
-                        },
-                        onReadText = { readMsg = msg },
-                        onSpeak = {
-                            val engine = tts
-                            if (engine == null || !ttsReady) {
-                                Toast.makeText(context, "朗读引擎未就绪", Toast.LENGTH_SHORT).show()
-                            } else if (engine.isSpeaking) {
-                                engine.stop()
-                            } else {
-                                engine.language = java.util.Locale.CHINA
-                                engine.speak(
-                                    msg.content.take(4000),
-                                    android.speech.tts.TextToSpeech.QUEUE_FLUSH,
-                                    null,
-                                    "msg_$i"
-                                )
-                            }
+                // 跨天插一条日期分隔：往上翻的时候先看它，不用逐条读时间戳
+                val prevAt = if (i > 0) messages[i - 1].at else 0L
+                Column(Modifier.fillMaxWidth()) {
+                    if (msg.at > 0 && !ChatStore.sameDay(msg.at, prevAt)) {
+                        DayDivider(ChatStore.dayLabel(msg.at))
+                    }
+                    if (msg.role == "system") {
+                        SummaryCard(msg.content)
+                    } else {
+                        val isUser = msg.role == "user"
+                        val waiting = !isUser && streaming && msg.content.isEmpty() && msg.reasoning.isNullOrEmpty()
+                        // 思考进行中（有思考文本、正文还没开始）：思考卡显示动态"思考中"
+                        val thinking = !isUser && streaming && msg.content.isEmpty() && !msg.reasoning.isNullOrEmpty()
+                        // 会话页字号：直接给一套更大的字形，而不是缩放——缩放会让行高与字重脱节
+                        androidx.compose.material3.MaterialTheme(
+                            typography = chatTypography(androidx.compose.material3.MaterialTheme.typography)
+                        ) {
+                            MessageBubble(
+                                msg = msg,
+                                isUser = isUser,
+                                waiting = waiting,
+                                thinking = thinking,
+                                generating = streaming && i == messages.lastIndex && !isUser,
+                                showStats = (!isUser && i == messages.lastIndex && lastStats != null),
+                                stats = lastStats ?: "",
+                                onResumeTask = { vm.resumeStoppedTask(i) },
+                                showResume = i == lastStoppedIdx,
+                                menuOpen = menuIndex == i,
+                                onMenuOpen = { menuIndex = i },
+                                onMenuClose = { menuIndex = null },
+                                onCopy = {
+                                    clipboard.setText(AnnotatedString(msg.content))
+                                    menuIndex = null
+                                    Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                                },
+                                onResend = {
+                                    menuIndex = null
+                                    if (isUser) vm.resendAt(i)
+                                },
+                                onEdit = {
+                                    menuIndex = null
+                                    if (isUser) {
+                                        editText = msg.content
+                                        editingIndex = i
+                                    }
+                                },
+                                onDelete = {
+                                    menuIndex = null
+                                    deleteIndex = i
+                                },
+                                onOpenGenFile = { gf -> previewGenFile = gf },
+                                onUndoFile = { path ->
+                                    val msg = vm.undoFileWrite(activeId, path)
+                                    android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT)
+                                        .show()
+                                },
+                                onSaveSkill = {
+                                    val msg = vm.saveFlowAsSkill(activeId, i)
+                                    android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT)
+                                        .show()
+                                },
+                                onReadText = { readMsg = msg },
+                                onSpeak = {
+                                    val engine = tts
+                                    if (engine == null || !ttsReady) {
+                                        Toast.makeText(context, "朗读引擎未就绪", Toast.LENGTH_SHORT).show()
+                                    } else if (engine.isSpeaking) {
+                                        engine.stop()
+                                    } else {
+                                        engine.language = java.util.Locale.CHINA
+                                        engine.speak(
+                                            msg.content.take(4000),
+                                            android.speech.tts.TextToSpeech.QUEUE_FLUSH,
+                                            null,
+                                            "msg_$i"
+                                        )
+                                    }
+                                }
+                            )
                         }
-                    )
+                    }
                 }
             }
         }
@@ -3019,6 +3026,49 @@ internal fun StepRow(
 // 思考行已并入 StepRow（liveThink）：思考开始即占位，边想边更新，结束就地改标签
 
 @OptIn(ExperimentalFoundationApi::class)
+/** 日期分隔条：跨天时插一条，往上翻先看它就知道是哪天 */
+@Composable
+private fun DayDivider(label: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .background(
+                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                    RoundedCornerShape(10.dp)
+                )
+                .padding(horizontal = 10.dp, vertical = 2.dp)
+        )
+    }
+}
+
+/** 消息时间：一条消息一行，用户消息靠右、回复靠左；老数据（at=0）不显示 */
+@Composable
+private fun MsgStamp(msg: ChatStore.Msg, isUser: Boolean) {
+    if (msg.at <= 0) return
+    val label = ChatStore.stampLabel(msg.at) +
+            (if (!isUser && msg.elapsedMs > 0) " · 用时 ${ChatStore.elapsedLabel(msg.elapsedMs)}" else "")
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 4.dp, top = 2.dp),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+        )
+    }
+}
+
 @Composable
 private fun MessageBubble(
     msg: ChatStore.Msg,
@@ -3566,6 +3616,7 @@ private fun MessageBubble(
                         modifier = Modifier.padding(start = 4.dp, top = 2.dp)
                     )
                 }
+                MsgStamp(msg, isUser)
             }
         }
     }

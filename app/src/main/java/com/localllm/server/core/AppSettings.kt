@@ -803,6 +803,15 @@ object AppSettings {
         set(value) = prefs.edit().putBoolean("keep_awake_enabled", value).apply()
 
     /**
+     * 定时任务无人值守：到点自己拉起引擎、自己跑完、发结果通知。
+     * 关掉退回老行为——只排进队列 + 发通知，点开 App 才跑。
+     * 默认开：“定时任务”就该到点自己跑；代价是锁屏跑一轮模型，手机明显发热。
+     */
+    var scheduledAutoRun: Boolean
+        get() = prefs.getBoolean("scheduled_auto_run", true)
+        set(value) = prefs.edit().putBoolean("scheduled_auto_run", value).apply()
+
+    /**
      * 服务是否处于「应该在跑」的状态。
      * 进程被系统杀掉后 Service 会被重建（此时 intent 为 null），靠这个标记区分
      * 「用户主动启动过」和「用户已经主动停止」——后者不该自己复活。

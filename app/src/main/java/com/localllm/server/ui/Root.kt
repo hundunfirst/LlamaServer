@@ -32,13 +32,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
 
 private data class Tab(val label: String, val icon: ImageVector)
 
 @Composable
 fun Root(vm: MainViewModel) {
-    val chatVm: ChatViewModel = viewModel()
+    // 进程内单例，而不是 viewModel()（Activity 作用域）：定时任务在后台跑的那一轮
+    // 必须和界面写同一份会话，否则两边各存一份，谁后写谁覆盖
+    val app = androidx.compose.ui.platform.LocalContext.current.applicationContext as android.app.Application
+    val chatVm: ChatViewModel = remember { ChatViewModel.shared(app) }
     val tabs = listOf(
         Tab("聊天", Icons.AutoMirrored.Filled.Chat),
         Tab("状态", Icons.Default.PlayArrow),
