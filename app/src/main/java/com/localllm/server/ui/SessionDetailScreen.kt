@@ -57,7 +57,7 @@ internal fun SessionDetailDialog(
     onOpenGenFile: (ChatStore.GenFile) -> Unit,
 ) {
     var tab by remember { mutableIntStateOf(0) }
-    val labels = listOf("轨迹", "改动", "文件", "进度", "上下文")
+    val labels = listOf("轨迹", "改动", "文件", "进度", "上下文", "终端")
 
     val turns = remember(session.messages) { groupTurns(session.messages) }
     val totalMs = session.messages.sumOf { it.elapsedMs }
@@ -70,6 +70,18 @@ internal fun SessionDetailDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
+        // 弹窗是独立窗口，系统默认用 ADJUST_PAN：键盘一弹整个窗口被顶上去，
+        // 标题/统计/标签栏会一起出屏（终端页输入时特别明显）。改成 RESIZE，
+        // 窗口高度缩小，内容按剩余空间重排——上面的栏就留在原位了。
+        val dialogView = androidx.compose.ui.platform.LocalView.current
+        androidx.compose.runtime.DisposableEffect(Unit) {
+            val window = (dialogView.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window
+            val before = window?.attributes?.softInputMode
+            window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            onDispose {
+                if (window != null && before != null) window.setSoftInputMode(before)
+            }
+        }
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(modifier = Modifier.fillMaxSize()) {
                 // 顶栏
@@ -124,12 +136,21 @@ internal fun SessionDetailDialog(
                     }
                 }
 
-                when (tab) {
-                    0 -> TurnTrail(turns)
-                    1 -> ChangeList(files, onOpenGenFile)
-                    2 -> FileList(files, onOpenGenFile)
-                    3 -> ProgressList(turns)
-                    else -> ContextTab(usage, contextLimit, turns)
+                // 内容区必须只吃「剩下的高度」：终端页自己 fillMaxSize，键盘弹起时
+                // 会把上面的标题/统计/标签栏一起顶出屏幕（实测）
+                androidx.compose.foundation.layout.Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    when (tab) {
+                        0 -> TurnTrail(turns)
+                        1 -> ChangeList(files, onOpenGenFile)
+                        2 -> FileList(files, onOpenGenFile)
+                        3 -> ProgressList(turns)
+                        4 -> ContextTab(usage, contextLimit, turns)
+                        else -> TerminalTab(session.id)
+                    }
                 }
             }
         }
