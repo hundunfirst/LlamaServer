@@ -40,8 +40,11 @@ object BashTool {
                             "所以命令里直接用文件名即可（如 python3 x.py、cat a.csv）；" +
                             "要读写用户文件请用 file_* 工具，不要 cd /root 或 ls / 去找用户的文件。**" +
                             "命令以 root 用户执行；不要用它做用户没要求的破坏性操作。" +
-                            "超时会杀掉并重建会话（状态丢失），所以别跑长驻前台进程；后台任务请把输出重定向到文件" +
-                            "（如 `node server.js > /tmp/srv.log 2>&1 &`），否则它的输出会混进后续命令。" +
+                            "超时会杀掉并重建会话（状态丢失），所以别跑长驻前台进程。" +
+                            "**后台任务这么管**：启动时把输出重定向到文件（如 `node server.js > /tmp/srv.log 2>&1 &`）；" +
+                            "`jobs -l` 看还在跑的有哪些（含 pid）；`tail -n 50 /tmp/srv.log` 看它的输出；" +
+                            "`kill <pid>` 停掉（这条会弹框让用户确认，属于危险操作）。" +
+                            "不要用 `nohup` 或直接把输出丢给会话（不重定向的话它的输出会混进你后面的每条命令）。" +
                             "首次调用会自动准备环境（解压 + 安装基础工具，可能几分钟，之后即用即走）。"
                 )
                 put(
@@ -133,8 +136,9 @@ object BashTool {
         if (r.exitCode != 0 && !r.timedOut && !r.died) sb.append("【命令退出码 ${r.exitCode}】\n")
         // 后台进程必须显式告诉模型：它们继承的是这条会话的 stdout，输出会混进后续命令
         r.backgroundJobs?.let { jobs ->
-            sb.append("【后台进程仍在运行：pid $jobs —— 它的输出会混进后面的命令，")
-                .append("请把输出重定向到文件（如 > /tmp/xxx.log 2>&1）】\n")
+            sb.append("【后台进程仍在运行：pid $jobs —— 它的输出会混进后面的命令。")
+                .append("看全部：`jobs -l`；看输出：启动时重定向到文件再 `tail -n 50 文件`；")
+                .append("停掉：`kill <pid>`（会弹确认框）】\n")
         }
         sb.append(r.output)
         if (r.output.isBlank()) sb.append("（无输出）")

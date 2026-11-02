@@ -88,6 +88,15 @@ object PersistentShell {
     /** 主动清空：下次调用会从工作目录重新开始 */
     fun reset(sid: String) = close(sid)
 
+    /**
+     * 中断当前正在跑的命令。
+     *
+     * sh 没有「打断前台命令但保留会话」的可靠办法（发 SIGINT 给进程组会把 shell 自己也带上，
+     * 交给后台再 wait 又会让 cd/export 落进子 shell），所以直接杀整棵 proot 树：
+     * 下一轮自动重建，cd/env 状态丢失——这一点在界面上会明确写出来。
+     */
+    fun abort(sid: String) = close(sid)
+
     fun closeAll() {
         sessions.keys.toList().forEach { close(it) }
     }
