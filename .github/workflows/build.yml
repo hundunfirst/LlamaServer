@@ -15,6 +15,10 @@ on:
 jobs:
   engine-and-apk:
     runs-on: ubuntu-latest
+    env:
+      # 引擎基线：与 docs/ENVIRONMENT.md 一致。缓存 key 也用它，换引擎自动失效。
+      # 2026-11-02 起跟到上游 master 的 4e910a86e（v0.8.0 之后 75 个提交）；上游尚未发新 tag。
+      ENGINE_PIN: 4e910a86e8e8818e3619738ae372563a4e0cb42b
     steps:
       - uses: actions/checkout@v4
 
@@ -22,6 +26,8 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
+          # 依赖包走缓存：原来每次都要重新下 AGP/Compose 那一坨
+          cache: gradle
 
       - name: Setup Android SDK/NDK
         uses: android-actions/setup-android@v3
@@ -48,19 +54,17 @@ jobs:
           # --install 要的是构建目录（含 cmake_install.cmake），不是 CMAKE_INSTALL_PREFIX
           cmake --install opencl-deps/icd-build
 
-      - name: Checkout pinned llama.cpp (v0.8.0)
+      - name: Checkout pinned llama.cpp (4e910a86e)
         run: |
           # 必须锁版本：以前直接 clone master，CI 打出来的引擎和本地/发行版永远不是同一个。
-          # v0.8.0 = 8642541b2，与 docs/ENVIRONMENT.md 保持一致（升级时两处一起改）。
-          PIN=8642541b255bfb5dc39cd351a178be09013a55d6
+          # 上游还没发新 tag，所以按 commit 锁；GitHub 支持按 sha 浅取，
+          # 拿到的一直是这一个提交，不会因为 master 前进而漂移（也不会因此让 CI 变红）。
           git init -q llama.cpp
           git -C llama.cpp remote add origin https://github.com/ggml-org/llama.cpp.git
-          # v0.8.0 是 annotated tag，按 tag 名取再 checkout，避免 FETCH_HEAD 指到 tag 对象
-          git -C llama.cpp fetch --depth 1 origin tag v0.8.0
-          git -C llama.cpp checkout -q v0.8.0
-          # 校验 tag 没被移动：拿到别的提交就说明上游动了 tag，宁可红在这一步
-          test "$(git -C llama.cpp rev-parse HEAD)" = "$PIN" \
-            || { echo "::error::v0.8.0 tag 指向了 $PIN 以外的提交"; exit 1; }
+          git -C llama.cpp fetch --depth 1 origin "$ENGINE_PIN"
+          git -C llama.cpp checkout -q FETCH_HEAD
+          test "$(git -C llama.cpp rev-parse HEAD)" = "$ENGINE_PIN" \
+            || { echo "::error::取到的提交与 ENGINE_PIN 不一致"; exit 1; }
           git -C llama.cpp --no-pager log -1 --format='引擎基线: %h %s'
 
       - name: Apply project engine patches (lazy experts)
@@ -74,6 +78,20 @@ jobs:
             git -C llama.cpp apply --verbose "$GITHUB_WORKSPACE/$p"
           done
           git -C llama.cpp --no-pager diff --stat
+
+      - name: Cache engine build dirs
+        # 引擎全量编译约 9 分钟。源码被钉在固定的 tag、补丁也固定，所以构建目录可以整套复用：
+        # 命中后 ninja 发现没有任何文件变过，直接跳到产物。key 里带 commit + 补丁内容，
+        # 源码或补丁一改自动换新缓存，不会拿错对象。
+        # CMakeCache 里存的是绝对路径，GitHub runner 的工作区路径每次相同，因此能直接命中。
+        uses: actions/cache@v4
+        with:
+          path: |
+            llama.cpp/build-cpu
+            llama.cpp/build-ocl
+          key: engine-${{ env.ENGINE_PIN }}-${{ hashFiles('scripts/patches/*.patch') }}-v1
+          restore-keys: |
+            engine-${{ env.ENGINE_PIN }}-
 
       - name: Build engines (cpu + opencl, 16KB aligned)
         env:
