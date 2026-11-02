@@ -48,11 +48,32 @@ jobs:
           # --install 要的是构建目录（含 cmake_install.cmake），不是 CMAKE_INSTALL_PREFIX
           cmake --install opencl-deps/icd-build
 
-      - name: Checkout pinned llama.cpp
+      - name: Checkout pinned llama.cpp (v0.8.0)
         run: |
-          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp
-          # 锁定版本时取消注释并填写（与 docs/ENVIRONMENT.md 保持一致）
-          # git -C llama.cpp fetch --depth 1 origin <commit> && git -C llama.cpp checkout <commit>
+          # 必须锁版本：以前直接 clone master，CI 打出来的引擎和本地/发行版永远不是同一个。
+          # v0.8.0 = 8642541b2，与 docs/ENVIRONMENT.md 保持一致（升级时两处一起改）。
+          PIN=8642541b255bfb5dc39cd351a178be09013a55d6
+          git init -q llama.cpp
+          git -C llama.cpp remote add origin https://github.com/ggml-org/llama.cpp.git
+          # v0.8.0 是 annotated tag，按 tag 名取再 checkout，避免 FETCH_HEAD 指到 tag 对象
+          git -C llama.cpp fetch --depth 1 origin tag v0.8.0
+          git -C llama.cpp checkout -q v0.8.0
+          # 校验 tag 没被移动：拿到别的提交就说明上游动了 tag，宁可红在这一步
+          test "$(git -C llama.cpp rev-parse HEAD)" = "$PIN" \
+            || { echo "::error::v0.8.0 tag 指向了 $PIN 以外的提交"; exit 1; }
+          git -C llama.cpp --no-pager log -1 --format='引擎基线: %h %s'
+
+      - name: Apply project engine patches (lazy experts)
+        run: |
+          # 这两个补丁给 App 的「MoE 按需读」用：ServerProcessManager 只有在引擎带补丁时
+          # 才设 LLAMA_LAZY_TENSORS / LLAMA_LAZY_PREFETCH。不打也能跑，但会退化成保守路径，
+          # CI 产物就与本地行为不一致了。
+          for p in scripts/patches/0001-lazy-expert-tensors.patch \
+                   scripts/patches/0002-moe-expert-prefetch.patch; do
+            echo "applying $p"
+            git -C llama.cpp apply --verbose "$GITHUB_WORKSPACE/$p"
+          done
+          git -C llama.cpp --no-pager diff --stat
 
       - name: Build engines (cpu + opencl, 16KB aligned)
         env:
@@ -102,6 +123,21 @@ jobs:
             "built_at": "$(date -Iseconds)"
           }
           EOF
+
+      - name: Verify engine carries the lazy-expert patch
+        run: |
+          # 补丁 apply 成功 ≠ 编进产物（上游可能改了实现，getenv 那行被挪走/裁掉）。
+          # 这里直接查二进制里的环境变量名，红在 CI 比红在装机后好。
+          n=0
+          for so in app/src/main/assets/engines/*/libggml-cpu.so; do
+            [ -f "$so" ] || continue
+            n=$((n + 1))
+            # grep -a 直接扫二进制里的字符串（不用 strings：它在某些镜像上不一定有）
+            grep -a -q 'LLAMA_LAZY_PREFETCH' "$so" \
+              || { echo "::error::$so 里没有 LLAMA_LAZY_PREFETCH，补丁没编进去"; exit 1; }
+          done
+          [ "$n" -gt 0 ] || { echo "::error::没找到任何 libggml-cpu.so"; exit 1; }
+          echo "ok：$n 个 libggml-cpu.so 都带 LLAMA_LAZY_PREFETCH"
 
       - name: Build APK (engines already staged in assets)
         run: ./gradlew assembleDebug assembleRelease

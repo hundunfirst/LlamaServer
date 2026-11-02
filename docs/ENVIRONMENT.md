@@ -38,12 +38,18 @@
 
 | 依赖 | 版本/commit | 获取方式 |
 |---|---|---|
-| **llama.cpp** | **620d2225c**（v0.7.0，2026-10-15，ggml 0.27.0） | 浅克隆于 `llama.cpp/`，已 checkout 到 tag `v0.7.0` |
+| **llama.cpp** | **8642541b2**（v0.8.0，2026-10-28） | 浅克隆于 `llama.cpp/`，checkout 到 tag `v0.8.0`；再加 `scripts/patches/` 两个自有补丁（见下） |
 | OpenCL-Headers | 30bc20a | 浅克隆于 `opencl-deps/OpenCL-Headers` |
 | OpenCL-ICD-Loader | 5192c84 | 浅克隆于 `opencl-deps/OpenCL-ICD-Loader`，NDK 交叉编译产出 `libOpenCL.so`（仅链接用，不进 APK） |
 | 引擎产物 | strip 后：cpu 14.7MB（8 个文件）/ opencl 18.2MB（9 个文件） | 见下方构建命令，`scripts/build-engine.ps1` 同步产出到 `app/src/main/assets/engines/{cpu,opencl}` |
 
 > llama.cpp 无独立版本号，**以 commit 为准**；升级后回填此表。
+>
+> 自有补丁（必须打在引擎源码上，`git apply` 顺序不能变）：
+> `scripts/patches/0001-lazy-expert-tensors.patch`（`src/llama-model-loader.{cpp,h}`，MoE 权重按需 mmap 读，环境变量 `LLAMA_LAZY_TENSORS`）、
+> `scripts/patches/0002-moe-expert-prefetch.patch`（`ggml/src/ggml-cpu/ggml-cpu.c`，专家预取，环境变量 `LLAMA_LAZY_PREFETCH`）。
+> App 侧 `ServerProcessManager` 只在判断引擎带补丁时才设这两个变量，所以**引擎不带补丁也能跑，但会退化成保守的内存/ctx 策略**。
+> `.github/workflows/build.yml` 已锁到 v0.8.0 并 apply 这两个补丁，并用 `strings | grep LLAMA_LAZY_PREFETCH` 校验确实编进了产物——升级时这三处（本表、workflow 的 PIN、补丁）一起改。
 
 ## 五、引擎构建命令（权威副本）
 
