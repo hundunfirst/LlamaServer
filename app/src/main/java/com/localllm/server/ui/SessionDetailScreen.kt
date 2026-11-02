@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.localllm.server.core.ChatStore
+import com.localllm.server.core.PersistentShell
 
 /**
  * 会话详情：把一条会话里散落的数据集中看。
@@ -107,6 +108,8 @@ internal fun SessionDetailDialog(
                     DetailStat(files.size.toString(), "改动文件", Modifier.weight(1f))
                 }
 
+                ShellSessionRow(session.id)
+
                 ScrollableTabRow(
                     selectedTabIndex = tab,
                     edgePadding = 12.dp,
@@ -129,6 +132,51 @@ internal fun SessionDetailDialog(
                     else -> ContextTab(usage, contextLimit, turns)
                 }
             }
+        }
+    }
+}
+
+// ---- 持久 shell 会话 ----
+
+/**
+ * run_bash 的常驻 shell 是**会话级**的资源（cd/env/函数都留在里面），
+ * 但它没有任何界面痕迹：模型跑乱之后用户想「重来一次」只能靠模型自己带 reset。
+ * 这里给一行状态 + 一个清空按钮（清空后下一次 run_bash 从工作目录重新开始）。
+ */
+@Composable
+private fun ShellSessionRow(sid: String) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    var alive by remember(sid) { androidx.compose.runtime.mutableStateOf(PersistentShell.hasSession(sid)) }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("Linux shell 会话", style = MaterialTheme.typography.bodySmall)
+            Text(
+                if (alive) "运行中：cd / export / 后台任务都留在里面" else "未建立（下次 run_bash 时新建，从工作目录开始）",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (alive) {
+            Text(
+                "清空",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier
+                    .clickable {
+                        PersistentShell.reset(sid)
+                        alive = PersistentShell.hasSession(sid)
+                        android.widget.Toast.makeText(
+                            ctx, "已清空 shell 会话（cd / env / 后台任务都没了）",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
+            )
         }
     }
 }

@@ -32,11 +32,16 @@ cat > "$IN" <<'EOF'
 {
 cd /tmp && export L2S_X=persist-ok
 } </dev/null
-printf '__L2S_END_t1__ %s %s\n' "$?" "$PWD"
+__l2s_rc=$?; printf '__L2S_END_t1__|%s|%s|%s\n' "$__l2s_rc" "$PWD" "$(jobs -p | tr '\n' ',')"
 {
+sleep 30 &
 pwd; echo "X=${L2S_X:-MISSING}"; cat; echo "after-cat"
 } </dev/null
-printf '__L2S_END_t2__ %s %s\n' "$?" "$PWD"
+__l2s_rc=$?; printf '__L2S_END_t2__|%s|%s|%s\n' "$__l2s_rc" "$PWD" "$(jobs -p | tr '\n' ',')"
+{
+true
+} </dev/null
+__l2s_rc=$?; printf '__L2S_END_t3__|%s|%s|%s\n' "$__l2s_rc" "$PWD" "$(jobs -p | tr '\n' ',')"
 EOF
 
 export PROOT_LOADER=$NATIVE/libproot-loader.so

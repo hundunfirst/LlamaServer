@@ -1069,7 +1069,9 @@ object ServerProcessManager {
             "slot release" to "请求完成（slot 释放）",
             "llama_model_loader: failed to load model" to "模型加载失败（引擎可能不支持该量化格式：建议换 Q4/Q5 的 GGUF，或升级引擎）",
             "failed to create llama_context" to "上下文/内存不足：请调小该模型的上下文长度后重试",
-            "unknown model architecture" to "引擎不支持该模型架构（需要升级引擎）",
+            // 「升级引擎」是误导：查过上游 llama.cpp（含最新 master）只实现了 sensenova_u1，
+            // 没有 sensenova_loop 这类新架构；升级本 App 的引擎不会让模型跑起来
+            "unknown model architecture" to "引擎不支持该模型架构：上游 llama.cpp 还没实现它，换模型比升级引擎有用",
             "quantized V cache requires flash_attn" to "错误：量化 V 缓存需要开启 Flash Attention（设置里把 FA 改为开/自动）",
             "load_hparams: more info" to "（可忽略）模型超参提示"
         )

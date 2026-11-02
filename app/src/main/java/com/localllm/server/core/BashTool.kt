@@ -131,6 +131,11 @@ object BashTool {
         }
         if (r.timedOut) sb.append("【命令超时（${timeout}s）：已终止并重建 shell，cd/env 状态已丢失】\n")
         if (r.exitCode != 0 && !r.timedOut && !r.died) sb.append("【命令退出码 ${r.exitCode}】\n")
+        // 后台进程必须显式告诉模型：它们继承的是这条会话的 stdout，输出会混进后续命令
+        r.backgroundJobs?.let { jobs ->
+            sb.append("【后台进程仍在运行：pid $jobs —— 它的输出会混进后面的命令，")
+                .append("请把输出重定向到文件（如 > /tmp/xxx.log 2>&1）】\n")
+        }
         sb.append(r.output)
         if (r.output.isBlank()) sb.append("（无输出）")
         if (r.truncated) sb.append("\n…（输出过多已截断：需要看全部就让它 grep / head / tail 缩小范围）")

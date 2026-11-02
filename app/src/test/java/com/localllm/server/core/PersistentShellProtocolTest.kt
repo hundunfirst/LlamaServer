@@ -7,6 +7,7 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 
 /**
@@ -53,8 +54,10 @@ class PersistentShellProtocolTest {
 
         private val out = proc.outputStream.bufferedWriter(Charsets.UTF_8)
 
-        /** 发一条命令，返回 (退出码, PWD, 输出) */
-        fun run(command: String, token: String, timeoutMs: Long = 15_000): Triple<Int, String?, String> {
+        data class Out(val exitCode: Int, val pwd: String?, val jobs: String?, val text: String)
+
+        /** 发一条命令，返回（退出码, PWD, 后台 pid, 输出） */
+        fun run(command: String, token: String, timeoutMs: Long = 15_000): Out {
             out.write(ShellProtocol.buildScript(command, null, token))
             out.flush()
             val sb = StringBuilder()
@@ -66,7 +69,9 @@ class PersistentShellProtocolTest {
                     ?: throw AssertionError("等待哨兵超时：$command")
                 assertTrue("shell 意外退出：$command", line != "\u0000EOF")
                 val sent = ShellProtocol.parseSentinel(line, token)
-                if (sent != null) return Triple(sent.first, sent.second, sb.toString().trim())
+                if (sent != null) {
+                    return Out(sent.exitCode, sent.pwd, sent.backgroundJobs, sb.toString().trim())
+                }
                 sb.append(line).append('\n')
             }
         }
@@ -83,14 +88,14 @@ class PersistentShellProtocolTest {
         assumeTrue("宿主没有可用的 bash，跳过", bash != null)
         MiniSession(bash!!).use { s ->
             val r1 = s.run("cd /tmp && export L2S_MARK=持久", "t1")
-            assertEquals(0, r1.first)
-            assertEquals("/tmp", r1.second)
+            assertEquals(0, r1.exitCode)
+            assertEquals("/tmp", r1.pwd)
 
             // 第二次调用既没有 cd 也没有 export：状态必须还在
             val r2 = s.run("pwd; echo \${L2S_MARK:-missing}", "t2")
-            assertEquals(0, r2.first)
-            assertEquals("/tmp", r2.second)
-            assertTrue("export 没保留：${r2.third}", r2.third.contains("持久"))
+            assertEquals(0, r2.exitCode)
+            assertEquals("/tmp", r2.pwd)
+            assertTrue("export 没保留：${r2.text}", r2.text.contains("持久"))
         }
     }
 
@@ -101,8 +106,8 @@ class PersistentShellProtocolTest {
         MiniSession(bash!!).use { s ->
             // cat / read 若真读到我们的哨兵行，就会吞掉结束标记、这里必然超时
             val r = s.run("cat; read -r x || true; echo done", "t3", timeoutMs = 8_000)
-            assertEquals(0, r.first)
-            assertTrue(r.third.contains("done"))
+            assertEquals(0, r.exitCode)
+            assertTrue(r.text.contains("done"))
         }
     }
 
@@ -112,9 +117,29 @@ class PersistentShellProtocolTest {
         assumeTrue("宿主没有可用的 bash，跳过", bash != null)
         MiniSession(bash!!).use { s ->
             val r = s.run("echo before; nosuchcommand_xyz 2>/dev/null; false", "t4")
-            assertEquals(1, r.first)
-            assertTrue(r.third.contains("before"))
-            assertNotNull(r.second)
+            assertEquals(1, r.exitCode)
+            assertTrue(r.text.contains("before"))
+            assertNotNull(r.pwd)
+        }
+    }
+
+    @Test
+    fun `后台进程的 pid 会被回报_没有就是 null`() {
+        val bash = findBash()
+        assumeTrue("宿主没有可用的 bash，跳过", bash != null)
+        MiniSession(bash!!).use { s ->
+            // 后台任务的输出会混进后续命令，所以必须让调用方知道还有谁在跑
+            val busy = s.run("sleep 30 &", "t5")
+            assertEquals(0, busy.exitCode)
+            assertNotNull("应当回报后台 pid：${busy.jobs}", busy.jobs)
+
+            // 持久会话里它是真的还在跑——再下一条命令依然要报（这正是该有的行为）
+            val still = s.run("echo hi", "t6")
+            assertNotNull("后台任务还在跑，应当继续回报：${still.jobs}", still.jobs)
+            // wait 收干净之后就不再报了
+            s.run("wait", "t7", timeoutMs = 45_000)
+            val idle = s.run("echo bye", "t8")
+            assertNull("没有后台进程时不该有 pid：${idle.jobs}", idle.jobs)
         }
     }
 }

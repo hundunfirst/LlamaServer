@@ -55,6 +55,8 @@ object PersistentShell {
         val timedOut: Boolean = false,
         /** shell 自己退出了（比如命令里有 exit）：下一轮会重建，状态已丢 */
         val died: Boolean = false,
+        /** **这条命令期间**仍在跑的后台进程 pid（逗号分隔）；null = 没有 */
+        val backgroundJobs: String? = null,
         /** 输出被截断或丢行 */
         val truncated: Boolean = false,
     )
@@ -130,6 +132,7 @@ object PersistentShell {
             val out = StringBuilder()
             var exitCode = 0
             var pwd: String? = null
+            var jobs: String? = null
             var timedOut = false
             var died = false
             var truncated = false
@@ -159,8 +162,9 @@ object PersistentShell {
                         is Ev.Line -> {
                             val sentinel = ShellProtocol.parseSentinel(ev.text, token)
                             if (sentinel != null) {
-                                exitCode = sentinel.first
-                                pwd = sentinel.second
+                                exitCode = sentinel.exitCode
+                                pwd = sentinel.pwd
+                                jobs = sentinel.backgroundJobs
                                 break
                             }
                             if (out.length < MAX_OUTPUT_CHARS) {
@@ -199,6 +203,7 @@ object PersistentShell {
                 rebuilt = created && hadBefore,
                 timedOut = timedOut,
                 died = died && !timedOut,
+                backgroundJobs = jobs,
                 truncated = truncated,
             )
         } finally {
@@ -268,10 +273,15 @@ object PersistentShell {
  * {
  * <用户命令>
  * } </dev/null
- * printf '__L2S_END_<token>__ %s %s\n' "$?" "$PWD"
+ * __l2s_rc=$?; printf '__L2S_END_<token>|%s|%s|%s\n' "$__l2s_rc" "$PWD" "$(jobs -p | tr '\n' ',')"
  * ```
+ *
+ * 用 `|` 分隔而不是空格：PWD 里可能有空格（"My Documents"），按空格切会把目录切碎。
+ * 第三个字段是仍在跑的后台进程 pid —— 它们的输出会混进后续命令，必须让模型知道。
  */
 internal object ShellProtocol {
+
+    internal data class Sentinel(val exitCode: Int, val pwd: String?, val backgroundJobs: String?)
 
     internal fun sentinelPrefix(token: String): String = "__L2S_END_${token}__"
 
@@ -284,18 +294,20 @@ internal object ShellProtocol {
         }
         // { } 而不是 ( )：子 shell 里的 cd/export 不回落到会话，持久化就白做了
         append("{\n").append(command.trimEnd()).append("\n} </dev/null\n")
-        // {\$?} 是 shell 的退出码占位（Kotlin 里写成 \$ 以免被当成模板）
-        append("printf '").append(sentinelPrefix(token)).append(" %s %s\\n' \"\$?\" \"\$PWD\"\n")
+        // \$ 是 shell 的变量/命令替换占位（Kotlin 里转义，免得被当成模板）
+        append("__l2s_rc=\$?; printf '").append(sentinelPrefix(token))
+            .append("|%s|%s|%s\\n' \"\$__l2s_rc\" \"\$PWD\" \"\$(jobs -p | tr '\\n' ',')\"\n")
     }
 
-    /** 解析哨兵行 → (退出码, 当时 PWD)；不是哨兵返回 null */
-    internal fun parseSentinel(line: String, token: String): Pair<Int, String?>? {
-        val prefix = sentinelPrefix(token)
+    /** 解析哨兵行；不是哨兵返回 null */
+    internal fun parseSentinel(line: String, token: String): Sentinel? {
+        val prefix = sentinelPrefix(token) + "|"
         if (!line.startsWith(prefix)) return null
-        val rest = line.substring(prefix.length).trim()
-        val sp = rest.indexOf(' ')
-        val codeText = if (sp < 0) rest else rest.substring(0, sp)
-        val pwd = if (sp < 0) null else rest.substring(sp + 1).trim().ifEmpty { null }
-        return (codeText.toIntOrNull() ?: 0) to pwd
+        val parts = line.substring(prefix.length).split('|')
+        val code = parts.getOrNull(0)?.trim()?.toIntOrNull() ?: 0
+        val pwd = parts.getOrNull(1)?.trim()?.ifEmpty { null }
+        val jobs = parts.getOrNull(2)?.trim()?.trim(',')?.ifEmpty { null }
+        return Sentinel(code, pwd, jobs)
     }
 }
+
