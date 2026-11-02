@@ -29,9 +29,10 @@ object BashTool {
                     "description",
                     "在手机内置的 Linux 环境（Ubuntu）里执行一条 shell 命令并返回输出。" +
                             "用于：跑单元测试 / lint / 脚本、执行 git 操作、node 运行代码、看报错定位问题。" +
-                            "**注意：这是与手机文件系统分开的 Linux 环境，home 是 /root，里面没有用户的文档。" +
-                            "要在用户的工作目录里找/读/写文件，请用 file_list / file_read / file_write，" +
-                            "不要用 cd /root、ls 之类去猜用户的文件在哪。**" +
+                            "**注意：这是与手机文件系统分开的 Linux 环境（home 是 /root），但用户的工作目录已经" +
+                            "挂在这里的 /storage/emulated/0 下，且默认工作目录就是这个工作目录——" +
+                            "所以命令里直接用文件名即可（如 python3 x.py、cat a.csv）；" +
+                            "要读写用户文件请用 file_* 工具，不要 cd /root 或 ls / 去找用户的文件。**" +
                             "命令以 root 用户执行；不要用它做用户没要求的破坏性操作。" +
                             "首次调用会自动准备环境（解压 + 安装基础工具，可能几分钟，之后即用即走）。"
                 )
@@ -71,7 +72,10 @@ object BashTool {
         val command = args.optString("command").trim()
         if (command.isBlank()) return "错误：command 不能为空"
         val timeout = args.optInt("timeout", 60).coerceIn(5, 600)
-        val cwd = args.optString("cwd").ifBlank { "/root" }
+        // 工作目录优先：user 的文件在工作目录里，而 bash 默认 cwd 是容器 home(/root)，
+        // 两边不是同一棵树——不设成工作目录，模型就会用同一个文件名在 python 里报 FileNotFound。
+        val workDir = LinuxRuntime.workdirAbsPath(context)
+        val cwd = args.optString("cwd").ifBlank { workDir ?: "/root" }
 
         // Linux 环境 bind 了 /storage（全盘访问），没授权的话命令会在看不到文件的地方跑，先拦住
         val granted = androidx.core.content.ContextCompat.checkSelfPermission(
@@ -88,7 +92,9 @@ object BashTool {
         val r = LinuxRuntime.exec(context, command, cwd = cwd, timeoutMs = timeout * 1000L)
         val out = if (r.output.length > 6000)
             r.output.take(6000) + "\n…（输出过长已截断，共 ${r.output.length} 字符）" else r.output
-        return if (r.exitCode == 0) out
+        // 抬头告诉模型「你现在站在哪」：小模型不会自己 pwd，也就不知道相对路径指的是哪
+        val where = "（工作目录：$cwd）\n"
+        return where + if (r.exitCode == 0) out
         else "【命令退出码 ${r.exitCode}】\n" + out
     }
 }
