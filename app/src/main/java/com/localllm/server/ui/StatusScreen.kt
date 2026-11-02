@@ -147,20 +147,16 @@ fun StatusScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 }
                 val effCtx = com.localllm.server.core.AppSettings.effectiveCtx(selectedModel)
                 val effOut = com.localllm.server.core.AppSettings.effectiveOut(selectedModel)
-                val ctxOver = com.localllm.server.core.AppSettings.localModelParam(selectedModel)?.ctx != null
-                val outOver = com.localllm.server.core.AppSettings.localModelParam(selectedModel)?.out != null
                 fun k(n: Int) = if (n >= 1024) "${n / 1024}K" else "$n"
                 Text(
-                    "生效参数：上下文 ${k(effCtx)}${if (ctxOver) "（模型级）" else ""}" +
-                            " · 输出上限 ${k(effOut)}${if (outOver) "（模型级）" else ""}",
+                    "生效参数：上下文 ${k(effCtx)} · 输出上限 ${k(effOut)}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 val effMmproj = com.localllm.server.core.AppSettings.effectiveMmproj(selectedModel)
                 val mmprojName = projectors.find { it.file.absolutePath == effMmproj }?.name
                 Text(
-                    "多模态 mmproj：${mmprojName ?: "未启用"}" +
-                            if (com.localllm.server.core.AppSettings.isMmprojOverridden(selectedModel)) "（模型级）" else "",
+                    "多模态 mmproj：${mmprojName ?: "未启用"}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

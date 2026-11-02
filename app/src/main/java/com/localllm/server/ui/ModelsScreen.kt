@@ -459,11 +459,9 @@ private fun ModelCard(model: ModelFile, selected: Boolean, onSelect: () -> Unit,
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        (if (alias != null) model.name + " · " else "") + formatSize(model.sizeBytes) +
-                                (if (custom) " · 参数已定制" else ""),
+                        (if (alias != null) model.name + " · " else "") + formatSize(model.sizeBytes),
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (custom) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.weight(1f, fill = false)
                     )
                     ModelTags.headline(info, deep)?.let { t ->
@@ -558,7 +556,7 @@ private fun LocalModelParamsDialog(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text(
-                    "留空 = 跟随全局（当前上下文 ${AppSettings.ctxSize}，输出上限默认 4096）",
+                    "留空 = 跟随全局（当前上下文 ${AppSettings.ctxSize}，输出上限 ${AppSettings.outSize}）",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -582,12 +580,13 @@ private fun LocalModelParamsDialog(
                 CompactField(
                     value = out,
                     onValueChange = { out = it.filter(Char::isDigit) },
-                    label = "输出上限（留空=默认 4096）",
+                    label = "输出上限（留空=跟随全局）",
                     number = true,
                     modifier = Modifier.fillMaxWidth()
                 )
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(2048 to "2K", 4096 to "4K", 8192 to "8K", -1 to "跟全局")
+                    // 「跟全局」直接带上全局当前值：以前这个括号写死 4096，和设置里的全局值对不上
+                    listOf(2048 to "2K", 4096 to "4K", 8192 to "8K", -1 to "跟全局（${AppSettings.outSize}）")
                         .forEach { (v, label) ->
                             FilterChip(
                                 selected = if (v == -1) out.isBlank() else out == v.toString(),
