@@ -52,7 +52,14 @@ object LinuxRuntime {
         val uriStr = AppSettings.workDirTreeUri
         if (uriStr.isBlank()) return null
         val uri = runCatching { android.net.Uri.parse(uriStr) }.getOrNull() ?: return null
-        if ("tree" != uri.authority?.substringAfterLast('.')) return null
+        // 这里原来判的是 authority 的最后一段（externalstorage.**documents**），永远不等于 "tree"，
+        // 于是无论如何都返回 null，bash 就一路用 /root —— 表现是 python 拿同一个文件名报 FileNotFound。
+        // 正确的判法是看路径首段：content://.../tree/<docId>
+        val segments = uri.pathSegments
+        if (segments.isEmpty() || segments[0] != "tree") {
+            ServerProcessManager.appLog("工作目录解析失败：不是 tree URI（$uriStr）")
+            return null
+        }
         val docId = runCatching {
             android.provider.DocumentsContract.getTreeDocumentId(uri)
         }.getOrNull() ?: return null
@@ -61,7 +68,7 @@ object LinuxRuntime {
         val storageId = docId.substring(0, idx)
         val rel = docId.substring(idx + 1)
         val root = if (storageId == "primary") "/storage/emulated/0" else "/storage/$storageId"
-        return if (rel.isEmpty()) root else root + "/" + rel.replace("/", "/")
+        return if (rel.isEmpty()) root else "$root/$rel"
     }
 
     /** 首次使用：解压 rootfs + node、补运行时文件、按需安装基础工具。返回非空 = 失败原因 */
