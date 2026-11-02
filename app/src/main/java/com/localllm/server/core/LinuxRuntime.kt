@@ -108,14 +108,16 @@ object LinuxRuntime {
         return ""
     }
 
-    /** 在 rootfs 里跑一条命令；cwd 是 rootfs 内路径（默认 /root） */
-    fun exec(
+    /**
+     * proot 的启动参数（**不含最后的「程序 + 参数」**）。
+     * 一次性 [exec] 和持久会话 [PersistentShell] 共用这一份：bind 清单与环境变量
+     * 改一处漏一处是这类代码最容易出的错（一个 bind 少了，两个入口看到的世界就不一样）。
+     */
+    internal fun prootArgs(
         context: Context,
-        command: String,
-        cwd: String = "/root",
-        timeoutMs: Long = 120_000,
+        cwd: String,
         envExtra: List<String> = emptyList()
-    ): Result {
+    ): MutableList<String> {
         val rf = rootfsDir(context)
         val native = nativeLibDir(context)
         val args = mutableListOf(
@@ -140,14 +142,33 @@ object LinuxRuntime {
             "LANG=C.UTF-8", "TERM=xterm-256color", "TMPDIR=/tmp"
         )
         args.addAll(envExtra)
-        args.addAll(listOf("/bin/sh", "-c", command))
+        return args
+    }
 
-        val pb = ProcessBuilder(args)
-        pb.redirectErrorStream(true)
+    /** 启动 proot 需要的宿主侧环境变量（loader / tmp / l2s / 库路径） */
+    internal fun applyHostEnv(context: Context, pb: ProcessBuilder) {
+        val rf = rootfsDir(context)
+        val native = nativeLibDir(context)
         pb.environment()["PROOT_LOADER"] = "$native/libproot-loader.so"
         pb.environment()["PROOT_TMP_DIR"] = tmpDir(context).absolutePath
         pb.environment()["PROOT_L2S_DIR"] = "${rf.absolutePath}/root/.l2s"
         pb.environment()["LD_LIBRARY_PATH"] = native
+    }
+
+    /** 在 rootfs 里跑一条命令；cwd 是 rootfs 内路径（默认 /root） */
+    fun exec(
+        context: Context,
+        command: String,
+        cwd: String = "/root",
+        timeoutMs: Long = 120_000,
+        envExtra: List<String> = emptyList()
+    ): Result {
+        val args = prootArgs(context, cwd, envExtra)
+        args.addAll(listOf("/bin/sh", "-c", command))
+
+        val pb = ProcessBuilder(args)
+        pb.redirectErrorStream(true)
+        applyHostEnv(context, pb)
         return runCatching {
             val proc = pb.start()
             // 边读边截断，避免攒到进程结束

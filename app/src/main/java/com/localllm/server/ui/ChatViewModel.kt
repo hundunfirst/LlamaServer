@@ -1864,11 +1864,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     )
                                 }
                                 ServerProcessManager.appLog("Linux 命令：${cmd.take(80)}")
+                                if (args.optBoolean("reset")) {
+                                    ServerProcessManager.appLog("按模型要求清空持久 shell 会话状态")
+                                }
                                 // 长命令放到 IO 线程，别卡主线程
                                 val r = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                                    BashTool.execute(getApplication(), args)
+                                    BashTool.execute(getApplication(), sid, args)
                                 }
-                                val failed = r.startsWith("【命令退出码") || r.startsWith("Linux 环境未就绪")
+                                // 返回文本第一行是「当前目录」，所以判失败只能用 contains。
+                                // 原来写的是 startsWith("【命令退出码")——那句永远为假，失败的命令
+                                // 一直被标成成功，自驱/熔断的判据也就看不到这类失败。
+                                val failed = r.contains("【命令退出码") || r.contains("【命令超时") ||
+                                        r.contains("Linux 环境未就绪")
                                 steps.add(
                                     ChatStore.Step(
                                         "tool", "执行命令：${cmd.take(60)}",
@@ -2652,6 +2659,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteSession(id: String) {
         if (isGenerating(id)) stopSession(id)
+        // 会话没了，它那条持久 shell 也别留着占内存
+        runCatching { com.localllm.server.core.PersistentShell.reset(id) }
         val remaining = _sessions.value.filterNot { it.id == id }.ifEmpty {
             listOf(ChatStore.Session("1", "新会话", System.currentTimeMillis(), emptyList()))
         }
