@@ -185,7 +185,7 @@ object ScheduledTasks {
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build()
-        runCatching { nm.notify(task.id.hashCode(), n) }
+        NotifDiag.post(context, nm, task.id.hashCode(), n, "定时任务")
     }
 
     /** 后台已经开始跑了：这条通知用来解释「手机为什么突然发热」 */
@@ -200,7 +200,7 @@ object ScheduledTasks {
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
-        runCatching { nm.notify(task.id.hashCode(), n) }
+        NotifDiag.post(context, nm, task.id.hashCode(), n, "定时任务")
     }
 
     /** 跑完了：正文摘要放在通知里，点开进会话看全文 */
@@ -217,7 +217,7 @@ object ScheduledTasks {
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build()
-        runCatching { nm.notify(task.id.hashCode(), n) }
+        NotifDiag.post(context, nm, task.id.hashCode(), n, "定时任务")
     }
 }
 

@@ -251,7 +251,7 @@ class ServerService : android.app.Service() {
                 return
             }
         }
-        nm.notify(NOTIFICATION_ID, buildNotification(text))
+        NotifDiag.post(this, nm, NOTIFICATION_ID, buildNotification(text), "推理服务")
     }
 
     private fun buildNotification(text: String): Notification {

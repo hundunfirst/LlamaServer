@@ -500,6 +500,41 @@ fun SettingsScreen(
             var schedAutoRun by remember {
                 mutableStateOf(com.localllm.server.core.AppSettings.scheduledAutoRun)
             }
+            // 系统里这个 App 的通知开关如果是关的，notify() 会静默无效——任务跑完了你什么都不知道。
+            // 这里当场提示并给一个跳转，别让人去猜为什么没通知。
+            val nm = androidx.core.app.NotificationManagerCompat.from(schedCtx)
+            if (!nm.areNotificationsEnabled()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "通知是关的：任务跑完不会有任何提示",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        "去开启",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .clickable {
+                                runCatching {
+                                    schedCtx.startActivity(
+                                        android.content.Intent(
+                                            android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS
+                                        ).putExtra(
+                                            android.provider.Settings.EXTRA_APP_PACKAGE,
+                                            schedCtx.packageName
+                                        ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    )
+                                }
+                            }
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                    )
+                }
+            }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
