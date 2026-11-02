@@ -1280,8 +1280,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                             leadingIcon = { Icon(Icons.Default.Psychology, null) },
                             onClick = {
                                 toolsMenuOpen = false
-                                sysPromptText = vm.currentSessionSystemPrompt()
-                                    ?: com.localllm.server.core.AppSettings.activeSysPrompt()
+                                sysPromptText = vm.currentSessionSystemPrompt() ?: ""
                                 showSysPrompt = true
                             }
                         )
@@ -1721,6 +1720,11 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                                 onOpenGenFile = { gf -> previewGenFile = gf },
                                 onUndoFile = { path ->
                                     val msg = vm.undoFileWrite(activeId, path)
+                                    android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT)
+                                        .show()
+                                },
+                                onUndoRound = {
+                                    val msg = vm.undoRound(activeId, i)
                                     android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT)
                                         .show()
                                 },
@@ -3088,6 +3092,8 @@ private fun MessageBubble(
     onSpeak: () -> Unit = {},
     onOpenGenFile: (com.localllm.server.core.ChatStore.GenFile) -> Unit = {},
     onUndoFile: ((String) -> Unit)? = null,
+    /** 撤销这一轮的全部文件改动（一轮常改好几个文件，逐个点不现实） */
+    onUndoRound: (() -> Unit)? = null,
     onSaveSkill: (() -> Unit)? = null,
     onReadText: () -> Unit = {},
     onResumeTask: () -> Unit = {},
@@ -3222,6 +3228,16 @@ private fun MessageBubble(
                                             .padding(vertical = 4.dp)
                                     )
                                     Spacer(modifier = Modifier.weight(1f))
+                                    if (onUndoRound != null && msg.turnId > 0) {
+                                        Text(
+                                            "撤销本轮",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier
+                                                .clickable { onUndoRound() }
+                                                .padding(vertical = 4.dp, horizontal = 8.dp)
+                                        )
+                                    }
                                     Text(
                                         "定位",
                                         style = MaterialTheme.typography.labelMedium,

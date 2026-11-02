@@ -139,7 +139,12 @@ object ChatStore {
          * 这条消息产生的时间戳。0 = 老数据（升级前没记），界面就不显示时间，
          * 而不是拿「现在」去冒充——往上翻的时候看到错的时间比没有更糟。
          */
-        val at: Long = 0
+        val at: Long = 0,
+        /**
+         * 这一轮生成的标识（毫秒时间戳），写入快照按它分组——「撤销整轮」要靠它
+         * 找出「这一轮动手之前」的样子。0 = 老数据。
+         */
+        val turnId: Long = 0
     )
 
     // ---- 消息时间显示（纯函数，便于单测；now 显式传入，避免测试跟着系统时钟走）----
@@ -308,6 +313,7 @@ object ChatStore {
                     promptTokens = m.optInt("promptTokens"),
                     outputTokens = m.optInt("outputTokens"),
                         at = m.optLong("at"),
+                        turnId = m.optLong("turnId"),
                         task = m.optJSONObject("task")?.let { t ->
                             TaskState(
                                 goal = t.optString("goal"),
@@ -410,6 +416,7 @@ object ChatStore {
         if (m.promptTokens > 0) o.put("promptTokens", m.promptTokens)
         if (m.outputTokens > 0) o.put("outputTokens", m.outputTokens)
                 if (m.at > 0) o.put("at", m.at)
+                if (m.turnId > 0) o.put("turnId", m.turnId)
                 if (m.reasoning != null) o.put("reasoning", m.reasoning)
                 if (m.steps.isNotEmpty()) {
                     val sArr = JSONArray()

@@ -20,7 +20,19 @@ object FileSnapshots {
     private const val KEEP_PER_SESSION = 40
     private const val MAX_CONTENT = 2 * 1024 * 1024 // 超过 2MB 的文件不存快照（内容多半是二进制）
 
-    data class Snap(val path: String, val ts: Long, val existed: Boolean, val content: String?)
+    data class Snap(val path: String, val ts: Long, val existed: Boolean, val content: String?, val turn: Long = 0)
+
+    /**
+     * 「撤销整轮」要还原成什么样：一条路径在一次生成里可能被写好几次，
+     * 所以要拿**这一轮里最早的那份**（= 动手之前的样子），而不是最后一次。
+     *
+     * 纯函数，便于单测（真正的读写要 Context）。
+     */
+    internal fun planTurnRestore(snaps: List<Snap>, turn: Long): List<Snap> =
+        snaps.filter { it.turn == turn }
+            .groupBy { it.path }
+            .mapNotNull { (_, list) -> list.minByOrNull { it.ts } }
+            .sortedBy { it.path }
 
     fun dir(baseDir: File, sessionKey: String): File {
         val safe = sessionKey.map { if (it.isLetterOrDigit() || it == '-' || it == '_') it else '_' }
@@ -28,8 +40,9 @@ object FileSnapshots {
         return File(File(baseDir, "snapshots"), safe.ifBlank { "default" })
     }
 
-    /** 写入前调用：记下这份文件的「现状」。失败不影响写入本身。 */
-    fun capture(context: Context, baseDir: File, sessionKey: String, path: String) {
+    /** 写入前调用：记下这份文件的「现状」。失败不影响写入本身。
+     *  [turn] 是这次生成轮次的标识（同一条消息里的多次写入共用一个），「撤销整轮」靠它分组。 */
+    fun capture(context: Context, baseDir: File, sessionKey: String, path: String, turn: Long = 0) {
         if (path.isBlank()) return
         runCatching {
             val existed = exists(context, path)
@@ -42,6 +55,7 @@ object FileSnapshots {
                 .put("path", path)
                 .put("ts", ts)
                 .put("existed", existed)
+                .put("turn", turn)
             if (content != null) o.put("content", content)
             val name = "${ts}_${Integer.toHexString(path.hashCode())}.json"
             File(d, name).writeText(o.toString())
@@ -66,7 +80,8 @@ object FileSnapshots {
                         path = o.optString("path"),
                         ts = o.optLong("ts"),
                         existed = o.optBoolean("existed"),
-                        content = if (o.isNull("content")) null else o.optString("content")
+                        content = if (o.isNull("content")) null else o.optString("content"),
+                        turn = o.optLong("turn")
                     )
                 }.getOrNull()
             }
@@ -97,6 +112,41 @@ object FileSnapshots {
         val d = dir(baseDir, sessionKey)
         val snap = latest(baseDir, sessionKey, path) ?: return
         d.listFiles()?.firstOrNull { it.name.startsWith("${snap.ts}_") }?.delete()
+    }
+
+    /**
+     * 撤销某一轮的全部改动：按路径还原到这一轮动手之前的样子，
+     * 然后把这一轮的快照删掉（下次再点就是撤更早的一轮）。
+     *
+     * 为什么需要它：一轮里改 5 个文件，逐个点撤销要点 5 次，还得记住哪几个——
+     * 而模型恰恰是在一整轮里成批改文件的。
+     */
+    fun restoreTurn(context: Context, baseDir: File, sessionKey: String, turn: Long): String {
+        if (turn == 0L) return "这一轮没有写入记录，无法整轮撤销"
+        val targets = planTurnRestore(list(baseDir, sessionKey), turn)
+        if (targets.isEmpty()) return "这一轮没有写入记录，无法整轮撤销"
+        var ok = 0
+        val failed = mutableListOf<String>()
+        targets.forEach { snap ->
+            val r = runCatching {
+                if (!snap.existed) delete(context, snap.path)
+                else snap.content?.let { writeText(context, snap.path, it) } ?: false
+            }.getOrDefault(false)
+            if (r) ok++ else failed += snap.path.substringAfterLast('/')
+        }
+        // 成功的那些快照用完即删；失败的留着，用户还能逐个重试
+        val d = dir(baseDir, sessionKey)
+        val snapshots = list(baseDir, sessionKey).filter { it.turn == turn }
+        snapshots.forEach { s ->
+            val name = s.path.substringAfterLast('/')
+            if (name !in failed) {
+                d.listFiles()?.firstOrNull { it.name.startsWith("${s.ts}_") }?.delete()
+            }
+        }
+        return buildString {
+            append("已撤销本轮 $ok 个文件")
+            if (failed.isNotEmpty()) append("；失败 ${failed.size} 个：${failed.joinToString("、")}")
+        }
     }
 
     private fun trim(d: File) {

@@ -873,6 +873,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             var heartbeat: kotlinx.coroutines.Job? = null
             var abortDeltas = 0
             val sendStartedAt = System.currentTimeMillis()
+            // 这一轮的标识：文件快照按它分组，「撤销整轮」靠它找回动手之前的样子
+            val turnId = sendStartedAt
+            activeTurnId = turnId
+            appendToLastInline(sid) { m ->
+                if (m.role == "assistant" && m.turnId == 0L) m.copy(turnId = turnId) else m
+            }
             try {
                 // 提示词保持最小化：过多硬性约束会让小模型在思考里反复“检查规则”而失控。
                 // LaTeX 已有客户端转换器兜底，不再要求模型禁用。
@@ -911,9 +917,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val today = java.text.SimpleDateFormat("yyyy年M月d日", java.util.Locale.CHINA)
                     .format(java.util.Date())
-                // 助手指令：会话级覆盖优先，否则用全局预设
+                // 助手指令：会话级覆盖优先。全局预设那套（sysPrompt 预设列表）已删——
+                // UI 早就没有了，留着只会让人以为「某份预设还在悄悄生效」
                 val sessionPrompt = _sessions.value.find { it.id == _activeId.value }?.systemPrompt
-                val basePrompt = sessionPrompt ?: AppSettings.activeSysPrompt()
+                val basePrompt = sessionPrompt.orEmpty()
                 // 长期记忆已停用：小模型不会主动写，写了也未必在后续轮次用上，
                 // 而写错的条目会一直跟着每一轮提示词走。memory.md 文件保留，不删数据。
                 val memoryText = ""
@@ -1016,22 +1023,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 } else if (permission == "read") {
                     "【仅可查看】这一轮只能读取信息，不要写文件、不要执行会改变系统状态的命令。"
                 } else ""
-                // 已沉淀的技能：只报名字和一句话说明，**不贴正文**。
-                // 正文动辄几百字，全塞进提示词会污染每一轮；让模型知道「有这么个经验」，
-                // 真要细节时由用户从技能里选用。
+                // 已沉淀的技能：按本条输入做正文级检索——命中就把**正文**一起给模型，
+                // 否则「存为技能」只是个名字，模型不知道里面写了什么（等于没用）。
+                // 没命中就退回老行为，只报几条名字，别白占上下文。
                 val skillHint = run {
                     val all = AppSettings.loadSkills()
                     if (all.isEmpty()) return@run ""
-                    val picked = if (all.size <= 5) {
-                        all
-                    } else {
-                        all.filter { s ->
-                            val key = s.name.take(6)
-                            key.isNotBlank() && lastUserText.contains(key)
-                        }.take(5)
+                    val hits = com.localllm.server.core.SkillRetrieval.rank(all, lastUserText)
+                    if (hits.isNotEmpty()) {
+                        ServerProcessManager.appLog(
+                            "技能检索命中：" + hits.joinToString("、") { "${it.skill.name}(${it.score})" }
+                        )
+                        return@run com.localllm.server.core.SkillRetrieval.hintText(hits)
                     }
-                    if (picked.isEmpty()) ""
-                    else "【以前做成功过的流程（仅列名字，细节问用户）】\n" +
+                    val picked = if (all.size <= 5) all else all.take(5)
+                    "【以前做成功过的流程（仅列名字，细节问用户）】\n" +
                             picked.joinToString("\n") { "- ${it.name}：${it.desc.take(40)}" } +
                             "\n如果这次和其中某条相似，就说明「可以照 XXX 的做法」，别凭空编步骤。"
                 }
@@ -1897,13 +1903,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                             "等用户确认后再执行。"
                                 } else {
                                 ServerProcessManager.appLog("文件工具：${tc.name}")
-                                // 写入前留一份现状：产物卡上的「撤销」靠它退回本次写入之前
+                                // 写入前留一份现状：产物卡上的「撤销」靠它退回本次写入之前，
+                                // 「撤销本轮」靠 turnId 把同一条消息里的多次写入归成一组
                                 if (tc.name == FileTools.TOOL_WRITE || tc.name == FileTools.TOOL_PATCH) {
                                     FileSnapshots.capture(
                                         getApplication(),
                                         getApplication<Application>().filesDir,
                                         sid,
-                                        args.optString("path")
+                                        args.optString("path"),
+                                        turn = activeTurnId
                                     )
                                 }
                                 val r = FileTools.execute(
@@ -2657,6 +2665,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return result
     }
 
+    /**
+     * 撤销一条消息（一轮生成）里的**全部**文件改动。
+     *
+     * 逐文件撤销对用户不成立：一轮里模型常常同时改 4、5 个文件，点五次还得记住是哪些。
+     * 这里按 turnId 找回这一轮动手之前的样子，一次退回去。
+     */
+    fun undoRound(sid: String, msgIndex: Int): String {
+        val app = getApplication<Application>()
+        val base = app.filesDir
+        val msg = messagesOf(sid).getOrNull(msgIndex)
+            ?: return "找不到这条消息"
+        val turn = msg.turnId
+        if (turn == 0L) return "这条消息没有写入记录（老数据），只能逐个撤销"
+        val result = FileSnapshots.restoreTurn(app, base, sid, turn)
+        if (result.startsWith("已撤销本轮")) {
+            // 卡片跟着回退：这一轮改过的文件重新按「不知道现状」显示（内容改成空、prev 清掉），
+            // 避免界面上还留着已经被撤销的 diff
+            writeMessages(sid, messagesOf(sid).mapIndexed { i, m ->
+                if (i != msgIndex) m
+                else m.copy(genFiles = m.genFiles.map { ChatStore.GenFile(it.path, "", null) })
+            })
+        }
+        ServerProcessManager.appLog("撤销整轮（turn=$turn）：$result")
+        return result
+    }
+
     fun deleteSession(id: String) {
         if (isGenerating(id)) stopSession(id)
         // 会话没了，它那条持久 shell 也别留着占内存
@@ -2987,6 +3021,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         saveStore()
     }
 
+    /** 当前这一轮生成的标识（毫秒）；文件快照按它分组，实现「撤销整轮」 */
+    @Volatile
+    private var activeTurnId: Long = 0
+
     private fun append(msg: ChatStore.Msg) {
         // 时间戳在这里统一盖章：所有新消息都走 append，
         // 就不必让每个构造点各记一次「现在」（漏一个就少一条时间）
@@ -3168,7 +3206,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             _generating.update { it - sid }
             return
         }
-        val sys = AppSettings.activeSysPrompt().ifBlank { "你是一个严谨的中文助手，回答用中文。" }
+        // 技能链每步自己带指令，这里只需要一句兜底的角色设定（全局预设已删）
+        val sys = "你是一个严谨的中文助手，回答用中文。"
         val out = StringBuilder()
         val limit = SkillChainFlow.visitLimit(stepSkills.size)
         var executed = 0
