@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -124,6 +125,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 _taskQueue.value = list
                 ServerProcessManager.appLog("恢复排队指令 ${list.size} 条（上次进程被结束时留下的）")
             }
+        }
+    }
+
+    /** 引擎就绪、本会话空闲时把排队的下一条接上（开机/进程被杀后补跑） */
+    private fun kickQueue() {
+        val sid = _activeId.value
+        if (sid in _generating.value) return
+        if (_taskQueue.value.none { it.sid == sid }) return
+        // 输入框里有用户正在写的东西就不动它：drainQueue 会覆盖输入框
+        if (_input.value.isNotBlank()) return
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(500)
+            drainQueue(sid)
         }
     }
 
@@ -454,6 +468,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         _error.value = null
                     }
                 }
+            }
+        }
+        // 服务就绪后把上次剩下的排队指令接上。原来只把队列读回内存，没人触发就永远躺着——
+        // 通知上写着「点开立即执行」，实际点开什么都不会发生。
+        viewModelScope.launch {
+            ServerProcessManager.state.collect { st ->
+                if (st.status == ServerUiState.Status.RUNNING) kickQueue()
             }
         }
         // 接收外部分享内容：填进输入框并提示
@@ -1647,6 +1668,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         }
                         // 最终回复：先把可能还在流式的思考行收尾（正文开始后模型也可能再思考）
                         settleThink()
+                        // 「嘴上说生成了」：小模型会把「打算做」当成「已经做了」，
+                        // 而用户会真的去目录里找。这里按事实核对一次：说了写文件却没有写文件调用，就标出来。
+                        run {
+                            val finalMsg = _messages.value.lastOrNull()
+                            val text = finalMsg?.content ?: ""
+                            val claims = Regex(
+                                "已生成|生成完成|已保存|保存到|已写入|已创建|文件已|已输出|下载查看"
+                            ).containsMatchIn(text)
+                            val wrote = finalMsg?.genFiles?.isNotEmpty() == true
+                            if (claims && !wrote) {
+                                ServerProcessManager.appLog("回答声称生成了文件，但本轮没有写文件调用")
+                                steps.add(
+                                    ChatStore.Step(
+                                        "tool",
+                                        "注意：本轮没有真的写出文件",
+                                        "回答里提到了生成/保存文件，但本次没有调用 file_write / make_xlsx。" +
+                                                "可以再要求它「真的写出来」。"
+                                    )
+                                )
+                                syncSteps()
+                            }
+                        }
                         val usedSec = (System.currentTimeMillis() - sendStartedAt) / 1000.0
                         val timing = timingNote?.let { "$it · " } ?: ""
                         val secPart = " · 用时 ${String.format("%.1f", usedSec)}s"
@@ -2936,7 +2979,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun append(msg: ChatStore.Msg) {
-        _messages.value = _messages.value + msg
+        // 时间戳在这里统一盖章：所有新消息都走 append，
+        // 就不必让每个构造点各记一次「现在」（漏一个就少一条时间）
+        val stamped = if (msg.at == 0L) msg.copy(at = System.currentTimeMillis()) else msg
+        _messages.value = _messages.value + stamped
         persist()
     }
 
@@ -3034,7 +3080,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         .format(java.util.Date())
                     val sysMsg = ChatStore.Msg(
                         "system",
-                        "📝 历史摘要（${old.size} 条消息，压缩于 $stamp）：\n$text"
+                        "📝 历史摘要（${old.size} 条消息，压缩于 $stamp）：\n$text",
+                        at = System.currentTimeMillis()
                     )
                     _messages.value = listOf(sysMsg) + recent
                     persist()
@@ -3276,5 +3323,66 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val max = if (ctx >= 1000) String.format("%.1fk", ctx / 1000.0) else "$ctx"
         val near = usedTokens.toDouble() / ctx >= 0.9
         return " · 上下文 $cur/$max" + if (near) " ⚠️" else ""
+    }
+
+    // ---- 后台执行（定时任务无人值守）----
+
+    /** 一轮后台执行的结果：ok=false 时 text 是失败原因 */
+    data class BackgroundTurn(val sid: String, val ok: Boolean, val text: String, val elapsedMs: Long)
+
+    /**
+     * 后台直接跑一轮，不经过输入框。
+     *
+     * 为什么必须共享同一个实例：[ChatStore] 是单文件存档，两个 ViewModel 各持一份内存快照
+     * 会互相覆盖——后台写进去的会话，界面再存一次就没了。所以这个类必须进程内单例
+     * （见 [shared]），后台与界面读写的是同一份状态。
+     *
+     * 跑在当前会话里（和手动排队一致）：定时任务的结果因此出现在用户最后待的会话里，
+     * 而不是悄悄另开一条谁也找不到的会话。
+     */
+    suspend fun runBackgroundTurn(prompt: String): BackgroundTurn {
+        val text = prompt.trim()
+        val sid = _activeId.value
+        val startedAt = System.currentTimeMillis()
+        if (text.isEmpty()) return BackgroundTurn(sid, false, "指令为空", 0)
+        // 本会话还在生成：先等它跑完（同一会话不并发，和手动发送的排队语义一致）
+        _generating.first { sid !in it }
+        clearStoppedTasks(sid)
+        append(ChatStore.Msg("user", text))
+        append(ChatStore.Msg("assistant", "", task = ChatStore.TaskState(goal = text.take(300))))
+        doStream()
+        val job = streamJobs[sid]
+        if (job == null) return BackgroundTurn(sid, false, "没能启动生成（可能已达并行上限）", 0)
+        job.join()
+        val last = messagesOf(sid).lastOrNull { it.role == "assistant" }
+        val body = last?.content.orEmpty()
+        return BackgroundTurn(
+            sid = sid,
+            ok = body.isNotBlank(),
+            text = body.ifBlank { _error.value ?: "模型没有返回任何内容" },
+            elapsedMs = if ((last?.elapsedMs ?: 0L) > 0) last!!.elapsedMs
+                        else System.currentTimeMillis() - startedAt
+        )
+    }
+
+    companion object {
+        @Volatile
+        private var sharedInstance: ChatViewModel? = null
+
+        /**
+         * 进程内唯一实例。
+         *
+         * 原来界面用 `viewModel()`（Activity 作用域）：闹钟到点时进程里还没有界面，
+         * 后台只能另造一份会话状态，两边各写各的 chat_sessions.json——后写的覆盖先写的。
+         * 改成进程级单例后，后台跑完的那一轮，用户打开界面看到的就是同一份，无需重新加载。
+         * 这个实例不随 Activity 销毁而清理，跟着进程活。
+         */
+        fun shared(app: Application): ChatViewModel =
+            sharedInstance ?: synchronized(this) {
+                sharedInstance ?: ChatViewModel(app).also { sharedInstance = it }
+            }
+
+        /** 已经建过实例就返回它（后台线程不必为了看一眼状态去创建） */
+        fun peek(): ChatViewModel? = sharedInstance
     }
 }
