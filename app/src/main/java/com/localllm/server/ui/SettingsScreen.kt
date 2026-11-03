@@ -477,6 +477,98 @@ fun SettingsScreen(
                 com.localllm.server.core.AppSettings.pureMode = pureOn
             }
 
+            // ---- adb（无线调试）免确认 ----
+            var adbAuto by remember {
+                mutableStateOf(com.localllm.server.core.AppSettings.adbAutoAllow)
+            }
+            // 说明默认收起（点 ⓘ 才展开）：这两项的解释很长，摆在那儿太吵
+            var adbHelp by remember { mutableStateOf(false) }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("adb 操作免确认", style = MaterialTheme.typography.bodyLarge)
+                    if (adbHelp) {
+                        Text(
+                            "打开后模型用 adb 操作手机（点击/滑动/输入/装应用）不再逐条问你。" +
+                                    "不打开的话，它一边操作、你一边在自己手机上点「允许」，两边会抢界面；" +
+                                    "而且本 App 在后台时弹窗看不见，表现就是「卡住没反应」。\n" +
+                                    "卸载应用、清除数据、删文件、改系统设置、重启这些仍然每次都问。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                Text(
+                    "ⓘ",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .clickable { adbHelp = !adbHelp }
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                )
+                androidx.compose.material3.Switch(
+                    checked = adbAuto,
+                    onCheckedChange = { on ->
+                        adbAuto = on
+                        com.localllm.server.core.AppSettings.adbAutoAllow = on
+                    }
+                )
+            }
+
+            // ---- 无障碍服务（看屏幕 + 模拟操作，不依赖 adb / 网络）----
+            val a11yCtx = androidx.compose.ui.platform.LocalContext.current
+            val a11yOn = com.localllm.server.core.A11yService.isEnabled(a11yCtx)
+            var a11yHelp by remember { mutableStateOf(false) }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("无障碍服务（看屏幕 + 模拟操作）", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        if (a11yOn) "已启用" else "未启用",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (a11yOn) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.error
+                    )
+                    if (a11yHelp) {
+                        Text(
+                            "开启后模型能读屏、点击、滑动、输入、截图。不依赖 Wi-Fi 和配对码，重启后仍有效；" +
+                                    "但不负责装 APK、查系统状态（那些还是要 adb）。\n" +
+                                    "注意：覆盖安装本 App 后系统会把它停掉，需要在系统设置里重新打开一次。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                Text(
+                    "ⓘ",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .clickable { a11yHelp = !a11yHelp }
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                )
+                Text(
+                    if (a11yOn) "设置" else "去开启",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .clickable {
+                            runCatching {
+                                a11yCtx.startActivity(
+                                    android.content.Intent(
+                                        android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS
+                                    ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            }
+                        }
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                )
+            }
+
             // ---- 定时任务 ----
             val schedCtx = androidx.compose.ui.platform.LocalContext.current
             var schedTasks by remember {

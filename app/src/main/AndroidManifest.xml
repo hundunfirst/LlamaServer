@@ -16,6 +16,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- run_bash：apt install / 构建类长命令会被省电策略掐断，需引导用户放行后台 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 会话里生成的 APK 可以点一下直接进安装流程（首次会跳「允许安装未知应用」） -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:name=".App"
@@ -43,6 +45,18 @@
             </intent-filter>
         </activity>
 
+        <!-- 会话里产出的文件交给系统应用打开：授权目录内的走 documents provider，
+             真实路径（run_bash 里写出来的）走这里转成 content:// —— targetSdk≥24 不能甩 file:// -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <service
             android:name=".core.ServerService"
             android:exported="false"
@@ -50,6 +64,20 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="on_device_llm_inference_server" />
+        </service>
+
+        <!-- 无障碍服务：读屏 + 模拟点击/滑动/输入 + 截图。不需要 adb、不需要网络，授权一次重启仍有效 -->
+        <service
+            android:name=".core.A11yService"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
         </service>
 
         <!-- 定时任务到点唤醒：只做「排入队列 + 发通知」，不在这里起引擎 -->

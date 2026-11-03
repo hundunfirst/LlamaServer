@@ -767,6 +767,38 @@ object AppSettings {
      * 关掉退回老行为——只排进队列 + 发通知，点开 App 才跑。
      * 默认开：“定时任务”就该到点自己跑；代价是锁屏跑一轮模型，手机明显发热。
      */
+    /**
+     * 无障碍服务曾经成功用过。
+     * 用途：覆盖安装本 App 后系统会把无障碍服务停掉，下次启动时据此提示用户去重新打开——
+     * 否则用户会看到开关是开的（其实系统已经停用），然后一头雾水。
+     */
+    var a11yWasEnabled: Boolean
+        get() = prefs.getBoolean("a11y_was_enabled", false)
+        set(value) = prefs.edit().putBoolean("a11y_was_enabled", value).apply()
+
+    /**
+     * adb 操作免确认（自动化专用）。
+     *
+     * 为什么需要：agent 用 adb 操作屏幕时，如果每条命令都弹窗要用户点「允许」，
+     * 用户得一边看它操作一边在自己手机上点确认——两边抢界面必然打架，
+     * 而且 App 在后台时弹窗根本看不见，表现为「卡了几百秒没反应」。
+     *
+     * 打开后：adb 的普通操作（含 input tap/swipe/text、install）不再询问；
+     * 卸载、清除数据、删文件、改系统设置、重启这些**仍然每次都问**（DANGER 档不受影响）。
+     */
+    var adbAutoAllow: Boolean
+        get() = prefs.getBoolean("adb_auto_allow", false)
+        set(value) = prefs.edit().putBoolean("adb_auto_allow", value).apply()
+
+    /**
+     * 上次连上的无线调试端点（"ip:port"）。
+     * 无线调试端口每次开启都会变，缓存它只是为了「同一轮里少做一次 mDNS 发现」；
+     * 连不上会自动重新发现（见 AdbBridge）。
+     */
+    var adbEndpoint: String?
+        get() = prefs.getString("adb_endpoint", null)
+        set(value) = prefs.edit().putString("adb_endpoint", value).apply()
+
     var scheduledAutoRun: Boolean
         get() = prefs.getBoolean("scheduled_auto_run", true)
         set(value) = prefs.edit().putBoolean("scheduled_auto_run", value).apply()

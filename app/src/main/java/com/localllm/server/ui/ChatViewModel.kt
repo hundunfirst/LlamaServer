@@ -3,6 +3,10 @@ package com.localllm.server.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.localllm.server.core.AdbBridge
+import com.localllm.server.core.AdbTool
+import com.localllm.server.core.A11yBridge
+import com.localllm.server.core.A11yTool
 import com.localllm.server.core.AppSettings
 import com.localllm.server.core.BashTool
 import com.localllm.server.core.ChatClient
@@ -12,6 +16,7 @@ import com.localllm.server.core.DocMaker
 import com.localllm.server.core.FileSnapshots
 import com.localllm.server.core.FileTools
 import com.localllm.server.core.GgufInspector
+import com.localllm.server.core.InstallTool
 import com.localllm.server.core.LinuxRuntime
 import com.localllm.server.core.McpArgRepair
 import com.localllm.server.core.McpHttpClient
@@ -269,6 +274,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
         val allowed = sessionAutoAllow.getOrPut(sid) { mutableSetOf() }
         if (verdict.autoKey != null && allowed.contains(verdict.autoKey)) return true
+        // adb 免确认开关：自动化（尤其是操作屏幕）时不再逐条打断——
+        // App 在后台时弹窗根本看不见，表现就是「卡了几百秒」。DANGER 档 autoKey 为 null，仍然每次都问。
+        if (AppSettings.adbAutoAllow && verdict.autoKey?.startsWith("adb") == true) {
+            ServerProcessManager.appLog("adb 免确认已开启，直接放行：${verdict.subject.take(60)}")
+            return true
+        }
         return approvalLock.withLock {
             // 排队期间别的会话可能已经放行同类操作
             if (verdict.autoKey != null && allowed.contains(verdict.autoKey)) return@withLock true
@@ -283,6 +294,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 canAlways = verdict.autoKey != null,
             )
             ServerProcessManager.appLog("等待确认：${verdict.title.removeSuffix("？")}")
+            // 用户可能正在别的 App 里（agent 自己切走的）：弹窗看不见就以为卡死。
+            // 把话说在状态行上，切回来一眼能看懂；也给「本会话总是允许 / 免确认」指路。
+            if (_activeId.value == sid) {
+                _lastStats.value = "等你确认：${verdict.title.removeSuffix("？")}" +
+                        "（如果没看到弹窗，说明本 App 在后台，切回来即可）"
+            }
+            com.localllm.server.core.AgentHud.update(
+                com.localllm.server.core.AgentHud.Stage.WaitingApproval,
+                verdict.title.removeSuffix("？")
+            )
             val decision = kotlinx.coroutines.withTimeoutOrNull(600_000L) { d.await() }
             toolAskDeferred = null
             _toolAsk.value = null
@@ -1267,6 +1288,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     // 内置 Linux 环境（PRoot + Ubuntu）：跑测试/git/node 的入口，跟着文件工具一起给
                     if (fileOn) arr.put(BashTool.toolJson())
+                    // 装 APK 用系统安装器，别让模型再去折腾 adb 无线调试（配对码 + 每次变的端口）
+                    if (fileOn) arr.put(InstallTool.toolJson())
+                    // 无线调试通道：免点击装 APK、截屏、input tap、uiautomator dump…
+                    // （App 会自动发现端口并连接；配对只需一次）
+                    if (fileOn) arr.put(AdbTool.toolJson())
+                    // 无障碍通道：看和点屏幕，不依赖 adb 与网络（没连 Wi-Fi 时也能用）
+                    if (fileOn) arr.put(A11yTool.toolJson())
                     // OCR 工具：只有对话里真的出现过图片才注入，平时不白占 schema
                     if (hasImage) arr.put(OcrTool.toolJson())
                     // web_run 只在造物轮注入：纯提问轮模型看不到这个工具，
@@ -1679,18 +1707,41 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         run {
                             val finalMsg = _messages.value.lastOrNull()
                             val text = finalMsg?.content ?: ""
-                            val claims = Regex(
-                                "已生成|生成完成|已保存|保存到|已写入|已创建|文件已|已输出|下载查看"
-                            ).containsMatchIn(text)
-                            val wrote = finalMsg?.genFiles?.isNotEmpty() == true
+                            val claims = com.localllm.server.core.ReplyClaims.claimsFile(text)
+                            // 回答里点名的文件，只要现在真的存在、且还没登记过，就补登记。
+                            // 不能因为「已经有别的产物」就跳过：模型常用 python3 脚本改文件，
+                            // 那种写入不进 FileTools，产物卡上就只剩脚本、看不到真正的交付物。
+                            // 候选文件名不只看正文：`run_bash` 里编出来的 APK，名字往往只出现在
+                            // 工具输出（gradle 的 "Built …/app-debug.apk"）里，正文只写"构建好了"。
+                            val stepsHaveBash = finalMsg?.steps?.any {
+                                it.type == "tool" && it.label.startsWith("执行命令")
+                            } == true
+                            val scanText = buildString {
+                                append(text)
+                                if (stepsHaveBash) {
+                                    finalMsg?.steps?.forEach { st -> st.detail?.let { append('\n').append(it) } }
+                                }
+                            }
+                            val known = finalMsg?.genFiles?.map { it.path }?.toSet().orEmpty()
+                            val existing = if (claims || stepsHaveBash) {
+                                com.localllm.server.core.ReplyClaims.mentionedNames(scanText, limit = 4)
+                                    .filter { it !in known && fileExistsNow(it) }
+                            } else emptyList()
+                            if (existing.isNotEmpty()) {
+                                existing.forEach { recordGeneratedFile(it) }
+                                ServerProcessManager.appLog(
+                                    "本轮产物核对：回答点名的文件确实存在（${existing.joinToString("、")}），已登记"
+                                )
+                            }
+                            val wrote = (finalMsg?.genFiles?.isNotEmpty() == true) || existing.isNotEmpty()
                             if (claims && !wrote) {
                                 ServerProcessManager.appLog("回答声称生成了文件，但本轮没有写文件调用")
                                 steps.add(
                                     ChatStore.Step(
                                         "tool",
                                         "注意：本轮没有真的写出文件",
-                                        "回答里提到了生成/保存文件，但本次没有调用 file_write / make_xlsx。" +
-                                                "可以再要求它「真的写出来」。"
+                                        "回答里提到了生成/保存文件，但本次既没调用 file_write / make_xlsx，" +
+                                                "点名的文件也不在工作目录里。可以再要求它「真的写出来」。"
                                     )
                                 )
                                 syncSteps()
@@ -1785,6 +1836,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     validCalls.forEach { tc ->
                         usedTools.add(tc.name)
                         _lastStats.value = "🔧 调用 ${tc.name}…"
+                        // 状态条：告诉用户"正在执行哪个工具"（它操作别的 App 时这是唯一可见反馈）
+                        com.localllm.server.core.AgentHud.update(
+                            com.localllm.server.core.AgentHud.Stage.RunningTool, tc.name
+                        )
                         asstCalls.put(
                             org.json.JSONObject()
                                 .put("id", tc.id)
@@ -1816,6 +1871,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 tc.name, org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                             )
 
+                            fileOn && tc.name == AdbTool.NAME -> ToolGuard.assessAdb(
+                                org.json.JSONObject(tc.arguments.ifBlank { "{}" }).optString("args")
+                            )
+
+                            fileOn && tc.name == A11yTool.NAME -> {
+                                val a = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                ToolGuard.assessA11y(a.optString("action"), a.optString("text"))
+                            }
+
                             mcpRoute.containsKey(tc.name) -> ToolGuard.assessMcp(
                                 tc.name, org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                             )
@@ -1835,17 +1899,134 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         } else runCatching {
                             if (fileOn && tc.name in DocMaker.NAMES) {
                                 val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                val docPath = args.optString("path")
                                 ServerProcessManager.appLog("文档生成：${tc.name}")
-                                val r = DocMaker.execute(getApplication(), tc.name, args)
+                                val r = runCatching { DocMaker.execute(getApplication(), tc.name, args) }
+                                    .getOrElse {
+                                        "错误：生成失败（${it.message ?: it.javaClass.simpleName}）"
+                                    }
+                                val ok = !r.startsWith("错误：")
                                 steps.add(
                                     ChatStore.Step(
                                         "tool",
                                         "生成文档：${tc.name}",
-                                        args.optString("path").take(80)
+                                        (if (docPath.isNotBlank()) docPath else r).take(80),
+                                        ok = ok
                                     )
                                 )
                                 syncSteps()
                                 ServerProcessManager.appLog("文档生成完成：$r")
+                                // 生成出来的文档必须登记进产物列表：产物卡、会话详情「文件」、
+                                // 以及「本轮有没有真的写出文件」的判据，全都看这个列表。
+                                // （曾经漏了这一步，于是一次真生成 xlsx 的轮次被判成"只说不做"）
+                                if (ok && docPath.isNotBlank()) recordGeneratedFile(docPath)
+                                r
+                            } else if (tc.name == AdbTool.NAME) {
+                                val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                val adbArgs = args.optString("args").trim()
+                                val timeout = args.optInt("timeout", 60).coerceIn(5, 600)
+                                ServerProcessManager.appLog("adb：${adbArgs.take(80)}")
+                                // 自动发现端口并连接（配对过一次就行），然后执行
+                                val (ok, out) = AdbBridge.runAdb(
+                                    getApplication(), adbArgs, timeout * 1000L
+                                )
+                                val body = if (out.isBlank()) "（无输出）" else out.take(4000)
+                                // adb 装/生成的文件也进产物卡：`adb install x.apk`、`screencap` 截出来的图
+                                // 都是用户想要的东西，不该只留在命令输出里
+                                if (ok) {
+                                    Regex("""[\w\u4e00-\u9fa5./\-]+\.(?:apk|png|jpe?g|webp|csv|txt|log|json|xml|zip)""",
+                                        RegexOption.IGNORE_CASE)
+                                        .findAll(adbArgs)
+                                        .map { it.value }
+                                        .distinct()
+                                        .take(3)
+                                        .filter { fileExistsNow(it) }
+                                        .forEach { recordGeneratedFile(it) }
+                                }
+                                steps.add(
+                                    ChatStore.Step(
+                                        "tool", "adb ${adbArgs.take(50)}",
+                                        body.take(400), args = adbArgs.take(300), ok = ok
+                                    )
+                                )
+                                syncSteps()
+                                if (ok) body else "adb 执行失败：\n$body"
+                            } else if (tc.name == A11yTool.NAME) {
+                                val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                val action = args.optString("action").trim().lowercase()
+                                val text = args.optString("text")
+                                val x = args.optInt("x", -1)
+                                val y = args.optInt("y", -1)
+                                val x2 = args.optInt("x2", -1)
+                                val y2 = args.optInt("y2", -1)
+                                val dur = args.optInt("duration", 300).coerceIn(20, 5000)
+                                ServerProcessManager.appLog("屏幕：$action ${text.take(40)}")
+                                // 先分清「系统里没开」和「开着但没连上」——覆盖安装后系统会把服务停掉，
+                                // 一律报"没打开"会让人去设置里看到明明开着、以为程序坏了
+                                val enabledInSystem = com.localllm.server.core.A11yService.isEnabled(getApplication())
+                                val precheck: String? = when {
+                                    !enabledInSystem ->
+                                        "错误：无障碍服务未启用。请到 设置 → 无障碍 → 混沌智核 打开（只需一次）。"
+                                    !A11yBridge.available() ->
+                                        "错误：无障碍服务在系统里是开着的，但当前没连上（App 重启过、或系统把它停掉了，" +
+                                                "覆盖安装本 App 后也常见）。请到 设置 → 无障碍 把「混沌智核」关一下再打开，然后重试。"
+                                    else -> null
+                                }
+                                if (precheck == null) com.localllm.server.core.AppSettings.a11yWasEnabled = true
+                                // 无障碍调用本身很快，但控件树遍历/截图会等系统回调，统一放 IO
+                                val r = precheck ?: kotlinx.coroutines.withContext(Dispatchers.IO) {
+                                    when (action) {
+                                        "tree" -> A11yBridge.tree()
+                                        "click" -> A11yBridge.clickText(text)
+                                        "tap" -> if (x >= 0 && y >= 0) A11yBridge.tap(x, y)
+                                        else "错误：tap 需要 x 和 y"
+                                        "swipe" -> if (x >= 0 && y >= 0 && x2 >= 0 && y2 >= 0)
+                                            A11yBridge.swipe(x, y, x2, y2, dur.toLong())
+                                        else "错误：swipe 需要 x,y,x2,y2"
+                                        "input" -> A11yBridge.inputText(text)
+                                        "key" -> A11yBridge.global(text)
+                                        "shot" -> A11yBridge.screenshot(getApplication())
+                                        else -> "错误：未知 action「$action」" +
+                                                "（可用 tree/click/tap/swipe/input/key/shot）"
+                                    }
+                                }
+                                val ok = !r.startsWith("错误") && !r.startsWith("没找到") &&
+                                        !r.startsWith("输入失败") && !r.startsWith("截图失败")
+                                steps.add(
+                                    ChatStore.Step(
+                                        "tool", "屏幕：$action ${text.take(24)}",
+                                        r.take(400), args = "$action ${text.take(80)}", ok = ok
+                                    )
+                                )
+                                syncSteps()
+                                r
+                            } else if (tc.name == InstallTool.NAME) {
+                                val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                val apkPath = args.optString("path").trim()
+                                ServerProcessManager.appLog("安装 APK：$apkPath")
+                                // 先试**免点击**的 adb 安装（无线调试配对过一次就行）；不行再退回
+                                // 系统安装器（用户点一下）。把 adb 的失败原因一并给模型，免得它反复猜。
+                                val adbErr = if (apkPath.endsWith(".apk", true)) {
+                                    AdbBridge.install(getApplication(), apkPath)
+                                } else "路径不是 .apk"
+                                val r = if (adbErr == null) {
+                                    // 装成功也登记产物：不然「装一下」这一轮的消息里没有产物卡，
+                                    // 用户看着就像"会话里没显示生成的文件"（实际在上一轮消息里）
+                                    if (apkPath.isNotBlank()) recordGeneratedFile(apkPath)
+                                    "已通过无线调试静默安装成功（用户不用点确认）。可以用 adb 的 " +
+                                            "`shell am start` 或 `shell pm list packages` 继续验证。"
+                                } else {
+                                    InstallTool.execute(getApplication(), args) +
+                                            "\n（说明：adb 免点击安装没成功：${adbErr.take(200)}）"
+                                }
+                                val ok = !r.startsWith("错误：")
+                                steps.add(
+                                    ChatStore.Step(
+                                        "tool", "安装 APK：${apkPath.take(50)}",
+                                        r.take(200), args = apkPath.take(200), ok = ok
+                                    )
+                                )
+                                syncSteps()
                                 r
                             } else if (tc.name == OcrTool.NAME) {
                                 // 图片文字识别：本地 ML Kit，不上传。模型按需调用，不是每张图都自动跑。
@@ -2315,6 +2496,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 _generating.update { it - sid }
                 streamJobs.remove(sid)
                 setProgress(sid, null)
+                // 这一轮结束：状态条收起，并把系统的「显示点按」还原（它只该在操作期间亮着）
+                com.localllm.server.core.AgentHud.endTurn()
+                runCatching {
+                    if (_generating.value.isEmpty()) {
+                        com.localllm.server.core.AdbBridge.setTouchMarker(getApplication(), false)
+                    }
+                }
                 // 上一轮把上下文吃得太满 → 自动压一次。放在 generating 清掉之后，
                 // 否则 compressContext 会自检「正在生成中」直接返回。
                 if (autoCompressPending) {
@@ -2689,6 +2877,47 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
         ServerProcessManager.appLog("撤销整轮（turn=$turn）：$result")
         return result
+    }
+
+    /** 文件名 → 真实路径：绝对路径原样用，相对路径按工作目录拼（工作目录就是 SAF 授权根） */
+    private fun realPathFor(name: String): String? =
+        if (name.startsWith("/")) name
+        else LinuxRuntime.workdirAbsPath(getApplication())?.let { "$it/$name" }
+
+    private fun fileExistsNow(name: String): Boolean =
+        realPathFor(name)?.let { java.io.File(it).isFile } == true
+
+    /** 文本类产出物读一份内容供预览/改动对比；二进制（xlsx/pdf/docx）只登记路径 */
+    private fun previewOf(name: String): String {
+        val abs = realPathFor(name) ?: return ""
+        val f = java.io.File(abs)
+        if (!f.isFile || f.length() > 256 * 1024) return ""
+        val textLike = setOf("csv", "md", "txt", "html", "htm", "json", "py", "js", "sh", "log")
+        if (f.extension.lowercase() !in textLike) return ""
+        return runCatching { f.readText(Charsets.UTF_8).take(20_000) }.getOrDefault("")
+    }
+
+    /**
+     * 把「真的产出了这个文件」登记进当前消息的产物列表。
+     *
+     * 产物卡、会话详情「文件」tab、以及「本轮有没有真的写出文件」的判据，全都只看这个列表——
+     * 所以任何真的写了文件的路径都必须经过这里，否则就会出现「文件在、界面上没有、
+     * 还被告知没写文件」这种自相矛盾的状态。
+     */
+    private fun recordGeneratedFile(path: String) {
+        if (path.isBlank()) return
+        val list = _messages.value.toMutableList()
+        if (list.isEmpty()) return
+        val last = list.last()
+        if (last.role != "assistant") return
+        val merged = (last.genFiles.filter { it.path != path } +
+                ChatStore.GenFile(
+                    path,
+                    previewOf(path),
+                    last.genFiles.firstOrNull { it.path == path }?.content
+                )).takeLast(5)
+        list[list.lastIndex] = last.copy(genFiles = merged)
+        _messages.value = list
     }
 
     fun deleteSession(id: String) {

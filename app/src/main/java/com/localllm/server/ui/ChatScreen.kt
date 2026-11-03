@@ -862,48 +862,14 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
         }
     }
 
-    // 生成文件预览
+    // 生成文件预览：先进应用内查看器（文本/图片/PDF 直接看，APK 这类给「安装 / 用其他应用打开」）
     previewGenFile?.let { gf ->
-        val lang = gf.path.substringAfterLast('.', "").lowercase()
-        AlertDialog(
-            onDismissRequest = { previewGenFile = null },
-            title = {
-                Text(gf.path.substringAfterLast('/'), maxLines = 1)
-            },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .heightIn(max = 460.dp)
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    Text(
-                        highlightCode(
-                            lang, gf.content,
-                            keywordColor = MaterialTheme.colorScheme.primary,
-                            stringColor = androidx.compose.ui.graphics.Color(0xFF2E7D32),
-                            commentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            numberColor = androidx.compose.ui.graphics.Color(0xFF6A1B9A)
-                        ),
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    clipboard.setText(AnnotatedString(gf.content))
-                    Toast.makeText(context, "已复制文件内容", Toast.LENGTH_SHORT).show()
-                }) { Text("复制") }
-            },
-            dismissButton = {
-                Row {
-                    TextButton(onClick = {
-                        exportGenFile = gf
-                        // 带上原文件名（含扩展名），系统对话框会据此预填
-                        exportLauncher.launch(gf.path.substringAfterLast('/'))
-                    }) { Text("导出") }
-                    TextButton(onClick = { previewGenFile = null }) { Text("关闭") }
-                }
+        FileViewerDialog(
+            gf = gf,
+            onDismiss = { previewGenFile = null },
+            onExport = {
+                exportGenFile = gf
+                exportLauncher.launch(gf.path.substringAfterLast('/'))
             }
         )
     }
@@ -3129,6 +3095,10 @@ private fun MessageBubble(
                             var diffTarget by remember(msg.genFiles.size) {
                                 mutableStateOf<ChatStore.GenFile?>(null)
                             }
+                            // 哪一行的「…」菜单开着（存路径，不用 index，列表变化也不会串）
+                            var fileMenuFor by remember(msg.genFiles.size) {
+                                mutableStateOf<String?>(null)
+                            }
                             val changed = msg.genFiles.count { it.prev != null }
                             val created = msg.genFiles.size - changed
                             Column(
@@ -3155,25 +3125,31 @@ private fun MessageBubble(
                                     val stat = remember(gf.path, gf.content, gf.prev) {
                                         diffStat(gf.prev, gf.content)
                                     }
+                                    val ext = gf.path.substringAfterLast('.', "").lowercase()
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clickable {
-                                                if (!com.localllm.server.core.FileOpener
-                                                        .open(fileCtx, gf.path)
-                                                ) {
-                                                    onOpenGenFile(gf)
-                                                }
+                                                // 点一下先进应用内查看器（和 DSH 一致）：
+                                                // 文本/图片/PDF 直接看；APK 这类给「安装 / 用其他应用打开」。
+                                                // 想立刻交给系统应用，用右边的「…」菜单。
+                                                onOpenGenFile(gf)
                                             }
                                             .padding(vertical = 6.dp)
                                     ) {
-                                        Icon(
-                                            Icons.Default.Description,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(18.dp),
-                                            tint = MaterialTheme.colorScheme.primary
-                                        )
+                                        // 类型徽标：比统一的小图标好认（APK / XLSX / CSV …）
+                                        androidx.compose.material3.Surface(
+                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                            shape = RoundedCornerShape(6.dp)
+                                        ) {
+                                            Text(
+                                                ext.ifBlank { "FILE" }.uppercase().take(4),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
                                         Spacer(modifier = Modifier.width(8.dp))
                                         Column(Modifier.weight(1f)) {
                                             Text(
@@ -3211,6 +3187,73 @@ private fun MessageBubble(
                                                     .clickable { undo(gf.path) }
                                                     .padding(start = 8.dp, top = 4.dp, bottom = 4.dp)
                                             )
+                                        }
+                                        // 每行一个「…」菜单：打开 / 分享 / 定位 / 预览
+                                        Box {
+                                            IconButton(
+                                                onClick = { fileMenuFor = gf.path },
+                                                modifier = Modifier.size(28.dp)
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.MoreVert,
+                                                    contentDescription = "文件操作",
+                                                    modifier = Modifier.size(16.dp),
+                                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            DropdownMenu(
+                                                expanded = fileMenuFor == gf.path,
+                                                onDismissRequest = { fileMenuFor = null }
+                                            ) {
+                                                DropdownMenuItem(
+                                                    text = { Text(if (ext == "apk") "安装" else "打开") },
+                                                    onClick = {
+                                                        fileMenuFor = null
+                                                        if (!com.localllm.server.core.FileOpener
+                                                                .open(fileCtx, gf.path)
+                                                        ) {
+                                                            onOpenGenFile(gf)
+                                                        }
+                                                    }
+                                                )
+                                                DropdownMenuItem(
+                                                    text = { Text("分享") },
+                                                    onClick = {
+                                                        fileMenuFor = null
+                                                        if (!com.localllm.server.core.FileOpener
+                                                                .share(fileCtx, gf.path)
+                                                        ) {
+                                                            Toast.makeText(
+                                                                fileCtx, "分享失败：找不到这个文件",
+                                                                Toast.LENGTH_SHORT
+                                                            ).show()
+                                                        }
+                                                    }
+                                                )
+                                                DropdownMenuItem(
+                                                    text = { Text("定位") },
+                                                    onClick = {
+                                                        fileMenuFor = null
+                                                        if (!com.localllm.server.core.FileOpener
+                                                                .revealInFolder(fileCtx, gf.path)
+                                                        ) {
+                                                            Toast.makeText(
+                                                                fileCtx, "文件管理器不支持打开文件夹，路径：${gf.path}",
+                                                                Toast.LENGTH_LONG
+                                                            ).show()
+                                                        }
+                                                    }
+                                                )
+                                                if (gf.content.isNotBlank()) {
+                                                    DropdownMenuItem(
+                                                        text = { Text("在会话内预览") },
+                                                        onClick = {
+                                                            fileMenuFor = null
+                                                            onOpenGenFile(gf)
+                                                        }
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -3854,7 +3897,7 @@ private fun SummaryCard(content: String) {
 }
 
 /** 轻量语法高亮：注释/字符串/数字/关键字（无法识别语言时原样返回） */
-private fun highlightCode(
+internal fun highlightCode(
     lang: String,
     code: String,
     keywordColor: androidx.compose.ui.graphics.Color,

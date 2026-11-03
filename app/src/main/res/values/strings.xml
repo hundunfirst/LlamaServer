@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">混沌智核</string>
+
+    <string name="a11y_service_desc">让助手读取当前屏幕内容，并模拟点击、滑动、输入来操作其他应用。只有在你授权后才会生效，可随时在系统设置里关闭。</string>
 </resources>
