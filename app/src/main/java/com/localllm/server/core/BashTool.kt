@@ -40,6 +40,9 @@ object BashTool {
                             "所以命令里直接用文件名即可（如 python3 x.py、cat a.csv）；" +
                             "要读写用户文件请用 file_* 工具，不要 cd /root 或 ls / 去找用户的文件。**" +
                             "命令以 root 用户执行；不要用它做用户没要求的破坏性操作。" +
+                            "**装 APK 不要用 adb**：容器里的 adb 要走无线调试，需要一次性配对码和每次都变的端口，" +
+                            "失败了还得来回折腾。编好 APK 后直接调 install_apk（系统安装器，用户点一下即装）；" +
+                            "产物要落到工作目录里，用户才会在会话里看到并点得到。" +
                             "超时会杀掉并重建会话（状态丢失），所以别跑长驻前台进程。" +
                             "**后台任务这么管**：启动时把输出重定向到文件（如 `node server.js > /tmp/srv.log 2>&1 &`）；" +
                             "`jobs -l` 看还在跑的有哪些（含 pid）；`tail -n 50 /tmp/srv.log` 看它的输出；" +
@@ -89,7 +92,7 @@ object BashTool {
         )
     }
 
-    fun execute(context: Context, sid: String, args: JSONObject): String {
+    suspend fun execute(context: Context, sid: String, args: JSONObject): String {
         val command = args.optString("command").trim()
         if (command.isBlank()) return "错误：command 不能为空"
         val timeout = args.optInt("timeout", 60).coerceIn(5, 600)

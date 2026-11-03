@@ -79,6 +79,78 @@ object ToolGuard {
         }
     }
 
+    /**
+     * `adb`：等价 shell 权限。
+     *
+     * 分档的关键在**打断成本**：`input tap/swipe/text` 是 UI 自动化的主力，一秒钟能发好几条，
+     * 如果每条都弹窗，用户就得在自己手机上反复点「允许」——而 agent 正在操作屏幕，
+     * 两边抢界面必然打架（真机反馈过）。所以 UI 操作归 WRITE 档（一次「总是允许」之后不再问）；
+     * 卸载、清数据、删文件、改系统设置、重启这些真正会毁东西的，仍是 DANGER 每次必问。
+     */
+    fun assessAdb(args: String): Verdict {
+        val cmd = args.trim()
+        val danger = listOf(
+            Regex("""\buninstall\b""") to "卸载应用",
+            Regex("""\bpm\s+(clear|disable|uninstall)\b""") to "清除数据或禁用应用",
+            Regex("""\brm\s""") to "删除文件",
+            Regex("""\bshell\s+(reboot|shutdown)\b""") to "重启或关机",
+            Regex("""\bshell\s+settings\s+put\b""") to "修改系统设置",
+            Regex("""\b(root|remount)\b""") to "尝试提权",
+        ).firstOrNull { (re, _) -> re.containsMatchIn(cmd) }
+        if (danger != null) {
+            return Verdict(
+                title = "允许执行这条 adb 命令？",
+                subjectLabel = "adb",
+                subject = clip(cmd),
+                reason = "这条命令会${danger.second}。adb 等价于 shell 权限，影响整台手机而不只是本 App。",
+                risk = Risk.DANGER,
+                autoKey = null,
+            )
+        }
+        val uiDriving = Regex("""\bshell\s+input\s+(tap|swipe|text|keyevent|press|roll)""")
+            .containsMatchIn(cmd)
+        return Verdict(
+            title = if (uiDriving) "允许它操作屏幕？" else "允许执行 adb 命令？",
+            subjectLabel = "adb",
+            subject = clip(cmd),
+            reason = if (uiDriving)
+                "会在当前屏幕上模拟点击/滑动/输入，作用的是**前台那个 App**。" +
+                        "选「总是允许」后本会话不再逐条询问，免得它一边操作你一边点确认。"
+            else "会通过无线调试在手机上执行，等价于 shell 权限（能读系统状态、操作别的 App）。",
+            risk = Risk.WRITE,
+            // UI 操作单独一个键：放行「操作屏幕」不等于放行所有 adb
+            autoKey = if (uiDriving) "adb-ui" else "adb",
+        )
+    }
+
+    /**
+     * `screen`（无障碍）：读屏/截图不用问；点、滑、输入、按键按 WRITE 档问一次。
+     * 和 adb 的 UI 操作共用一个「本会话放行」的键（`adb-ui`）：用户对"让它操作屏幕"的
+     * 授权是一次性的，不该因为换了通道（adb / 无障碍）就再问一遍。
+     */
+    fun assessA11y(action: String, text: String): Verdict? {
+        return when (action.lowercase()) {
+            // 只读：看屏幕、截图，不打扰
+            "tree", "shot" -> null
+            "input" -> Verdict(
+                title = "允许它输入文字？",
+                subjectLabel = "内容",
+                subject = clip(text),
+                reason = "会写进当前焦点输入框，等同你在这台手机上打字。",
+                risk = Risk.WRITE,
+                autoKey = "adb-ui",
+            )
+            else -> Verdict(
+                title = "允许它操作屏幕？",
+                subjectLabel = "动作",
+                subject = clip("$action ${if (text.isNotBlank()) text else ""}".trim()),
+                reason = "会在当前屏幕上模拟点击/滑动/按键，作用的是**前台那个 App**。",
+                risk = Risk.WRITE,
+                autoKey = "adb-ui",
+            )
+        }
+    }
+
     /** 文件工具的写类动作；读/列/搜返回 null（不用打扰用户） */
     fun assessFile(tool: String, args: org.json.JSONObject): Verdict? {
         val path = args.optString("path")

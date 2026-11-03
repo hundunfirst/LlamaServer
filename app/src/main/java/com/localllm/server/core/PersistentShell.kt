@@ -104,10 +104,16 @@ object PersistentShell {
     /**
      * 在持久会话里跑一条命令。
      *
+     * **阻塞调用**：整个等待过程会卡在调用线程上。所以这里统一切到 IO 线程——
+     * 曾经因为调用方（adb/install 工具）在主线程直接调它，命令跑几秒就把输入分发卡住，
+     * 系统判 ANR 直接杀进程（真机实测：ANR in com.localllm.server，
+     * 堆栈停在 PersistentShell.run → LinkedBlockingQueue.poll）。切在这里而不是各个调用方，
+     * 这样谁都别想再踩一遍。
+     *
      * @param initialCwd 会话（或重建后的会话）启动时所在目录
      * @param cdTo       只有模型**明确**给了 cwd 才带；带了就会改变会话当前目录（这正是持久化的意义）
      */
-    fun run(
+    suspend fun run(
         context: Context,
         sid: String,
         command: String,
@@ -115,6 +121,18 @@ object PersistentShell {
         cdTo: String?,
         timeoutMs: Long,
         reset: Boolean = false,
+    ): Result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        runBlockingInternal(context, sid, command, initialCwd, cdTo, timeoutMs, reset)
+    }
+
+    private fun runBlockingInternal(
+        context: Context,
+        sid: String,
+        command: String,
+        initialCwd: String,
+        cdTo: String?,
+        timeoutMs: Long,
+        reset: Boolean,
     ): Result {
         // 记下「这条会话之前有没有 shell」：决定了返回文案是「新建」还是「重建」
         val hadBefore = sessions[sid] != null
