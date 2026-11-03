@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 能对外授权哪些目录：会话产物可能落在共享存储（run_bash 里 python 写出来的）、
+     App 自己的 files/cache（临时产物），两种情况都要覆盖，否则"点一下打开"会失败。 -->
+<paths>
+    <external-path name="sdcard" path="." />
+    <external-files-path name="ext_files" path="." />
+    <files-path name="files" path="." />
+    <cache-path name="cache" path="." />
+</paths>

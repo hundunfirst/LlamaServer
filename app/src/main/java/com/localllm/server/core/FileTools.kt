@@ -123,7 +123,20 @@ object FileTools {
 
     // ---------------- 执行 ----------------
     /** 返回给模型的结果文本；失败抛 IllegalStateException */
-    fun execute(context: Context, name: String, args: JSONObject): String {
+    /**
+     * 对外入口：**永不抛异常**。
+     *
+     * 这里原来是直接 throw：模型把路径写错（例如把工作目录名当成 SAF 相对路径的一部分，
+     * `LlamaWork/shot-1.png`）时，异常一路冒到协程顶，把整个 App 带崩——
+     * 真机 tombstone 记的就是 `IllegalStateException: 文件不存在：LlamaWork/shot-….png`
+     * 导致 art abort。工具报错应该是**工具结果**，不是 App 崩溃。
+     */
+    fun execute(context: Context, name: String, args: JSONObject): String =
+        runCatching { executeRaw(context, name, args) }
+            .getOrElse { "错误：${it.message ?: it.javaClass.simpleName}" }
+
+    private fun executeRaw(context: Context, name: String, args: JSONObject): String {
+
         // 绝对路径 → 走真实文件系统（需要全盘访问；原来 SAF 只能留在授权目录里）
         val p = args.optString("path")
         if (p.startsWith("/") && name != TOOL_GREP || (name == TOOL_GREP && p.startsWith("/"))) {
