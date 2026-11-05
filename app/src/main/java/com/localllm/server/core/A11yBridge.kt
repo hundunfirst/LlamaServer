@@ -47,6 +47,370 @@ object A11yBridge {
     }
 
     /** 当前窗口的控件清单（只挑有文字/可点/可编辑的，避免把上千个无意义节点灌给模型） */
+    /**
+     * 诊断：无障碍能看到的每个窗口各自在哪块屏上。
+     *
+     * 0 = 主屏，后台虚拟屏是另一个编号。这一步决定成败：**如果无障碍能看到虚拟屏上的窗口**，
+     * 读屏就该走控件树（有文本、有可点节点、能精确点），而不是截图 + OCR；
+     * 如果看不到，才只剩 OCR 一条路。
+     */
+    fun windowDisplays(): String {
+        val svc = A11yService.instance ?: return "无障碍服务没连上"
+        return runCatching {
+            val ws = svc.windows
+            if (ws.isEmpty()) return "（无障碍看不到任何窗口）"
+            ws.joinToString("\n") { w ->
+                val d = runCatching { w.getDisplayId() }.getOrDefault(-1)
+                val pkg = runCatching { w.root?.packageName?.toString() }.getOrNull() ?: "-"
+                "display=$d active=${w.isActive} focused=${w.isFocused} type=${w.type} pkg=$pkg"
+            }
+        }.getOrElse { "读取窗口失败：${it.message}" }
+    }
+
+    /** 最近一次读屏的节点，按编号索引（点击时直接对节点执行，不用坐标估） */
+    private var snapshot: List<android.view.accessibility.AccessibilityNodeInfo> = emptyList()
+    private var snapshotDisplay = -1
+
+    /**
+     * 读指定屏的控件树，输出带编号的元素（`@e1` 起）。
+     *
+     * 这是 Mika 那条路：无障碍窗口带 displayId，按它过滤就能读到后台虚拟屏上的界面——
+     * 比截图 + OCR 好得多（有真实文本、可点性、资源 ID，且点击可以对节点直接执行）。
+     * 之前我拿"空屏"的结果否掉过这条路，实际上窗口是有的（`focused=true`）。
+     */
+    /**
+     * 读指定屏的控件树，输出带编号的元素（`@e1` 起）。
+     *
+     * [prioritizeInteractive] 只给本地小模型用：它一次读几十个元素就糊涂了，所以要
+     * 把输入框/按钮排前面并砍到 40 条。云端模型保持**原始顺序**（从上到下，反映真实布局）
+     * 和更大的上限——不要为了迁就小模型削弱它。
+     */
+    fun treeOnDisplay(
+        displayId: Int,
+        limit: Int = 80,
+        prioritizeInteractive: Boolean = false
+    ): String {
+        val svc = A11yService.instance ?: return "错误：无障碍服务没连上"
+        val wins = runCatching {
+            svc.windows.filter {
+                runCatching { it.getDisplayId() }.getOrDefault(0) == displayId
+            }.sortedByDescending { it.layer }
+        }.getOrDefault(emptyList())
+        if (wins.isEmpty()) return "（这块屏上没有可读的窗口：App 可能还没打开，或界面在加载）"
+
+        val items = mutableListOf<Item>()
+        for (w in wins) {
+            val root = runCatching { w.root }.getOrNull() ?: continue
+            collectItems(root, 0, items, limit * 3)
+        }
+        val ordered = if (prioritizeInteractive) {
+            items.sortedWith(
+                compareByDescending<Item> { it.editable }
+                    .thenByDescending { it.clickable }
+                    .thenBy { it.rect.top }
+            )
+        } else {
+            items.sortedBy { it.rect.top }
+        }
+        val sorted = ordered.take(limit)
+        if (sorted.isEmpty()) return "（窗口在，但没有读到文字或可点元素）"
+
+        snapshot = sorted.map { it.node }
+        snapshotDisplay = displayId
+        val body = buildString {
+            sorted.forEachIndexed { i, it ->
+                append("@e").append(i + 1).append(' ')
+                append(if (it.editable) "输入框" else if (it.clickable) "按钮" else "文字")
+                if (it.text.isNotBlank()) append('「').append(it.text.take(40)).append('」')
+                if (it.editable) {
+                    it.node.hintText?.toString()?.takeIf { h -> h.isNotBlank() }?.let { h ->
+                        append("（提示：").append(h.take(20)).append("）")
+                    }
+                }
+                append(" @").append(it.rect.centerX()).append(',').append(it.rect.centerY())
+                it.rid?.let { rid -> append(" id=").append(rid.substringAfterLast('/')) }
+                append('\n')
+            }
+            if (items.size > limit) {
+                append("（只列了 ").append(limit).append(" 个，共 ").append(items.size)
+                    .append(" 个；输入框和可点的排前面）")
+            }
+        }.trim()
+        // 系统选择器 / 权限弹窗：这些是系统弹出来的，直接点上面的选项就行，
+        // 模型很容易把它当成 App 自己的界面，绕半天绕不出来
+        val systemDialog = looksLikeSystemDialog(wins, body)
+        // 按包名给的用法提示：省掉"底部导航在哪、搜索框在哪"的摸索
+        val pkg = wins.firstNotNullOfOrNull {
+            runCatching { it.root?.packageName?.toString() }.getOrNull()
+        }
+        val knowledge = pkg?.let {
+            A11yService.instance?.applicationContext?.let { c -> AppKnowledge.forPackage(c, it) }
+        }
+        return buildString {
+            systemDialog?.let { append("【").append(it).append("】\n") }
+            knowledge?.let { append("【关于 ").append(pkg).append("】").append(it).append('\n') }
+            append(body)
+        }
+    }
+
+    /** 认出系统弹窗（用哪个 App 打开、权限询问）：返回一句提示，不是系统弹窗返回 null */
+    private fun looksLikeSystemDialog(
+        wins: List<android.view.accessibility.AccessibilityWindowInfo>,
+        body: String
+    ): String? {
+        val pkgs = wins.mapNotNull { runCatching { it.root?.packageName?.toString() }.getOrNull() }
+        val systemWindow = pkgs.any {
+            it.contains("android", true) && !it.contains("localllm", true)
+        } || pkgs.any { it.contains("permissioncontroller", true) }
+        val keywords = listOf(
+            "用以下方式打开", "始终", "仅此一次", "打开方式",
+            "允许", "拒绝", "仅在使用中允许", "禁止", "取消"
+        )
+        val hinted = keywords.count { body.contains(it) } >= 2
+        return when {
+            hinted && systemWindow -> "系统弹窗：这是系统的选择/权限询问，直接点上面的选项（@eN）即可"
+            hinted -> "可能是弹窗：先点上面按钮里对应的选项，别去找页面里的控件"
+            systemWindow -> "系统界面：当前最上层是系统窗口（选择器/权限框之类），按上面的元素操作"
+            else -> null
+        }
+    }
+
+    /** 按编号点（@e3）：直接对节点 performAction，界面轻微变化也不会点偏 */
+    fun clickRef(displayId: Int, ref: String): String {
+        val node = nodeOf(displayId, ref) ?: return lastRefError
+        val probe = ref.removePrefix("@").removePrefix("e").toIntOrNull() ?: 0
+        val label = nodeText(node).take(20)
+        val ok = runCatching {
+            if (node.isClickable) node.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+            else {
+                // 可点的常常是父容器：往上找一层再试
+                var p = node.parent
+                var depth = 0
+                var done = false
+                while (p != null && depth < 6 && !done) {
+                    if (p.isClickable) done = runCatching {
+                        p.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+                    }.getOrDefault(false)
+                    p = p.parent
+                    depth++
+                }
+                done
+            }
+        }.getOrDefault(false)
+        return if (ok) "已点击「$label」（@e$probe）" else "点击「$label」失败（@e$probe）"
+    }
+
+    /** 按编号长按（删除、呼出菜单、拖拽前的常见操作） */
+    fun longClickRef(displayId: Int, ref: String): String {
+        val node = nodeOf(displayId, ref) ?: return lastRefError
+        val label = nodeText(node).take(20)
+        val ok = runCatching {
+            if (node.isLongClickable) {
+                node.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_LONG_CLICK)
+            } else {
+                var p = node.parent
+                var depth = 0
+                var done = false
+                while (p != null && depth < 6 && !done) {
+                    if (p.isLongClickable) done = runCatching {
+                        p.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_LONG_CLICK)
+                    }.getOrDefault(false)
+                    p = p.parent
+                    depth++
+                }
+                done
+            }
+        }.getOrDefault(false)
+        return if (ok) "已长按「$label」" else "长按「$label」失败"
+    }
+
+    /**
+     * 滚动一屏：优先对可滚动节点执行（[ref] 指定容器，null 就用第一个可滚动元素），
+     * 这样滚的是真实列表，不会滚到广告位上。返回 null 表示没有可滚动节点，调用方改用手势。
+     */
+    fun scrollRef(displayId: Int, ref: String?, forward: Boolean): String? {
+        if (snapshotDisplay != displayId || snapshot.isEmpty()) return null
+        val node = if (ref.isNullOrBlank()) {
+            snapshot.firstOrNull { runCatching { it.isScrollable }.getOrDefault(false) }
+        } else {
+            nodeOf(displayId, ref)
+        } ?: return null
+        if (!runCatching { node.isScrollable }.getOrDefault(false)) return null
+        val action = if (forward) {
+            android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+        } else {
+            android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+        }
+        val ok = runCatching { node.performAction(action) }.getOrDefault(false)
+        return if (ok) "已滚动${if (forward) "向前" else "向后"}一屏" else null
+    }
+
+    /**
+     * 往「当前聚焦的输入框」直接写文字（不用剪贴板、不碰用户的剪贴板）。
+     * 找不到聚焦的输入框返回 null，调用方改走剪贴板粘贴。
+     */
+    fun setTextOnFocused(displayId: Int, text: String): String? {
+        if (snapshotDisplay != displayId || snapshot.isEmpty()) return null
+        val node = snapshot.firstOrNull {
+            runCatching { it.isFocused && it.isEditable }.getOrDefault(false)
+        } ?: return null
+        val args = android.os.Bundle().apply {
+            putCharSequence(
+                android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                text
+            )
+        }
+        val ok = runCatching {
+            node.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        }.getOrDefault(false)
+        return if (ok) "已输入「$text」（直接写进焦点输入框）" else null
+    }
+
+    /** 按编号取节点；失败时把原因写进 [lastRefError]，调用方直接返回它 */
+    private var lastRefError: String = "没找到目标"
+
+    /**
+     * 当前屏最像输入框的那个元素的编号。
+     *
+     * 给本地小模型准备的：它经常挑不准编号，所以给一个「不用挑」的入口——
+     * 优先已聚焦的、其次是搜索框类（类名或资源 ID 带 search）。
+     */
+    fun bestEditableRef(displayId: Int): String? {
+        if (snapshotDisplay != displayId || snapshot.isEmpty()) return null
+        val editables = snapshot.mapIndexedNotNull { i, n ->
+            val editable = runCatching { n.isEditable }.getOrDefault(false)
+            if (editable) i to n else null
+        }
+        if (editables.isEmpty()) return null
+        val best = editables.maxByOrNull { (_, n) ->
+            var score = 0
+            if (runCatching { n.isFocused }.getOrDefault(false)) score += 5
+            val cls = runCatching { n.className?.toString() ?: "" }.getOrDefault("")
+            if (cls.contains("EditText", true)) score += 2
+            if (cls.contains("Search", true)) score += 3
+            val rid = runCatching { n.viewIdResourceName ?: "" }.getOrDefault("")
+            if (rid.contains("search", true)) score += 4
+            score
+        }!!.first
+        return "@e${best + 1}"
+    }
+
+    /** 宽容地认编号：`@e3` / `e3` / `3` / `#3` / `第3个` 都当 3（小模型经常只写数字） */
+    private fun parseRefNumber(ref: String): Int? {
+        val t = ref.trim()
+            .removePrefix("@").removePrefix("#")
+            .removePrefix("e").removePrefix("E")
+            .removePrefix("第").removeSuffix("个")
+            .trim()
+        return t.toIntOrNull()
+    }
+
+    private fun nodeOf(displayId: Int, ref: String): android.view.accessibility.AccessibilityNodeInfo? {
+        if (snapshotDisplay != displayId || snapshot.isEmpty()) {
+            lastRefError = "没找到目标：请先读一次屏（tree）"
+            return null
+        }
+        val idx = parseRefNumber(ref)?.minus(1)
+        if (idx == null) {
+            lastRefError = "错误：编号要写成 @e3 这样"
+            return null
+        }
+        val node = snapshot.getOrNull(idx)
+        if (node == null) lastRefError = "没有 @e${idx + 1} 这个元素（共 ${snapshot.size} 个）"
+        return node
+    }
+
+    /** 往编号对应的输入框里写文字（直接设值，比按键模拟稳） */
+    fun setTextOnRef(displayId: Int, ref: String, text: String): String {
+        val node = nodeOf(displayId, ref) ?: return lastRefError
+        if (!node.isEditable) return "「${nodeText(node).take(20)}」不是输入框"
+        val args = android.os.Bundle().apply {
+            putCharSequence(
+                android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                text
+            )
+        }
+        val ok = runCatching {
+            node.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        }.getOrDefault(false)
+        return if (ok) "已写入「$text」" else "写入失败"
+    }
+
+    private class Item(
+        val node: android.view.accessibility.AccessibilityNodeInfo,
+        val text: String,
+        val rect: android.graphics.Rect,
+        val clickable: Boolean,
+        val editable: Boolean,
+        val rid: String?
+    )
+
+    private fun collectItems(
+        node: android.view.accessibility.AccessibilityNodeInfo,
+        depth: Int,
+        out: MutableList<Item>,
+        cap: Int
+    ) {
+        if (depth > 60 || out.size >= cap) return
+        val text = nodeText(node)
+        val clickable = runCatching { node.isClickable }.getOrDefault(false)
+        val editable = runCatching { node.isEditable }.getOrDefault(false)
+        if (text.isNotBlank() || clickable || editable) {
+            val r = android.graphics.Rect()
+            runCatching { node.getBoundsInScreen(r) }
+            if (r.width() >= 5 && r.height() >= 5) {
+                out.add(Item(node, text, r, clickable, editable, node.viewIdResourceName))
+            }
+        }
+        for (i in 0 until node.childCount) {
+            val c = runCatching { node.getChild(i) }.getOrNull() ?: continue
+            collectItems(c, depth + 1, out, cap)
+            if (out.size >= cap) return
+        }
+    }
+
+    private fun collect(
+        node: android.view.accessibility.AccessibilityNodeInfo,
+        depth: Int,
+        out: MutableList<android.view.accessibility.AccessibilityNodeInfo>,
+        sb: StringBuilder,
+        limit: Int
+    ) {
+        if (depth > 60 || out.size >= limit) return
+        val text = nodeText(node)
+        val clickable = node.isClickable
+        val editable = node.isEditable
+        if (text.isNotBlank() || clickable || editable) {
+            val r = android.graphics.Rect()
+            runCatching { node.getBoundsInScreen(r) }
+            if (r.width() >= 5 && r.height() >= 5) {
+                out.add(node)
+                val id = "@e${out.size}"
+                sb.append(id).append(' ').append(if (editable) "输入框" else if (clickable) "按钮" else "文字")
+                if (text.isNotBlank()) sb.append("「").append(text.take(40)).append("」")
+                if (node.isEditable && node.hintText != null) {
+                    sb.append("（提示：").append(node.hintText.toString().take(20)).append("）")
+                }
+                sb.append(" @").append(r.centerX()).append(',').append(r.centerY())
+                node.viewIdResourceName?.let { rid ->
+                    sb.append(" id=").append(rid.substringAfterLast('/'))
+                }
+                sb.append('\n')
+            }
+        }
+        for (i in 0 until node.childCount) {
+            val c = runCatching { node.getChild(i) }.getOrNull() ?: continue
+            collect(c, depth + 1, out, sb, limit)
+            if (out.size >= limit) return
+        }
+    }
+
+    private fun nodeText(n: android.view.accessibility.AccessibilityNodeInfo): String {
+        val t = n.text?.toString()?.trim().orEmpty()
+        if (t.isNotEmpty()) return t
+        return n.contentDescription?.toString()?.trim().orEmpty()
+    }
+
     fun tree(): String {
         begin("读取屏幕内容")?.let { return it }
         val svc = service() ?: return "错误：无障碍服务未启用（设置 → 无障碍 → 混沌智核）"
@@ -56,32 +420,68 @@ object A11yBridge {
         val dm = svc.resources.displayMetrics
         out.append("屏幕 ${dm.widthPixels}×${dm.heightPixels}\n")
         out.append("包名：${root.packageName ?: "?"}\n")
-        var count = 0
-        fun walk(n: AccessibilityNodeInfo?, depth: Int) {
-            if (n == null || count >= MAX_TREE_LINES) return
+        // 先收集再排序：**可点 / 可输入**的排前面。
+        // 小屏 App 一屏几十个文本节点，按遍历顺序给的话关键按钮会被挤到 80 行之外，
+        // 模型就只能瞎猜坐标。同一组内保持屏幕上的先后（阅读顺序不变）。
+        val items = mutableListOf<Triple<AccessibilityNodeInfo, Int, Int>>() // node, 分组, 遍历序
+        var order = 0
+        fun walk(n: AccessibilityNodeInfo?) {
+            if (n == null) return
             val text = n.text?.toString()?.trim().orEmpty()
             val desc = n.contentDescription?.toString()?.trim().orEmpty()
-            val clickable = n.isClickable
-            val editable = n.isEditable
-            if (text.isNotEmpty() || desc.isNotEmpty() || clickable || editable) {
-                val b = Rect().also { n.getBoundsInScreen(it) }
-                out.append("· ")
-                if (text.isNotEmpty()) out.append("\"").append(text.take(48)).append("\" ")
-                if (desc.isNotEmpty() && desc != text) out.append("[").append(desc.take(32)).append("] ")
-                out.append(n.className?.toString()?.substringAfterLast('.') ?: "View")
-                n.viewIdResourceName?.let { out.append(" #").append(it.substringAfterLast('/')) }
-                out.append(" @").append(b.centerX()).append(",").append(b.centerY())
-                if (clickable) out.append(" 可点")
-                if (editable) out.append(" 可输入")
-                if (n.isFocused) out.append(" 焦点")
-                out.append('\n')
-                count++
+            if (text.isNotEmpty() || desc.isNotEmpty() || n.isClickable || n.isEditable) {
+                // 0 = 可操作（可点/可输入）、1 = 纯文字
+                items.add(Triple(n, if (n.isClickable || n.isEditable) 0 else 1, order++))
             }
-            for (i in 0 until n.childCount) walk(n.getChild(i), depth + 1)
+            for (i in 0 until n.childCount) walk(n.getChild(i))
         }
-        walk(root, 0)
+        walk(root)
+        items.sortWith(compareBy({ it.second }, { it.third }))
+        var count = 0
+        for ((n, _, _) in items) {
+            if (count >= MAX_TREE_LINES) break
+            val text = n.text?.toString()?.trim().orEmpty()
+            val desc = n.contentDescription?.toString()?.trim().orEmpty()
+            val b = Rect().also { n.getBoundsInScreen(it) }
+            out.append("· ")
+            if (text.isNotEmpty()) out.append("\"").append(text.take(48)).append("\" ")
+            if (desc.isNotEmpty() && desc != text) out.append("[").append(desc.take(32)).append("] ")
+            out.append(n.className?.toString()?.substringAfterLast('.') ?: "View")
+            n.viewIdResourceName?.let { out.append(" #").append(it.substringAfterLast('/')) }
+            out.append(" @").append(b.centerX()).append(",").append(b.centerY())
+            if (n.isClickable) out.append(" 可点")
+            if (n.isEditable) out.append(" 可输入")
+            if (n.isFocused) out.append(" 焦点")
+            out.append('\n')
+            count++
+        }
         if (count == 0) return out.append("（当前窗口没有可读/可点的控件）").toString()
         return out.toString()
+    }
+
+    /** 紧凑版屏幕摘要：只列可点/可输入的前若干个，用于动手之后立刻确认"现在到哪了" */
+    fun summary(maxLines: Int = 12): String {
+        val svc = service() ?: return ""
+        val root = svc.rootInActiveWindow ?: return "（读不到窗口）"
+        val out = StringBuilder()
+        var count = 0
+        fun walk(n: AccessibilityNodeInfo?) {
+            if (n == null || count >= maxLines) return
+            if (n.isClickable || n.isEditable) {
+                val text = n.text?.toString()?.trim().orEmpty()
+                val desc = n.contentDescription?.toString()?.trim().orEmpty()
+                if (text.isNotEmpty() || desc.isNotEmpty()) {
+                    val b = Rect().also { n.getBoundsInScreen(it) }
+                    out.append(if (count == 0) "" else "、").append("\"")
+                        .append((text.ifEmpty { desc }).take(18)).append("\"@")
+                        .append(b.centerX()).append(",").append(b.centerY())
+                    count++
+                }
+            }
+            for (i in 0 until n.childCount) walk(n.getChild(i))
+        }
+        walk(root)
+        return if (out.isEmpty()) "（没有可点控件）" else "当前可点：" + out
     }
 
     /** 按文字点击：优先找可点的祖先，找不到就在节点中心补一次手势点击 */
@@ -125,10 +525,15 @@ object A11yBridge {
     fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, ms: Long = 300): String {
         begin("滑动 ($x1,$y1 → $x2,$y2)")?.let { return it }
         A11yService.instance?.flashAt(x2, y2)   // 高亮终点：滑动方向一目了然
-        return gesture(durationMs = ms) { p ->
+        val err = gesture(durationMs = ms) { p ->
             p.moveTo(x1.toFloat(), y1.toFloat())
             p.lineTo(x2.toFloat(), y2.toFloat())
-        } ?: "滑动已发出 ($x1,$y1 → $x2,$y2 ${ms}ms)"
+        }
+        if (err != null) return err
+        // **滑完自动报一次"现在屏幕上有什么"**：真机上出现过"从第二页滑到第三页还没找到"——
+        // 它滑完不看，接着瞎找。手势落下需要一点时间，等一下再读屏。
+        runCatching { Thread.sleep(350) }
+        return "滑动已发出 ($x1,$y1 → $x2,$y2 ${ms}ms) · " + summary()
     }
 
     private fun gesture(

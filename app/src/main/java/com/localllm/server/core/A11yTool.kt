@@ -13,6 +13,53 @@ object A11yTool {
 
     const val NAME = "screen"
 
+    /**
+     * 极简版屏工具：整个命令就是一个字符串，给本地小模型用。
+     *
+     * 真机对比很说明问题：同一个 4B 模型，`adb`（单字符串参数）三轮就能关蓝牙，
+     * 而 [NAME]（枚举 + 多字段 + 嵌套数组）连"打开小红书"都拼不出来。
+     * 所以给本地模型只暴露这一个，云端模型继续用结构化的 [NAME]。
+     */
+    const val CMD_NAME = "screen_cmd"
+
+    fun commandToolJson(): JSONObject = JSONObject().apply {
+        put("type", "function")
+        put(
+            "function", JSONObject().apply {
+                put("name", CMD_NAME)
+                put(
+                    "description",
+                    "在后台屏上操作手机（不打扰用户主屏）。**只传一个字符串命令**，照抄下面这些：\n" +
+                            "· `tree` 看当前屏幕（返回 @e1 @e2 这样的编号，先看再用）\n" +
+                            "· `open 小红书` 打开 App（也可以写包名 com.xingin.xhs）\n" +
+                            "· `click 3` 点编号 3 的元素；`click 搜索` 按文字点\n" +
+                            "· `type 香氛机` 往输入框里输入（自动找输入框）\n" +
+                            "· `swipe 540 1800 540 600` 滑动；`scroll` 往下翻一屏；`up` 往上翻\n" +
+                            "· `scroll_to 某个词` 一直往下翻直到看到它\n" +
+                            "· `key back` 返回；`long 3` 长按编号 3\n" +
+                            "每次动作后会直接告诉你新的屏幕，**不用再 tree**。\n" +
+                            "典型流程：`tree` → `click 2` → `type 香氛机` → `click 5`。"
+                )
+                put(
+                    "parameters", JSONObject().apply {
+                        put("type", "object")
+                        put(
+                            "properties", JSONObject().apply {
+                                put(
+                                    "cmd", JSONObject().apply {
+                                        put("type", "string")
+                                        put("description", "要执行的命令，例如 `tree`、`open 小红书`、`click 3`")
+                                    }
+                                )
+                            }
+                        )
+                        put("required", JSONArray().put("cmd"))
+                    }
+                )
+            }
+        )
+    }
+
     fun toolJson(): JSONObject = JSONObject().apply {
         put("type", "function")
         put(
@@ -20,17 +67,35 @@ object A11yTool {
                 put("name", NAME)
                 put(
                     "description",
-                    "看和点手机屏幕（无障碍服务，不依赖 adb 与网络）。动作由 action 指定：\n" +
-                            "· `tree` 读当前屏幕：列出有文字/可点/可输入的控件，带中心坐标；**先用它再决定点哪**\n" +
-                            "· `click` 按文字点：action=click 且给出 text（优先精确控件的可点祖先，找不到会补一次坐标点击）\n" +
-                            "· `tap` 按坐标点：给出 x,y（坐标来自 tree 或截图）\n" +
-                            "· `swipe` 滑动：给出 x,y 到 x2,y2，duration 毫秒（默认 300；快速滑动给小值）\n" +
-                            "· `input` 输入文字：给出 text，写进当前焦点输入框\n" +
-                            "· `key` 系统键：text 填 back / home / recents / notifications\n" +
-                            "· `shot` 截图：存到工作目录，返回图片路径（可以随后用 file_* 查看）\n" +
-                            "操作别的 App 时：一次只做一个动作，做完用 `tree` 或 `shot` 确认结果再继续，" +
-                            "别连着发一串点击（用户可能也在用手机，两边同时操作会打架）。" +
-                            "要弹窗/装应用/查系统状态时用 adb 工具。"
+                    "看和点手机屏幕。**默认在一块独立的后台虚拟屏上操作，用户的主屏一点都不会被打扰**" +
+                            "（目标 App 会被开在那块屏上）。动作由 action 指定：\n" +
+                            "· `tree` 读当前屏幕：返回**带编号的元素**，形如 `@e3 按钮「搜索」 @540,120 id=search_box`；" +
+                            "先用它再决定点哪个\n" +
+                            "· `click` 点：text 填编号 `@e3`（推荐，直接点那个元素），或填屏幕上的文字（按文字找）\n" +
+                            "· `type` 输入：text 写 `@e5 要输入的文字`（编号是输入框）；" +
+                            "**挑不准编号时用 `type_any`**，text 直接写要输入的内容，代码会自己找输入框\n" +
+                            "· `long_press` 长按：text 填 `@e3` 最准，或给 x,y（duration 毫秒，默认 800）\n" +
+                            "· `double_tap` 双击：给出 x,y\n" +
+                            "· `scroll` 滚动：text 留空往下滚一屏，写 `up` 往上滚；已知列表的编号时可写 `@e7` 只滚那个列表\n" +
+                            "· `scroll_to` 滚到看到某段文字：text 填要查找的文字（最多滚 6 屏），长列表里翻找用它，" +
+                            "比一屏一屏地问快得多\n" +
+                            "· `tap` 按坐标点：给出 x,y（只在拿不到编号时用）\n" +
+                            "· `swipe` 滑动：给出 x,y 到 x2,y2，duration 毫秒（默认 300）\n" +
+                            "· `open` 打开 App：text 填包名（**别猜 Activity 名**，这里会自己找入口），" +
+                            "打开后会直接把屏幕上的元素列表给你\n" +
+                            "· `key` 系统键：text 填 back / enter / delete（home、最近任务会被拒，它们绑在用户主屏上）\n" +
+                            "· `shot` 截图存档：**你看不到图片内容，别用它来确认结果**——确认用 tree，" +
+                            "每步动作的结果里也自带最新屏幕" +
+                            "**规矩**：一次只做一个动作，做完看回来的「当前屏幕」再继续；" +
+                            "同一屏上要连做好几步时用 `steps` 一次给出来，比一步一问快得多。\n" +
+                            "**照这个流程做**（最省轮次）：\n" +
+                            "1) `{\"action\":\"open\",\"text\":\"com.xiaomi.shop\"}` → 打开 App 并拿到元素列表\n" +
+                            "2) `{\"action\":\"click\",\"text\":\"@e3\"}` → 点编号 3 的元素\n" +
+                            "3) `{\"action\":\"type\",\"text\":\"@e9 香氛机\"}` → 往编号 9 的输入框输入\n" +
+                            "4) 每次动作的结果里**已经带上了新的屏幕**，不要再补一次 tree\n" +
+                            "编号可以写成 `@e3`、`e3` 或直接 `3`，都认。\n" +
+                            "**如果返回「拿不到后台屏画面」**，说明后台屏没建起来（无线调试没连、或容器没就绪），" +
+                            "这时界面的活做不成——把这一点如实告诉用户，不要改去动用户的主屏。"
                 )
                 put(
                     "parameters", JSONObject().apply {
@@ -43,7 +108,9 @@ object A11yTool {
                                         put(
                                             "enum",
                                             JSONArray().put("tree").put("click").put("tap").put("swipe")
-                                                .put("input").put("key").put("shot")
+                                                .put("input").put("type").put("key").put("shot")
+                                                .put("open").put("long_press").put("double_tap").put("scroll")
+                                                .put("scroll_to").put("type_any")
                                         )
                                         put("description", "要做的动作")
                                     }
@@ -59,9 +126,53 @@ object A11yTool {
                                 put("duration", JSONObject().apply {
                                     put("type", "integer"); put("description", "手势时长毫秒，默认 300")
                                 })
+                                // 一次多步：省掉「一步一问」的往返，翻列表/连续点几下的场景快一个量级
+                                put("steps", JSONObject().apply {
+                                    put("type", "array")
+                                    put(
+                                        "description",
+                                        "一次做多步（**推荐**，最多 10 个）：每个元素形如 " +
+                                                "{action:'click',text:'消息'} 或 {action:'swipe',x:540,y:1800,x2:540,y2:600}，" +
+                                                "可选 wait（毫秒，默认 350）表示这一步之后等界面反应。\n" +
+                                                "用它一轮就能完成「翻一页 → 点开一条 → 看内容」，比一步一问快得多；" +
+                                                "任何一步失败会立刻停下并告诉你卡在哪一步。\n" +
+                                                "给了 steps 就不用再传顶层的 action/text/x/y。"
+                                    )
+                                    put("items", JSONObject().apply {
+                                        put("type", "object")
+                                        put(
+                                            "properties", JSONObject().apply {
+                                                put("action", JSONObject().apply { put("type", "string") })
+                                                put("text", JSONObject().apply { put("type", "string") })
+                                                put("x", JSONObject().apply { put("type", "integer") })
+                                                put("y", JSONObject().apply { put("type", "integer") })
+                                                put("x2", JSONObject().apply { put("type", "integer") })
+                                                put("y2", JSONObject().apply { put("type", "integer") })
+                                                put("duration", JSONObject().apply { put("type", "integer") })
+                                                put("wait", JSONObject().apply { put("type", "integer") })
+                                                put("expect", JSONObject().apply {
+                                                    put("type", "string")
+                                                    put(
+                                                        "description",
+                                                        "这一步做完等这段文字出现（最多 timeout 秒）再做下一步；" +
+                                                                "比固定等一会儿稳，也省掉再问一次屏"
+                                                    )
+                                                })
+                                                put("expect_gone", JSONObject().apply {
+                                                    put("type", "string")
+                                                    put("description", "这一步做完等这段文字消失")
+                                                })
+                                                put("timeout", JSONObject().apply {
+                                                    put("type", "integer")
+                                                    put("description", "等待上限秒数，1–20，默认 6")
+                                                })
+                                            }
+                                        )
+                                    })
+                                })
                             }
                         )
-                        put("required", JSONArray().put("action"))
+                        put("required", JSONArray())
                     }
                 )
             }

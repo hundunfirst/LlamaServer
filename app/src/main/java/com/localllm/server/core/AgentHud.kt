@@ -33,6 +33,9 @@ object AgentHud {
     /** 超过这么久没进展就提示「可能卡住」 */
     const val STUCK_MS = 60_000L
 
+    /** 「出错 / 已停止」显示多久后自动消失：终态没人会来关它，久了就成了赖在屏幕上的错误 */
+    private const val ERROR_LINGER_MS = 8_000L
+
     @Volatile
     private var stage: Stage = Stage.Idle
 
@@ -61,11 +64,21 @@ object AgentHud {
 
     fun isActive(): Boolean = stage != Stage.Idle
 
-    /** 当前状态条该显示的文字；[Stage.Idle] 返回 null 表示应隐藏 */
+    /** 当前状态条该显示的文字；[Stage.Idle] 或用户关掉了状态条 → null（隐藏） */
     fun text(): String? {
+        if (!AppSettings.hudEnabled) return null
         val s = stage
         if (s == Stage.Idle) return null
-        val sec = ((System.currentTimeMillis() - since) / 1000).coerceAtLeast(0)
+        val age = System.currentTimeMillis() - since
+        // 「出错 / 已停止」是终态：AGENT 那边收尾之后没人会再来改它，
+        // 一直挂在屏幕上就成了"错误消不掉"（真机上一直留到重装 App 才消失）
+        if (s == Stage.Error && age > ERROR_LINGER_MS) {
+            stage = Stage.Idle
+            detail = ""
+            refresh()
+            return null
+        }
+        val sec = (age / 1000).coerceAtLeast(0)
         val head = when (s) {
             Stage.Thinking -> "等模型"
             Stage.RunningTool -> "执行中"
@@ -74,17 +87,25 @@ object AgentHud {
             Stage.Idle -> return null
         }
         val tail = if (detail.isBlank()) "" else "：$detail"
-        val stuck = (s == Stage.Thinking || s == Stage.RunningTool) &&
-                System.currentTimeMillis() - since > STUCK_MS
+        val stuck = (s == Stage.Thinking || s == Stage.RunningTool) && age > STUCK_MS
         return if (stuck) "助手 $head$tail · ${sec}s —— 可能卡住，点此停止"
         else "助手 $head$tail · ${sec}s"
     }
 
-    /** 用户点了状态条 */
+    /** 用户点了状态条：既要拦掉后续动作，也要**真正中断这一轮生成** */
     fun requestStop() {
         stopRequested = true
-        ServerProcessManager.appLog("用户在状态条上点了停止：后续屏幕/adb 操作不再执行")
+        ServerProcessManager.appLog("用户在状态条上点了停止：中断本轮，并拒绝后续屏幕/adb 操作")
+        update(Stage.Error, "已请求停止")
+        runCatching { stopHook?.invoke() }
     }
+
+    /**
+     * 真正「停掉这一轮」的钩子（由 ChatViewModel 在初始化时挂上）。
+     * 不放进来直接调用是为了不让 core 依赖 ui 层。
+     */
+    @Volatile
+    var stopHook: (() -> Unit)? = null
 
     /** 取一次「是否要停」并复位 */
     fun consumeStop(): Boolean {
