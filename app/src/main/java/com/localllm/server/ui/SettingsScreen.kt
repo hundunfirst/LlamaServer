@@ -652,6 +652,36 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            // 后台屏现在到底什么状态：出问题时不用去翻日志
+            var vsNow by remember { mutableStateOf(com.localllm.server.core.VirtualScreen.current()) }
+            val vsScope = androidx.compose.runtime.rememberCoroutineScope()
+            Text(
+                when {
+                    vsNow != null ->
+                        "后台屏：已就绪 · 屏 ${vsNow!!.displayId} · ${vsNow!!.width}×${vsNow!!.height}"
+                    com.localllm.server.core.VirtualScreen.lastError != null ->
+                        "后台屏：没建起来 · ${com.localllm.server.core.VirtualScreen.lastError}"
+                    else -> "后台屏：未使用（需要操作界面时会自动建）"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = if (vsNow != null) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (vsNow != null) {
+                Text(
+                    "收起这块屏",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .clickable {
+                            vsScope.launch {
+                                com.localllm.server.core.VirtualScreen.release(a11yCtx.applicationContext)
+                                vsNow = null
+                            }
+                        }
+                        .padding(vertical = 6.dp)
+                )
+            }
             // 主屏操作总开关：默认关。关着时界面任务只在后台屏上做，
             // 后台屏不可用就如实说做不成，绝不把用户眼前的 App 切走。
             var useVirtualScreen by remember {
