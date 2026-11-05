@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -35,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -521,6 +523,8 @@ fun SettingsScreen(
             val a11yCtx = androidx.compose.ui.platform.LocalContext.current
             val a11yOn = com.localllm.server.core.A11yService.isEnabled(a11yCtx)
             var a11yHelp by remember { mutableStateOf(false) }
+            // 操作时的悬浮状态条：有人嫌挡视线就关掉
+            var hudOn by remember { mutableStateOf(com.localllm.server.core.AppSettings.hudEnabled) }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -568,6 +572,154 @@ fun SettingsScreen(
                         .padding(horizontal = 8.dp, vertical = 6.dp)
                 )
             }
+            // 手动开在「受限设置」上常被挡住、覆盖安装后又会被系统停掉，这里给一条
+            // 走无线调试自动登记的路（列表里已有的其他无障碍应用会保留）
+            if (!a11yOn) {
+                val a11yScope = androidx.compose.runtime.rememberCoroutineScope()
+                var a11yBusy by remember { mutableStateOf(false) }
+                var a11yNote by remember { mutableStateOf<String?>(null) }
+                Text(
+                    if (a11yBusy) "正在通过无线调试打开…" else "自动打开（走无线调试，不用去设置里翻）",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (a11yBusy) MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .clickable(enabled = !a11yBusy) {
+                            a11yBusy = true
+                            a11yNote = null
+                            a11yScope.launch {
+                                val ok = runCatching {
+                                    com.localllm.server.core.A11ySelfEnable.ensure(
+                                        a11yCtx.applicationContext, force = true
+                                    )
+                                }.getOrDefault(false)
+                                a11yBusy = false
+                                a11yNote = if (ok) "已打开"
+                                else "没能自动打开：无线调试没连上，或系统拒绝了写入。去设置里手动开一次。"
+                            }
+                        }
+                        .padding(horizontal = 2.dp, vertical = 6.dp)
+                )
+                a11yNote?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("操作时显示悬浮状态条", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "屏幕顶部显示「助手执行中 · 12s」，点它可立即停止；嫌挡视线可以关掉",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = hudOn,
+                    onCheckedChange = { on ->
+                        hudOn = on
+                        com.localllm.server.core.AppSettings.hudEnabled = on
+                    }
+                )
+            }
+            // 后台屏自检：无线调试 + 容器都在的前提下，建一块独立虚拟屏把设置开上去，
+            // 再取一张截图。全程不碰主屏——这条链路通了，界面任务才谈得上"静默执行"。
+            // 状态放在 VirtualScreen 里（进程级），切换页面不会把正在跑的自检取消。
+            val vdNote by com.localllm.server.core.VirtualScreen.selfTestNote.collectAsState()
+            val vdBusy by com.localllm.server.core.VirtualScreen.selfTestBusy.collectAsState()
+            Text(
+                if (vdBusy) "后台屏自检中…（可以切走，回来还在这）"
+                else "后台屏自检（在独立屏上开 App 并截图，不动主屏）",
+                style = MaterialTheme.typography.labelMedium,
+                color = if (vdBusy) MaterialTheme.colorScheme.onSurfaceVariant
+                else MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .clickable(enabled = !vdBusy) {
+                        com.localllm.server.core.VirtualScreen.startSelfTest(a11yCtx.applicationContext)
+                    }
+                    .padding(top = 4.dp, bottom = 2.dp)
+            )
+            vdNote?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            // 主屏操作总开关：默认关。关着时界面任务只在后台屏上做，
+            // 后台屏不可用就如实说做不成，绝不把用户眼前的 App 切走。
+            var useVirtualScreen by remember {
+                mutableStateOf(com.localllm.server.core.AppSettings.useVirtualScreen)
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("界面任务在后台屏上做", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (useVirtualScreen) "独立后台屏，不打扰你正在用的屏幕"
+                        else "已关：界面任务会直接在你当前的屏幕上操作",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = useVirtualScreen,
+                    onCheckedChange = { on ->
+                        useVirtualScreen = on
+                        com.localllm.server.core.AppSettings.useVirtualScreen = on
+                    }
+                )
+            }
+            if (useVirtualScreen) {
+                var idleMin by remember {
+                    mutableStateOf(com.localllm.server.core.AppSettings.virtualScreenIdleMinutes.toString())
+                }
+                Text(
+                    "后台屏闲置多久自动收起",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                QuickChips(
+                    options = listOf("1" to "1 分钟", "3" to "3 分钟", "10" to "10 分钟"),
+                    current = idleMin
+                ) { picked ->
+                    idleMin = picked
+                    com.localllm.server.core.AppSettings.virtualScreenIdleMinutes =
+                        picked.toIntOrNull() ?: 3
+                }
+            }
+            var allowMainScreen by remember {
+                mutableStateOf(com.localllm.server.core.AppSettings.allowMainScreenOps)
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("允许操作主屏（不建议）", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (allowMainScreen) "后台屏不可用时会退回你的主屏上操作"
+                        else "默认关：界面任务只在后台屏上做，后台屏不可用就如实报告失败",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = allowMainScreen,
+                    onCheckedChange = { on ->
+                        allowMainScreen = on
+                        com.localllm.server.core.AppSettings.allowMainScreenOps = on
+                    }
+                )
+            }
 
             // ---- 定时任务 ----
             val schedCtx = androidx.compose.ui.platform.LocalContext.current
@@ -581,6 +733,9 @@ fun SettingsScreen(
             SectionHeader(
                 title = "定时任务",
                 help = "到点由 App 自己执行这条指令，跑完发一条通知（含结果摘要，点开进会话看全文）。\n\n" +
+                        "「跑在哪里」可以选本地模型，也可以直接选云端渠道：云端到点直接请求接口，" +
+                        "不启本地引擎、不用先下模型，但要联网。\n\n" +
+                        "任务行上点「改」可以改指令/时间/模型，不必删了重加。\n\n" +
                         "无人值守开着时：后台会自己拉起本地引擎（前台服务，会看到「推理服务」通知），" +
                         "跑完如果引擎是这次临时拉起的就顺手关掉；结果追加在你当前所在的会话里，" +
                         "和手动排队的位置一致，不会另开一条找不到的会话。\n\n" +
@@ -660,7 +815,16 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            // 点这一行就能改（含时间/模型/指令），不必删了重加
+                            .clickable {
+                                schedEditing = task
+                                schedAdding = false
+                            }
+                            .padding(vertical = 2.dp)
+                    ) {
                         Text(task.name, style = MaterialTheme.typography.bodyMedium)
                         Text(
                             task.describe() + " · " + task.prompt.take(24),
@@ -692,6 +856,17 @@ fun SettingsScreen(
                         }
                     )
                     Text(
+                        "改",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .clickable {
+                                schedEditing = task
+                                schedAdding = false
+                            }
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                    )
+                    Text(
                         "删除",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.error,
@@ -719,16 +894,66 @@ fun SettingsScreen(
                     mutableStateOf(editing?.prompt ?: "")
                 }
                 var mode by remember(schedAdding, editing?.id) {
-                    mutableStateOf(if ((editing?.everyMinutes ?: 0) > 0) "interval" else "daily")
+                    mutableStateOf(
+                        when {
+                            (editing?.onceAt ?: 0) > 0 -> "once"
+                            (editing?.everyMinutes ?: 0) > 0 -> "interval"
+                            else -> "daily"
+                        }
+                    )
                 }
                 var minutes by remember(schedAdding, editing?.id) {
                     mutableStateOf((editing?.everyMinutes ?: 60).toString())
                 }
                 var hourText by remember(schedAdding, editing?.id) {
-                    mutableStateOf((editing?.dailyHour ?: 8).toString())
+                    // 仅一次：时刻留空由用户自己填（默认今天，见下面的 onceDate）
+                    mutableStateOf(if ((editing?.onceAt ?: 0) > 0) "" else (editing?.dailyHour ?: 8).toString())
                 }
                 var minuteText by remember(schedAdding, editing?.id) {
-                    mutableStateOf((editing?.dailyMinute ?: 0).toString())
+                    mutableStateOf(if ((editing?.onceAt ?: 0) > 0) "" else (editing?.dailyMinute ?: 0).toString())
+                }
+                // 任务级设置：用哪个模型、要不要自动拉引擎、要不要每次新开会话
+                var taskModel by remember(schedAdding, editing?.id) {
+                    mutableStateOf(editing?.modelPath ?: "")
+                }
+                var taskAutoEngine by remember(schedAdding, editing?.id) {
+                    mutableStateOf(editing?.autoStartEngine ?: true)
+                }
+                var taskNewSession by remember(schedAdding, editing?.id) {
+                    mutableStateOf(editing?.newSession ?: true)
+                }
+                // 一次性任务的日期；默认就是**今天**，时刻由 时/分 输入决定
+                var onceDate by remember(schedAdding, editing?.id) {
+                    mutableStateOf(
+                        editing?.onceAt?.takeIf { it > 0 } ?: System.currentTimeMillis()
+                    )
+                }
+                var showDatePicker by remember(schedAdding, editing?.id) {
+                    mutableStateOf(false)
+                }
+                // 云端渠道：选预设 + 里面的模型；选了就用云端跑，不需要本地引擎
+                var taskPresetId by remember(schedAdding, editing?.id) {
+                    mutableStateOf(editing?.endpointPresetId ?: "")
+                }
+                var taskCloudModel by remember(schedAdding, editing?.id) {
+                    mutableStateOf(editing?.cloudModel ?: "")
+                }
+                // 云端候选：(预设 id, 模型名, 显示标签)
+                // 预设里没配模型列表的，用预设自己的默认模型兜底——否则这个渠道选不到
+                val cloudChoices = remember(schedAdding, editing?.id) {
+                    com.localllm.server.core.AppSettings.loadCloudPresets().flatMap { p ->
+                        val ms = p.models.filter { it.id.isNotBlank() }
+                        if (ms.isEmpty()) listOf(Triple(p.id, "", p.name))
+                        else ms.map { m ->
+                            Triple(p.id, m.id, "${p.name}/${m.label.ifBlank { m.id }}")
+                        }
+                    }
+                }
+                // 模型候选：模型目录里现成的 gguf（含子目录），只给名字+路径
+                val modelChoices = remember(schedAdding, editing?.id) {
+                    val dir = java.io.File(schedCtx.filesDir, "models")
+                    dir.walkTopDown().filter { it.isFile && it.name.endsWith(".gguf", true) }
+                        .map { it.absolutePath }.sorted().take(40).toList()
                 }
                 AlertDialog(
                     onDismissRequest = { schedAdding = false; schedEditing = null },
@@ -750,10 +975,26 @@ fun SettingsScreen(
                             )
                             Spacer(modifier = Modifier.height(8.dp))
                             QuickChips(
-                                options = listOf("daily" to "每天定时", "interval" to "每隔一段时间"),
+                                options = listOf(
+                                    "daily" to "每天定时",
+                                    "interval" to "每隔一段时间",
+                                    "once" to "仅一次"
+                                ),
                                 current = mode
-                            ) { mode = it }
-                            if (mode == "daily") {
+                            ) { picked ->
+                                // 切到「仅一次」：日期回到今天，时刻清空让用户自己填
+                                // （原来从「每天」带过来的 08:00 会让人以为已经定好了）
+                                if (picked == "once" && mode != "once") {
+                                    onceDate = System.currentTimeMillis()
+                                    hourText = ""
+                                    minuteText = ""
+                                } else if (picked != "once" && mode == "once" && hourText.isBlank()) {
+                                    hourText = "8"
+                                    minuteText = "0"
+                                }
+                                mode = picked
+                            }
+                            if (mode == "daily" || mode == "once") {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     CompactField(
                                         value = hourText,
@@ -771,6 +1012,80 @@ fun SettingsScreen(
                                         modifier = Modifier.weight(1f)
                                     )
                                 }
+                                if (mode == "once") {
+                                    // 一次性：日期默认**今天**（时刻由上面两个输入框自己填）
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    val nowCal = java.util.Calendar.getInstance()
+                                    val pickCal = java.util.Calendar.getInstance().apply { timeInMillis = onceDate }
+                                    val tomorrowCal = (nowCal.clone() as java.util.Calendar).apply {
+                                        add(java.util.Calendar.DAY_OF_MONTH, 1)
+                                    }
+                                    val dayNum: (java.util.Calendar) -> Int = { c ->
+                                        c.get(java.util.Calendar.YEAR) * 10000 +
+                                            c.get(java.util.Calendar.MONTH) * 100 +
+                                            c.get(java.util.Calendar.DAY_OF_MONTH)
+                                    }
+                                    val dayLabel = when (dayNum(pickCal)) {
+                                        dayNum(nowCal) -> "今天"
+                                        dayNum(tomorrowCal) -> "明天"
+                                        else -> ""
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            "日期：" + (if (dayLabel.isBlank()) "" else "$dayLabel ") +
+                                                java.text.SimpleDateFormat(
+                                                    "yyyy-MM-dd", java.util.Locale.CHINA
+                                                ).format(java.util.Date(onceDate)),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Text(
+                                            "今天",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier
+                                                .clickable { onceDate = System.currentTimeMillis() }
+                                                .padding(horizontal = 8.dp, vertical = 6.dp)
+                                        )
+                                        Text(
+                                            "改日期",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier
+                                                .clickable { showDatePicker = true }
+                                                .padding(horizontal = 8.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                    // 落点预览：别等存完才发现排到了明天或已经过去
+                                    val hh = hourText.toIntOrNull()
+                                    val mm = minuteText.toIntOrNull()
+                                    if (hh == null || mm == null || hh !in 0..23 || mm !in 0..59) {
+                                        Text(
+                                            "还没填时刻：默认今天，时分自己填（24 小时制，如 21:30）",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    } else {
+                                        val at = (pickCal.clone() as java.util.Calendar).apply {
+                                            set(java.util.Calendar.HOUR_OF_DAY, hh)
+                                            set(java.util.Calendar.MINUTE, mm)
+                                            set(java.util.Calendar.SECOND, 0)
+                                            set(java.util.Calendar.MILLISECOND, 0)
+                                        }
+                                        val past = at.timeInMillis <= System.currentTimeMillis()
+                                        Text(
+                                            if (past)
+                                                "今天 $hh:$mm 已经过了 → 保存后按明天 $hh:$mm 执行"
+                                            else
+                                                "将于 " + java.text.SimpleDateFormat(
+                                                    "MM-dd HH:mm", java.util.Locale.CHINA
+                                                ).format(at.time) + " 执行一次，跑完自动关闭",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (past) MaterialTheme.colorScheme.error
+                                            else MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
                             } else {
                                 CompactField(
                                     value = minutes,
@@ -780,43 +1095,249 @@ fun SettingsScreen(
                                     modifier = Modifier.fillMaxWidth()
                                 )
                             }
+                            Spacer(modifier = Modifier.height(10.dp))
+                            // 跑在哪里：本地模型 / 云端渠道（云端不需要启本地引擎）
+                            val isCloudSel = taskPresetId.isNotBlank() &&
+                                cloudChoices.any { it.first == taskPresetId }
+                            Text(
+                                "跑在哪里",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            QuickChips(
+                                options = if (cloudChoices.isEmpty()) {
+                                    listOf("local" to "本地模型")
+                                } else {
+                                    listOf("local" to "本地模型", "cloud" to "云端渠道")
+                                },
+                                current = if (isCloudSel) "cloud" else "local"
+                            ) { where ->
+                                if (where == "cloud") {
+                                    taskModel = ""
+                                    if (!isCloudSel) {
+                                        cloudChoices.firstOrNull()?.let {
+                                            taskPresetId = it.first
+                                            taskCloudModel = it.second
+                                        }
+                                    }
+                                } else {
+                                    taskPresetId = ""
+                                    taskCloudModel = ""
+                                }
+                            }
+                            Text(
+                                when {
+                                    isCloudSel -> {
+                                        val label = cloudChoices.firstOrNull { it.first == taskPresetId }?.third
+                                            ?: taskPresetId
+                                        "云端 · $label" + (if (taskCloudModel.isBlank()) "" else " / $taskCloudModel")
+                                    }
+                                    taskModel.isBlank() -> "跟随当前选中的模型"
+                                    else -> taskModel.substringAfterLast('/')
+                                },
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            if (isCloudSel) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    cloudChoices.forEach { (presetId, modelName, label) ->
+                                        FilterChip(
+                                            selected = taskPresetId == presetId && taskCloudModel == modelName,
+                                            onClick = {
+                                                taskPresetId = presetId
+                                                taskCloudModel = modelName
+                                                taskModel = ""
+                                            },
+                                            label = {
+                                                Text("☁ $label", style = MaterialTheme.typography.labelSmall)
+                                            }
+                                        )
+                                    }
+                                }
+                                Text(
+                                    "云端执行：到点直接请求这个渠道，不启本地引擎、不需要下载模型；但要联网",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            } else {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    FilterChip(
+                                        selected = taskModel.isBlank(),
+                                        onClick = { taskModel = "" },
+                                        label = { Text("跟随当前", style = MaterialTheme.typography.labelSmall) }
+                                    )
+                                    modelChoices.forEach { path ->
+                                        FilterChip(
+                                            selected = taskModel == path,
+                                            onClick = { taskModel = path },
+                                            label = {
+                                                Text(
+                                                    java.io.File(path).name.take(22),
+                                                    style = MaterialTheme.typography.labelSmall
+                                                )
+                                            }
+                                        )
+                                    }
+                                }
+                                if (cloudChoices.isEmpty()) {
+                                    Text(
+                                        "还没有云端渠道：在「云端对话」里配一条之后，这里就能直接选云端模型",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            if (!isCloudSel) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("自动启动服务", style = MaterialTheme.typography.bodySmall)
+                                        Text(
+                                            "到点自己把本地引擎拉起来（用上面选的模型）",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    androidx.compose.material3.Switch(
+                                        checked = taskAutoEngine,
+                                        onCheckedChange = { taskAutoEngine = it }
+                                    )
+                                }
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("每次新开会话", style = MaterialTheme.typography.bodySmall)
+                                    Text(
+                                        "任务历史单独成一条会话，不跟手动聊天混在一起",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                androidx.compose.material3.Switch(
+                                    checked = taskNewSession,
+                                    onCheckedChange = { taskNewSession = it }
+                                )
+                            }
                         }
                     },
                     confirmButton = {
                         TextButton(onClick = {
                             val nm = name.trim().ifBlank { "定时任务" }
                             val pr = prompt.trim()
-                            if (pr.isNotEmpty()) {
+                            val hh = hourText.toIntOrNull()
+                            val mm = minuteText.toIntOrNull()
+                            val needTime = mode == "daily" || mode == "once"
+                            if (pr.isEmpty()) {
+                                android.widget.Toast.makeText(
+                                    schedCtx, "指令不能为空", android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            } else if (needTime && (hh == null || mm == null || hh !in 0..23 || mm !in 0..59)) {
+                                android.widget.Toast.makeText(
+                                    schedCtx, "请先填时刻（时 0-23，分 0-59）",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            } else {
+                                // 仅一次：日期 + 时:分 → 绝对时间戳；今天这个时刻已过就顺延到明天
+                                var rolledToTomorrow = false
+                                val onceAt = if (mode == "once") {
+                                    val at = java.util.Calendar.getInstance().apply {
+                                        timeInMillis = onceDate
+                                        set(java.util.Calendar.HOUR_OF_DAY, hh!!)
+                                        set(java.util.Calendar.MINUTE, mm!!)
+                                        set(java.util.Calendar.SECOND, 0)
+                                        set(java.util.Calendar.MILLISECOND, 0)
+                                        if (timeInMillis <= System.currentTimeMillis()) {
+                                            rolledToTomorrow = true
+                                            add(java.util.Calendar.DAY_OF_MONTH, 1)
+                                        }
+                                    }.timeInMillis
+                                    at
+                                } else 0
                                 val task = com.localllm.server.core.ScheduledTasks.Task(
                                     id = editing?.id ?: ("sched-" + System.currentTimeMillis()),
                                     name = nm,
                                     prompt = pr,
                                     everyMinutes = if (mode == "interval")
                                         (minutes.toIntOrNull() ?: 60).coerceIn(5, 1440) else 0,
-                                    dailyHour = (hourText.toIntOrNull() ?: 8).coerceIn(0, 23),
-                                    dailyMinute = (minuteText.toIntOrNull() ?: 0).coerceIn(0, 59),
-                                    enabled = true,
+                                    dailyHour = (hh ?: 8).coerceIn(0, 23),
+                                    dailyMinute = (mm ?: 0).coerceIn(0, 59),
+                                    // 编辑时别把「已停用」悄悄打开
+                                    enabled = editing?.enabled ?: true,
                                     // 编辑时保留上次执行记录，别把「跑过没」一起清掉
                                     lastRunAt = editing?.lastRunAt ?: 0,
-                                    lastNote = editing?.lastNote ?: ""
+                                    lastNote = editing?.lastNote ?: "",
+                                    modelPath = taskModel.ifBlank { null },
+                                    autoStartEngine = taskAutoEngine,
+                                    newSession = taskNewSession,
+                                    endpointPresetId = taskPresetId.ifBlank { null },
+                                    cloudModel = taskCloudModel.ifBlank { null },
+                                    onceAt = onceAt
                                 )
                                 val next = schedTasks.filterNot { it.id == task.id } + task
                                 schedTasks = next
                                 com.localllm.server.core.ScheduledTasks.save(schedCtx, next)
-                                com.localllm.server.core.ScheduledTasks.scheduleNext(schedCtx, task)
+                                if (task.enabled) {
+                                    com.localllm.server.core.ScheduledTasks.scheduleNext(schedCtx, task)
+                                } else {
+                                    com.localllm.server.core.ScheduledTasks.cancel(schedCtx, task)
+                                }
+                                val head = if (editing == null) "已添加：" else "已更新："
                                 android.widget.Toast.makeText(
-                                    schedCtx, "已添加：${task.describe()}",
+                                    schedCtx,
+                                    head + task.describe() +
+                                        (if (rolledToTomorrow) "（今天已过，顺延到明天）" else ""),
                                     android.widget.Toast.LENGTH_SHORT
                                 ).show()
+                                schedAdding = false
+                                schedEditing = null
                             }
-                            schedAdding = false
-                            schedEditing = null
-                        }) { Text("保存") }
+                        }) { Text(if (editing == null) "添加" else "保存") }
                     },
                     dismissButton = {
                         TextButton(onClick = { schedAdding = false; schedEditing = null }) { Text("取消") }
                     }
                 )
+                // 一次性任务的日期选择
+                if (showDatePicker) {
+                    // DatePicker 按 UTC 解释毫秒：本地日期要先换成 UTC 零点，否则会整体偏一天
+                    val localCal = java.util.Calendar.getInstance().apply { timeInMillis = onceDate }
+                    val initialUtcMidnight = java.time.LocalDate.of(
+                        localCal.get(java.util.Calendar.YEAR),
+                        localCal.get(java.util.Calendar.MONTH) + 1,
+                        localCal.get(java.util.Calendar.DAY_OF_MONTH)
+                    ).atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
+                    val dpState = androidx.compose.material3.rememberDatePickerState(
+                        initialSelectedDateMillis = initialUtcMidnight
+                    )
+                    androidx.compose.material3.DatePickerDialog(
+                        onDismissRequest = { showDatePicker = false },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                dpState.selectedDateMillis?.let { ms ->
+                                    // 只取日期，时分沿用上面输入框
+                                    val picked = java.time.Instant.ofEpochMilli(ms)
+                                        .atZone(java.time.ZoneOffset.UTC).toLocalDate()
+                                    val cur = java.util.Calendar.getInstance().apply { timeInMillis = onceDate }
+                                    cur.set(java.util.Calendar.YEAR, picked.year)
+                                    cur.set(java.util.Calendar.MONTH, picked.monthValue - 1)
+                                    cur.set(java.util.Calendar.DAY_OF_MONTH, picked.dayOfMonth)
+                                    onceDate = cur.timeInMillis
+                                }
+                                showDatePicker = false
+                            }) { Text("确定") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showDatePicker = false }) { Text("取消") }
+                        }
+                    ) {
+                        androidx.compose.material3.DatePicker(state = dpState)
+                    }
+                }
             }
 
             }
@@ -1449,13 +1970,10 @@ fun SettingsScreen(
             }
 
             }
-            // ---- 版本与更新 ----
+            // 版本与更新 ----
             val appCtx = androidx.compose.ui.platform.LocalContext.current
-            val appVer = remember {
-                runCatching {
-                    appCtx.packageManager.getPackageInfo(appCtx.packageName, 0).versionName
-                }.getOrNull() ?: "?"
-            }
+            // 用编译期常量：PackageInfo.versionName 字段在新版 Android 上已删除，读它会抛 NoSuchFieldError
+            val appVer = com.localllm.server.BuildConfig.VERSION_NAME
             var updateInfo by remember {
                 mutableStateOf<com.localllm.server.core.UpdateChecker.Info?>(null)
             }

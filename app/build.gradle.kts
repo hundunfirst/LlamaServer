@@ -68,6 +68,11 @@ android {
 
     buildFeatures {
         compose = true
+        // 需要 BuildConfig.VERSION_NAME：PackageInfo.versionName 这个**字段**在新版 Android 上已被删除，
+        // 读它会抛 NoSuchFieldError；若此时恰有别的异常未处理，ART 会直接 abort 整个进程
+        // （真机 tombstone：'No static field versionName ... with unexpected pending exception:
+        //  JobCancellationException'，表现为「生成中点停止就闪退」）
+        buildConfig = true
     }
 
     packaging {

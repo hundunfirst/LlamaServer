@@ -504,6 +504,9 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
     val imageNote by vm.pendingImageNote.collectAsStateWithLifecycle()
     val queue by vm.taskQueue.collectAsStateWithLifecycle()
     val pendingFile by vm.pendingFile.collectAsStateWithLifecycle()
+    // 音视频附件：原样发送，仅在当轮有效；界面要显示出来，否则用户不知道加上了没有
+    val mediaNote by vm.pendingMediaNote.collectAsStateWithLifecycle()
+
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val activeId by vm.activeId.collectAsStateWithLifecycle()
     var showSessions by remember { mutableStateOf(false) }
@@ -1810,6 +1813,24 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
                 TextButton(onClick = vm::clearPendingFile) { Text("移除") }
             }
         }
+        // 音视频附件：以前完全不在界面上显示，用户以为没加上
+        mediaNote?.let { note ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "🎬 附件：$note",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = vm::clearPendingMedia) { Text("移除") }
+            }
+        }
         if (pendingImage != null) {
             Row(
                 modifier = Modifier
@@ -1930,7 +1951,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier, modelTitle: Str
 
         // 输入区：一个撑满宽度的胶囊输入框，按钮都嵌在框内（左：加号，右：语音/发送自动切换）。
         // 语音和发送占同一个位置，框里有内容就变发送——两个按钮常驻会把输入宽度吃掉。
-        val canSend = input.isNotBlank() || pendingImage != null || pendingFile != null
+        val canSend = input.isNotBlank() || pendingImage != null || pendingFile != null || mediaNote != null
         Surface(
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
             shape = RoundedCornerShape(26.dp),

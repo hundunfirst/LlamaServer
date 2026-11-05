@@ -178,6 +178,8 @@ object AdbBridge {
 
     /** 在容器里执行 `adb <args>`（自动确保连接）。返回 (成功?, 输出) */
     suspend fun runAdb(context: Context, args: String, timeoutMs: Long = 180_000): Pair<Boolean, String> {
+        // 用户在状态条上点了停止：后面的 adb 动作一律不执行（之前只有无障碍侧检查了这个标志）
+        if (AgentHud.consumeStop()) return false to "用户点了停止：已中止后续 adb 操作"
         val app = context.applicationContext as? Application ?: return false to "上下文无效"
         val st = ensureConnected(app)
         if (!st.connected) return false to st.message
@@ -199,6 +201,21 @@ object AdbBridge {
         val app = context.applicationContext as? Application ?: return
         val v = if (on) 1 else 0
         shell(app, "adb shell settings put system show_touches $v; adb shell settings put system pointer_location $v", 20_000)
+    }
+
+    /**
+     * 唤醒并尝试解屏。
+     *
+     * 锁屏时界面操作**不拦**（锁屏也得能把活干完），但黑屏上点屏是点不中的，所以先按电源键唤醒、
+     * 再请求系统收起锁屏：没设密码的设备会直接进桌面；设了密码的仍停在锁屏，
+     * 后面的操作就只能在锁屏界面上做——这一点交给模型自己从读屏结果判断。
+     */
+    suspend fun wakeAndDismiss(context: Context): Boolean {
+        runCatching { runAdb(context, "shell input keyevent 224", 15_000) }
+        kotlinx.coroutines.delay(400)
+        runCatching { runAdb(context, "shell wm dismiss-keyguard", 15_000) }
+        kotlinx.coroutines.delay(400)
+        return !PhoneChannel.screenOffOrLocked(context)
     }
 
     /** 免点击安装：`adb install -r`。成功返回 null，失败返回原因（调用方据此退回系统安装器） */

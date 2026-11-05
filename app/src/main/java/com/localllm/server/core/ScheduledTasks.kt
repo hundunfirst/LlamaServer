@@ -41,14 +41,40 @@ object ScheduledTasks {
         val enabled: Boolean = true,
         val lastRunAt: Long = 0,
         /** 上一次执行的结果摘要（“完成 · 812 字” / “失败：引擎没起来”），空 = 没跑过 */
-        val lastNote: String = ""
+        val lastNote: String = "",
+        /** 这次任务用哪个模型（绝对路径）；null = 跟随当前选中的模型 */
+        val modelPath: String? = null,
+        /** 到点自动把本地引擎拉起来（前台服务）。关掉就只排队 + 通知 */
+        val autoStartEngine: Boolean = true,
+        /** 每次执行都新开一条会话，跟手动聊天分开，回头能单独翻 */
+        val newSession: Boolean = true,
+        /** 一次性任务的绝对触发时间（毫秒）；0 = 不是一次性。跑完自动关掉 */
+        val onceAt: Long = 0,
+        /** 用某个云端渠道预设跑（AppSettings.loadCloudPresets 的 id）；null = 用本地模型 */
+        val endpointPresetId: String? = null,
+        /** 云端预设里指定的模型名；空则用预设自己的默认模型 */
+        val cloudModel: String? = null
     ) {
-        fun describe(): String =
-            if (everyMinutes > 0) "每 $everyMinutes 分钟"
-            else String.format(java.util.Locale.CHINA, "每天 %02d:%02d", dailyHour, dailyMinute)
+        /** 是否走云端（云端不需要启本地引擎） */
+        val isCloud: Boolean get() = !endpointPresetId.isNullOrBlank()
+
+        fun describe(): String {
+            val base = when {
+                onceAt > 0 -> "仅一次 · " + java.text.SimpleDateFormat(
+                    "MM-dd HH:mm", java.util.Locale.CHINA
+                ).format(java.util.Date(onceAt))
+                everyMinutes > 0 -> "每 $everyMinutes 分钟"
+                else -> String.format(java.util.Locale.CHINA, "每天 %02d:%02d", dailyHour, dailyMinute)
+            }
+            val where = if (isCloud) "云端 ${cloudModel ?: ""}".trim()
+            else modelPath?.substringAfterLast('/') ?: ""
+            return if (where.isBlank()) base else "$base · $where"
+        }
 
         /** 下一次触发的时间戳 */
         fun nextTriggerAt(from: Long = System.currentTimeMillis()): Long {
+            // 一次性：就那个时刻（错过了也立刻补跑一次，别默默丢掉）
+            if (onceAt > 0) return if (onceAt <= from) from + 1000 else onceAt
             if (everyMinutes > 0) return from + everyMinutes * 60_000L
             val cal = java.util.Calendar.getInstance().apply {
                 timeInMillis = from
@@ -80,7 +106,13 @@ object ScheduledTasks {
                     dailyMinute = o.optInt("dailyMinute", 0),
                     enabled = o.optBoolean("enabled", true),
                     lastRunAt = o.optLong("lastRunAt"),
-                    lastNote = o.optString("lastNote")
+                    lastNote = o.optString("lastNote"),
+                    modelPath = o.optString("modelPath").takeIf { it.isNotBlank() },
+                    autoStartEngine = o.optBoolean("autoStartEngine", true),
+                    newSession = o.optBoolean("newSession", true),
+                    onceAt = o.optLong("onceAt"),
+                    endpointPresetId = o.optString("endpointPresetId").takeIf { it.isNotBlank() },
+                    cloudModel = o.optString("cloudModel").takeIf { it.isNotBlank() }
                 )
             }
         }.getOrDefault(emptyList())
@@ -96,6 +128,13 @@ object ScheduledTasks {
                     .put("dailyHour", t.dailyHour).put("dailyMinute", t.dailyMinute)
                     .put("enabled", t.enabled).put("lastRunAt", t.lastRunAt)
                     .put("lastNote", t.lastNote)
+                    .put("modelPath", t.modelPath ?: "")
+                    .put("autoStartEngine", t.autoStartEngine)
+                    .put("newSession", t.newSession)
+                    .put("onceAt", t.onceAt)
+                    .put("endpointPresetId", t.endpointPresetId ?: "")
+                    .put("cloudModel", t.cloudModel ?: "")
+
             )
         }
         runCatching { file(context).writeText(arr.toString()) }
@@ -237,7 +276,18 @@ class TaskAlarmReceiver : BroadcastReceiver() {
                 ScheduledTasks.markRun(context, task.id, "失败：${it.message?.take(60)}")
             }
         // 先把下一次登记好：本轮就算出错，明天的闹钟也得在
-        ScheduledTasks.scheduleNext(context, task)
+        // （一次性任务例外：跑完就关，不再登记；onceAt 留着，列表里才显示得出「仅一次 某时刻」）
+        if (task.onceAt > 0) {
+            ScheduledTasks.save(
+                context,
+                ScheduledTasks.load(context).map {
+                    if (it.id == task.id) it.copy(enabled = false) else it
+                }
+            )
+            ServerProcessManager.appLog("一次性任务已触发并自动关闭：${task.name}")
+        } else {
+            ScheduledTasks.scheduleNext(context, task)
+        }
     }
 }
 

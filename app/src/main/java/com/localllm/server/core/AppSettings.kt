@@ -768,6 +768,14 @@ object AppSettings {
      * 默认开：“定时任务”就该到点自己跑；代价是锁屏跑一轮模型，手机明显发热。
      */
     /**
+     * 操作屏幕时显示悬浮状态条（「助手执行中 · 12s，点此停止」）。
+     * 默认开：agent 操作别的 App 时这是我们唯一的可见反馈。有人嫌挡视线可以在设置里关掉。
+     */
+    var hudEnabled: Boolean
+        get() = prefs.getBoolean("hud_enabled", true)
+        set(value) = prefs.edit().putBoolean("hud_enabled", value).apply()
+
+    /**
      * 无障碍服务曾经成功用过。
      * 用途：覆盖安装本 App 后系统会把无障碍服务停掉，下次启动时据此提示用户去重新打开——
      * 否则用户会看到开关是开的（其实系统已经停用），然后一头雾水。
@@ -775,6 +783,27 @@ object AppSettings {
     var a11yWasEnabled: Boolean
         get() = prefs.getBoolean("a11y_was_enabled", false)
         set(value) = prefs.edit().putBoolean("a11y_was_enabled", value).apply()
+
+    /**
+     * 是否允许在用户的主屏上操作界面。**默认关**。
+     *
+     * 关着的时候，agent 只在一块独立的后台虚拟屏上干活；后台屏建不起来（无线调试没连、
+     * 容器没就绪）就如实说这一步做不成，绝不会把用户眼前的 App 切走。这是用户的明确要求：
+     * 宁可失败，不要抢屏。真要临时放开，在设置里手动打开。
+     */
+    var allowMainScreenOps: Boolean
+        get() = prefs.getBoolean("allow_main_screen_ops", false)
+        set(value) = prefs.edit().putBoolean("allow_main_screen_ops", value).apply()
+
+    /** 界面任务是否在后台虚拟屏上做（默认开）。关掉就等于允许直接操作主屏 */
+    var useVirtualScreen: Boolean
+        get() = prefs.getBoolean("use_virtual_screen", true)
+        set(value) = prefs.edit().putBoolean("use_virtual_screen", value).apply()
+
+    /** 后台屏闲置多少分钟后自动收起 */
+    var virtualScreenIdleMinutes: Int
+        get() = prefs.getInt("virtual_screen_idle_min", 3).coerceIn(1, 60)
+        set(value) = prefs.edit().putInt("virtual_screen_idle_min", value.coerceIn(1, 60)).apply()
 
     /**
      * adb 操作免确认（自动化专用）。

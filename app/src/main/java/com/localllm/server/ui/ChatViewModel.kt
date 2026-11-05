@@ -7,12 +7,14 @@ import com.localllm.server.core.AdbBridge
 import com.localllm.server.core.AdbTool
 import com.localllm.server.core.A11yBridge
 import com.localllm.server.core.A11yTool
+import com.localllm.server.core.PhoneChannel
 import com.localllm.server.core.AppSettings
 import com.localllm.server.core.BashTool
 import com.localllm.server.core.ChatClient
 import com.localllm.server.core.ChatStore
 import com.localllm.server.core.DocExtract
 import com.localllm.server.core.DocMaker
+import com.localllm.server.core.FileOpener
 import com.localllm.server.core.FileSnapshots
 import com.localllm.server.core.FileTools
 import com.localllm.server.core.GgufInspector
@@ -144,6 +146,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             kotlinx.coroutines.delay(500)
             drainQueue(sid)
         }
+    }
+
+    /**
+     * 队列里有指令、但引擎还没跑：把它拉起来，就绪后由状态监听自动接上。
+     *
+     * 补的是「定时任务只排队、点开通知却没反应」这个洞：原来 kickQueue 只在引擎已经 RUNNING
+     * 时才会被调，没人负责启动引擎，于是队列永远躺着（提示说「点开立即执行」其实什么都不会发生）。
+     */
+    fun ensureEngineForQueued() {
+        if (_taskQueue.value.isEmpty()) return
+        val st = ServerProcessManager.state.value.status
+        if (st == ServerUiState.Status.RUNNING) {   // 已经在跑：直接接上
+            kickQueue()
+            return
+        }
+        if (st == ServerUiState.Status.STARTING) return  // 正在起，等状态监听触发
+        val model = AppSettings.selectedModelPath ?: AppSettings.serverModelPath ?: run {
+            _toast.value = "队列里有指令，但还没选模型，无法自动启动服务"
+            return
+        }
+        ServerProcessManager.appLog(
+            "队列里还有 ${_taskQueue.value.size} 条待跑指令：自动启动本地引擎（${model.substringAfterLast('/')}）"
+        )
+        _lastStats.value = "队列里有 ${_taskQueue.value.size} 条指令，正在启动服务…"
+        runCatching { com.localllm.server.core.ServerService.start(getApplication(), model) }
+            .onFailure { _toast.value = "启动服务失败：${it.message}" }
     }
 
     /** 一轮跑完后取出本会话的下一条排队指令；没有就什么都不做 */
@@ -443,6 +471,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     init {
         // 上次进程被结束时还剩的排队指令：读回来，接着排队
         runCatching { loadQueue() }
+        // 状态条上的「停止」要能真正中断这一轮：把钩子挂上（core 层不依赖 ui 层，所以用回调）
+        com.localllm.server.core.AgentHud.stopHook = {
+            viewModelScope.launch { runCatching { stop() } }
+        }
         // 进程在后台被杀时，那一轮的 stopped 还是 false，正文也可能为空：
         // 重开时把它们标成「被打断」，于是「继续这个任务」会出现，而不是看起来什么都没发生。
         runCatching {
@@ -498,6 +530,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (st.status == ServerUiState.Status.RUNNING) kickQueue()
             }
         }
+        // 打开 App 时如果队列里还有东西（定时任务只排了队、或上次进程被杀），
+        // 自己把引擎拉起来，就绪后接着执行——这才是「点开通知就开始跑」
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(800)
+            runCatching { ensureEngineForQueued() }
+        }
+        // 覆盖安装后系统会把无障碍停掉，手动开还常被「受限设置」挡住。
+        // 无线调试要是通着，就静默替用户登记一次；失败什么都不说，别打扰。
+        viewModelScope.launch(Dispatchers.IO) {
+            kotlinx.coroutines.delay(3_000)
+            runCatching { com.localllm.server.core.A11ySelfEnable.ensure(getApplication()) }
+        }
         // 接收外部分享内容：填进输入框并提示
         viewModelScope.launch {
             com.localllm.server.core.ShareInbox.text.collect { shared ->
@@ -518,7 +562,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // 压缩档位来自设置：默认不压缩——重编码是截图小字糊掉的主因。
                 // 但"不压缩"也有上限（6MB）：再大的图 base64 之后请求体会大到拖死 prefill。
                 val mode = AppSettings.imageCompressMode
-                val native = supportedImageMagic(origBytes)
+                val native = com.localllm.server.core.ImageFormats.serverReadable(origBytes)
+                val origFormat = com.localllm.server.core.ImageFormats.magic(origBytes) ?: "未知"
                 // 不压缩档位的兜底上限：再往上 base64 之后请求体会把预填充拖死
                 val ORIGINAL_LIMIT = 50 * 1024 * 1024
                 val passthrough = when (mode) {
@@ -530,7 +575,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val mb = origBytes.size / 1024.0 / 1024.0
                     _pendingImageNote.value = "原图直传 ${String.format(java.util.Locale.CHINA, "%.1f", mb)}MB（未压缩）"
                     ServerProcessManager.appLog(
-                        "图片：${origBytes.size / 1024}KB 原样直传（未压缩，档位 $mode）"
+                        "图片：${origBytes.size / 1024}KB 原样直传（未压缩，档位 $mode，格式 $origFormat）"
                     )
                     android.util.Base64.encodeToString(origBytes, android.util.Base64.NO_WRAP)
                 } else if (mode == "original") {
@@ -593,7 +638,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _pendingOcrText.value = null
     }
 
-    /** 只放行解码器一定认识的格式；认不出就走压缩分支，免得把奇怪字节原样喂给服务端 */
     /**
      * 不压缩档的转码：优先**保持原分辨率**，只在结果超过 [limit] 时才逐步缩边长。
      * 用于两种情况——模型读不了的格式（手机拍照多是 HEIC）、以及超过上限的大图。
@@ -648,31 +692,52 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return sample
     }
 
-    private fun supportedImageMagic(b: ByteArray): Boolean {
-        if (b.size < 12) return false
-        val jpeg = b[0] == 0xFF.toByte() && b[1] == 0xD8.toByte()
-        val png = b[0] == 0x89.toByte() && b[1] == 0x50.toByte() &&
-                b[2] == 0x4E.toByte() && b[3] == 0x47.toByte()
-        val gif = b[0] == 'G'.code.toByte() && b[1] == 'I'.code.toByte() && b[2] == 'F'.code.toByte()
-        val webp = b[0] == 'R'.code.toByte() && b[1] == 'I'.code.toByte() &&
-                b[2] == 'F'.code.toByte() && b[3] == 'F'.code.toByte()
-        return jpeg || png || gif || webp
-    }
-
-    /** data URL 的 mime：原样直传时要按真实格式标注（PNG 截图标成 JPEG 服务端解不开） */
-    private fun imageMimeOf(b64: String): String = when {
-        b64.startsWith("/9j/") -> "image/jpeg"
-        b64.startsWith("iVBOR") -> "image/png"
-        b64.startsWith("R0lGOD") -> "image/gif"
-        b64.startsWith("UklGR") -> "image/webp"
-        else -> "image/jpeg"
+    /**
+     * 历史消息里可能躺着本地引擎读不了的图（旧版本把 WebP 当成可直传格式存了下来）：
+     * 发之前转一道 JPEG。云端也收得下，代价只是重新编码一次。
+     *
+     * 返回 (base64, mime)。
+     */
+    private fun ensureReadableForServer(b64: String): Pair<String, String> {
+        val fmt = com.localllm.server.core.ImageFormats.formatOfB64(b64)
+        if (fmt == null || fmt in setOf("jpeg", "png", "gif", "bmp")) {
+            return b64 to com.localllm.server.core.ImageFormats.mimeOf(fmt)
+        }
+        return runCatching {
+            val raw = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+            val bmp = android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size)
+                ?: throw IllegalStateException("解码失败")
+            val baos = java.io.ByteArrayOutputStream()
+            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, baos)
+            bmp.recycle()
+            ServerProcessManager.appLog("图片：$fmt 本地引擎读不了，已转 JPEG 后发送")
+            android.util.Base64.encodeToString(baos.toByteArray(), android.util.Base64.NO_WRAP) to "image/jpeg"
+        }.getOrDefault(b64 to com.localllm.server.core.ImageFormats.mimeOf(fmt))
     }
 
     // ---- 文本类附件（文档/代码等）：读成文本随消息一起发送 ----
     private val _pendingFile = MutableStateFlow<Pair<String, String>?>(null) // (文件名, 文本)
+    // 音视频附件：原样(base64)发送，不抽文本。只挂在当前这一轮，不落盘（体积太大）
+    private val _pendingMediaB64 = MutableStateFlow<String?>(null)
+    private val _pendingMediaMime = MutableStateFlow<String?>(null)
+    private val _pendingMediaName = MutableStateFlow<String?>(null)
+    private val _pendingMediaNote = MutableStateFlow<String?>(null)
+    val pendingMediaNote: StateFlow<String?> = _pendingMediaNote.asStateFlow()
+
+    /** 音视频上限：base64 之后请求体会膨胀 1/3，再大就别指望一次传上去 */
+    private val MEDIA_MAX_BYTES = 25 * 1024 * 1024
     val pendingFile: StateFlow<Pair<String, String>?> = _pendingFile.asStateFlow()
 
     fun clearPendingFile() { _pendingFile.value = null }
+
+    /** 清掉音视频附件 */
+    fun clearPendingMedia() {
+        _pendingMediaB64.value = null
+        _pendingMediaMime.value = null
+        _pendingMediaName.value = null
+        _pendingMediaNote.value = null
+    }
+
 
     fun attachFile(uri: android.net.Uri) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -710,16 +775,27 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     "（${doc.kind.uppercase()} 已抽取文本）\n" + doc.text +
                             (doc.note?.let { "\n[$it]" } ?: "")
                 } else {
-                    // 纯文本只挡「读进内存会出事」的体量；至于太大装不进上下文，后面有按预算的截断
-                    // （原来是 256KB 直接拒绝，比实际需要的严格得多，几十万字的日志/代码就发不进来）
-                    if (AppSettings.attachmentMaxMb > 0 &&
-                        bytes.size > AppSettings.attachmentMaxMb.toLong() * 1024 * 1024
-                    ) {
-                        _error.value = "文本文件超过 ${AppSettings.attachmentMaxMb}MB，" +
-                                "请分段发送（上限可在 设置 → 图片压缩 附近调大，或设为不限）"
+                    // 二进制文件不能按 UTF-8 读：那样得到的是一堆乱码，模型还以为这就是文件内容
+                    val binMime = mime.ifBlank { FileOpener.mimeOf(name) }
+                    val isMedia = binMime.startsWith("audio/") || binMime.startsWith("video/")
+                    if (!isMedia) {
+                        _error.value = "「$name」（$binMime）不是文本，当前协议没有直接传输它的通道。" +
+                                "可以：①图片直接发（原样上传）；②音视频直接发（走原样传输）；" +
+                                "③PDF/Office 会被抽取成文本；④其它二进制请先用 run_bash 处理成文本/图片再发。"
                         return@launch
                     }
-                    String(bytes, Charsets.UTF_8)
+                    if (bytes.size > MEDIA_MAX_BYTES) {
+                        _error.value = "音视频超过 ${MEDIA_MAX_BYTES / 1024 / 1024}MB，请先压缩或截取片段"
+                        return@launch
+                    }
+                    // 音视频：**原样**（base64）交给支持它们的端点，不抽文本、不乱码
+                    _pendingMediaB64.value = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                    _pendingMediaMime.value = binMime
+                    _pendingMediaName.value = name
+                    _pendingMediaNote.value =
+                        "原样发送 $binMime（${String.format(java.util.Locale.CHINA, "%.1f", bytes.size / 1024.0 / 1024.0)}MB）"
+                    ServerProcessManager.appLog("音视频附件：$name（$binMime，${bytes.size / 1024}KB，原样发送）")
+                    return@launch
                 }
                 if (text.isBlank()) {
                     _error.value = "文件为空或格式不支持（支持：图片、文本、PDF、docx、xlsx）"
@@ -737,7 +813,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val text = _input.value.trim()
         val image = _pendingImageB64.value
         val file = _pendingFile.value
-        if ((text.isEmpty() && image == null && file == null) || blockIfBusy()) return
+        // 音视频要提前拦：本地引擎没有多模态投影时会直接回 500（video input is not supported），
+        // 报错还夹在「你好」这种无关的问题后面，用户根本不知道是附件的问题
+        if (_pendingMediaB64.value != null) {
+            val ep = endpointFor(_activeId.value)
+            val mmproj = AppSettings.effectiveMmproj(AppSettings.selectedModelPath)
+            if (ep.local && mmproj.isNullOrBlank()) {
+                _error.value = "音视频需要多模态投影：本地模型没配 mmproj，引擎会拒绝（video/audio input is not supported）。" +
+                        "两个办法：①到「模型」页给这个模型选配套的 mmproj 文件；②把本会话端点切到支持音视频的云端渠道。"
+                return
+            }
+        }
+        if ((text.isEmpty() && image == null && file == null && _pendingMediaB64.value == null) || blockIfBusy()) return
         _input.value = ""
         _pendingImageB64.value = null
         _pendingFile.value = null
@@ -851,6 +938,97 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _messages.value = list.subList(0, index + 1).toMutableList()
         append(ChatStore.Msg("assistant", ""))
         doStream()
+    }
+
+    /**
+     * `screen` 工具在主屏上的兜底路径（后台屏不可用、且用户允许动主屏时才走到这里）。
+     *
+     * 从 [doStream] 里搬出来的：那个方法已经撞上 JVM 的方法体上限（Method too large），
+     * 而它本来就是个几千行的巨型挂起函数。以后往里加东西前，先考虑拆成成员函数。
+     */
+    private suspend fun screenOnMainScreen(
+        action: String,
+        text: String,
+        x: Int,
+        y: Int,
+        x2: Int,
+        y2: Int,
+        dur: Int,
+        onStep: (ChatStore.Step) -> Unit
+    ): String {
+        // 先分清「系统里没开」和「开着但没连上」——覆盖安装后系统会把服务停掉，
+        // 一律报"没打开"会让人去设置里看到明明开着、以为程序坏了
+        val enabledInSystem = com.localllm.server.core.A11yService.isEnabled(getApplication())
+        // 闸门顺序有讲究：先看通道冲突，再看无障碍有没有开。
+        // 锁屏不拦（锁屏也得能干活），但屏幕黑着点不中，所以先唤醒一次。
+        val touches = PhoneChannel.a11yTouchesUi(action)
+        val laneClash = if (touches) PhoneChannel.reject(PhoneChannel.Lane.A11Y) else null
+        if (laneClash == null && touches && PhoneChannel.claimWakeAttempt(getApplication())) {
+            val woke = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                AdbBridge.wakeAndDismiss(getApplication())
+            }
+            ServerProcessManager.appLog(
+                "屏幕锁着：已尝试唤醒/解屏" +
+                        if (woke) "（已解锁，继续）" else "（仍锁着，可能有密码锁，按锁屏界面继续）"
+            )
+        }
+        var precheck: String? = when {
+            laneClash != null -> laneClash
+            !enabledInSystem ->
+                "错误：无障碍服务未启用。请到 设置 → 无障碍 → 混沌智核 打开（只需一次）。"
+            !A11yBridge.available() ->
+                "错误：无障碍服务在系统里是开着的，但当前没连上（App 重启过、或系统把它停掉了，" +
+                        "覆盖安装本 App 后也常见）。请到 设置 → 无障碍 把「混沌智核」关一下再打开，然后重试。"
+            else -> null
+        }
+        // 自己救一次再报错：覆盖安装后系统会停掉服务、手动开还可能被「受限设置」挡住
+        if (precheck != null && laneClash == null &&
+            com.localllm.server.core.A11ySelfEnable.ensure(getApplication(), force = true)
+        ) {
+            precheck = null
+            ServerProcessManager.appLog("无障碍不可用：已用无线调试自动打开，继续执行")
+        }
+        if (precheck == null) com.localllm.server.core.AppSettings.a11yWasEnabled = true
+        val r = precheck ?: kotlinx.coroutines.withContext(Dispatchers.IO) {
+            when (action) {
+                "tree" -> A11yBridge.tree()
+                "click" -> A11yBridge.clickText(text)
+                "tap" -> if (x >= 0 && y >= 0) A11yBridge.tap(x, y) else "错误：tap 需要 x 和 y"
+                "swipe" -> if (x >= 0 && y >= 0 && x2 >= 0 && y2 >= 0)
+                    A11yBridge.swipe(x, y, x2, y2, dur.toLong())
+                else "错误：swipe 需要 x,y,x2,y2"
+                "input" -> {
+                    val r1 = A11yBridge.inputText(text)
+                    if (r1.startsWith("输入失败") || r1.startsWith("没找到输入框")) {
+                        // 退路：有些 App 不接受无障碍直接设值，改用 adb 按键模拟
+                        val safe = text
+                            .replace("\\", "\\\\")
+                            .replace(" ", "%s")
+                            .replace("'", "'\\''")
+                            .replace("\"", "\\\"")
+                        val (ok, out) = AdbBridge.runAdb(
+                            getApplication(), "shell input text '$safe'", 30_000
+                        )
+                        if (ok) "已输入 ${text.length} 个字（改走 adb input text）"
+                        else "$r1\n（adb 退路也失败：${out.take(160)}）"
+                    } else r1
+                }
+                "key" -> A11yBridge.global(text)
+                "shot" -> A11yBridge.screenshot(getApplication())
+                else -> "错误：未知 action「$action」（可用 tree/click/tap/swipe/input/key/shot）"
+            }
+        }
+        val ok = !r.startsWith("错误") && !r.startsWith("没找到") &&
+                !r.startsWith("输入失败") && !r.startsWith("截图失败")
+        // 成功了就占住通道：后面 adb 的界面命令会被闸门挡掉
+        if (ok && touches) PhoneChannel.mark(PhoneChannel.Lane.A11Y)
+        onStep(
+            ChatStore.Step(
+                "tool", "屏幕：$action ${text.take(24)}",
+                r.take(400), args = "$action ${text.take(80)}", ok = ok
+            )
+        )
+        return r
     }
 
     private fun doStream(ocrSource: String? = null) {
@@ -1151,12 +1329,40 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 else systemTextFull + "\n\n" + midSystems.joinToString("\n\n") { it.content }
                 turnSystem = systemMerged
                 turnHistory = history
+                // 音视频附件：**原样**（base64）交给支持它们的端点。
+                // 以前二进制被当 UTF-8 读成乱码发过去，模型等于收到一堆垃圾。
+                val mediaB64 = _pendingMediaB64.value
+                val mediaMime = _pendingMediaMime.value.orEmpty()
+                val noSys = history.filter { it.role != "system" }
+                val lastUserIdx = noSys.indexOfLast { it.role == "user" }
+                val mediaPart: org.json.JSONObject? = when {
+                    mediaB64 == null -> null
+                    mediaMime.startsWith("audio/") -> org.json.JSONObject()
+                        .put("type", "input_audio")
+                        .put(
+                            "input_audio", org.json.JSONObject()
+                                .put("data", mediaB64)
+                                .put("format", mediaMime.substringAfter('/').ifBlank { "wav" })
+                        )
+                    else -> org.json.JSONObject()
+                        .put("type", "video_url")
+                        .put("video_url", org.json.JSONObject().put("url", "data:$mediaMime;base64,$mediaB64"))
+                }
                 val payloadMsgs = listOf(ChatClient.ChatMessage("system", systemMerged)) +
-                        history.filter { it.role != "system" }.map { m ->
+                        noSys.mapIndexed { idx, m ->
                             // 有图就有本地 OCR 原文：视觉模型读数字常错、读不清会编，
                             // 逐字结果给它核对；版面、图表、手写仍靠图。
                             val ocrBlock = OcrTool.promptBlock(m.ocrText)
                             when {
+                                mediaPart != null && idx == lastUserIdx -> {
+                                    val parts = org.json.JSONArray()
+                                    parts.put(
+                                        org.json.JSONObject().put("type", "text")
+                                            .put("text", m.content.ifBlank { "（见附件）" })
+                                    )
+                                    parts.put(mediaPart)
+                                    ChatClient.ChatMessage(m.role, parts)
+                                }
                                 m.imageB64 == null -> ChatClient.ChatMessage(m.role, m.content)
                                 imageVisible -> {
                                     if (!imageLogged) {
@@ -1171,12 +1377,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     val textPart = if (ocrBlock == null) m.content
                                     else (if (m.content.isNotBlank()) m.content + "\n\n" else "") + ocrBlock
                                     parts.put(org.json.JSONObject().put("type", "text").put("text", textPart))
+                                    // 本地引擎只认 jpg/png（WebP 会整个请求 400），发之前统一兜一道
+                                    val (sendB64, sendMime) = ensureReadableForServer(m.imageB64!!)
                                     parts.put(
                                         org.json.JSONObject().put("type", "image_url").put(
                                             "image_url",
                                             org.json.JSONObject().put(
-                                                "url",
-                                                "data:" + imageMimeOf(m.imageB64) + ";base64," + m.imageB64
+                                                "url", "data:$sendMime;base64,$sendB64"
                                             )
                                         )
                                     )
@@ -1273,6 +1480,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     pickMcpByModel(mcpAgg, lastUserText, cloud)
                         .ifEmpty { filterMcpForText(mcpAgg, lastUserText) }
                 } else filterMcpForText(mcpAgg, lastUserText)
+                // 这一轮是本地引擎还是云端：本地小模型只给单字符串那版屏工具，
+                // 并且读屏走「精简模式」（40 条 + 输入框优先）；云端保持完整列表与原始顺序
+                val toolsLocalModel = runCatching { endpointFor(sid).local }.getOrDefault(true)
+                com.localllm.server.core.VirtualScreen.compactReads = toolsLocalModel
                 val toolsJson = org.json.JSONArray().also { arr ->
                     if (searchAvailable) arr.put(WebSearch.toolJson())
                     if (fileToolsOn) FileTools.toolsJson().let { fa ->
@@ -1294,7 +1505,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     // （App 会自动发现端口并连接；配对只需一次）
                     if (fileOn) arr.put(AdbTool.toolJson())
                     // 无障碍通道：看和点屏幕，不依赖 adb 与网络（没连 Wi-Fi 时也能用）
-                    if (fileOn) arr.put(A11yTool.toolJson())
+                    // 屏工具给两种形态，按模型能力只暴露一种：本地小模型拼不出
+                    // 「枚举 + 多字段 + 嵌套数组」，只给它单字符串那版；云端模型用结构化那版。
+                    if (fileOn) {
+                        if (toolsLocalModel) arr.put(A11yTool.commandToolJson())
+                        else arr.put(A11yTool.toolJson())
+                    }
                     // OCR 工具：只有对话里真的出现过图片才注入，平时不白占 schema
                     if (hasImage) arr.put(OcrTool.toolJson())
                     // web_run 只在造物轮注入：纯提问轮模型看不到这个工具，
@@ -1412,6 +1628,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val roundCap = ToolLoopPolicy.roundCap(AppSettings.toolRoundLimit)
                 // 这一轮是模型自己收尾（不再调工具）还是撞上限被打断——两者收尾方式完全不同
                 var answeredNaturally = false
+                // 每次用户消息重新挑通道：上一轮用无障碍点过屏，不影响这一轮选 adb
+                PhoneChannel.reset()
                 for (round in 0 until roundCap) {
                     ensureActive() // 停止/切换后不再进入下一轮
 
@@ -1803,6 +2021,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                             m.copy(task = m.task?.copy(stopped = false, rounds = round + 1))
                         }
                         ServerProcessManager.appLog("聊天：完成 · ${_lastStats.value ?: "（无统计）"}")
+                        // 这一轮要是用过后台屏，就排一个空闲收屏的检查：任务完了还把虚拟屏
+                        // 晾着会白占一个合成层，用户也会疑惑"它怎么还开着"
+                        runCatching {
+                            com.localllm.server.core.VirtualScreen.scheduleIdleRelease(
+                                getApplication<Application>()
+                            )
+                        }
                         // 首轮回答完成 → 自动生成会话标题
                         val assistantCount = _messages.value.count {
                             it.role == "assistant" && it.content.isNotBlank()
@@ -1925,32 +2150,116 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                                 val adbArgs = args.optString("args").trim()
                                 val timeout = args.optInt("timeout", 60).coerceIn(5, 600)
-                                ServerProcessManager.appLog("adb：${adbArgs.take(80)}")
-                                // 自动发现端口并连接（配对过一次就行），然后执行
-                                val (ok, out) = AdbBridge.runAdb(
-                                    getApplication(), adbArgs, timeout * 1000L
-                                )
-                                val body = if (out.isBlank()) "（无输出）" else out.take(4000)
-                                // adb 装/生成的文件也进产物卡：`adb install x.apk`、`screencap` 截出来的图
-                                // 都是用户想要的东西，不该只留在命令输出里
-                                if (ok) {
-                                    Regex("""[\w\u4e00-\u9fa5./\-]+\.(?:apk|png|jpe?g|webp|csv|txt|log|json|xml|zip)""",
-                                        RegexOption.IGNORE_CASE)
-                                        .findAll(adbArgs)
-                                        .map { it.value }
-                                        .distinct()
-                                        .take(3)
-                                        .filter { fileExistsNow(it) }
-                                        .forEach { recordGeneratedFile(it) }
-                                }
-                                steps.add(
-                                    ChatStore.Step(
-                                        "tool", "adb ${adbArgs.take(50)}",
-                                        body.take(400), args = adbArgs.take(300), ok = ok
+                                // 用户要的是「一路后台」：界面命令改投后台屏，不落到主屏。
+                                // 关键：虚拟屏没建时**先建再执行**——否则任务开头那几轮
+                                // `am start` / `input` 会在主屏上生效（真机上就是这么切过去的）。
+                                val needsScreen = com.localllm.server.core.PhoneChannel.adbTouchesUi(adbArgs) ||
+                                        com.localllm.server.core.VirtualScreen.touchesScreen(adbArgs)
+                                var vsLane = com.localllm.server.core.VirtualScreen.current()
+                                if (vsLane == null && needsScreen) {
+                                    vsLane = com.localllm.server.core.VirtualScreen.ensure(
+                                        getApplication<Application>()
                                     )
-                                )
-                                syncSteps()
-                                if (ok) body else "adb 执行失败：\n$body"
+                                }
+                                val rerouted = if (vsLane != null) {
+                                    com.localllm.server.core.VirtualScreen.reroute(adbArgs, vsLane.displayId)
+                                } else null
+                                val execArgs = rerouted ?: adbArgs
+                                if (rerouted != null) {
+                                    ServerProcessManager.appLog(
+                                        "adb 改投后台屏（${vsLane!!.displayId}）：${execArgs.take(80)}"
+                                    )
+                                }
+                                // 后台屏就绪时，读屏类 adb 命令必须挡掉：uiautomator / screencap 只认主屏，
+                                // 放过去就成了「读用户眼前的界面、点后台屏的坐标」，越点越错，还顺带看了用户的主屏
+                                val vsReadWarn = if (vsLane != null) {
+                                    com.localllm.server.core.VirtualScreen.blockedOnVirtual(adbArgs)
+                                        ?: if (Regex("""\buiautomator\b""").containsMatchIn(adbArgs) ||
+                                            Regex("""\bscreencap\b""").containsMatchIn(adbArgs)
+                                        ) {
+                                            "错误：后台屏上不能用 uiautomator / screencap——它们只认主屏，" +
+                                                    "读回来的会是用户眼前的界面，和你要点的后台屏不是一回事。" +
+                                                    "读屏请用 screen 工具的 tree（返回屏幕上的文字和坐标），截图用 screen 的 shot。"
+                                        } else null
+                                } else null
+                                // 通道闸门：本轮已经用无障碍点过屏 → 不再执行 adb 的界面命令。
+                                // 锁屏不挡：锁屏状态下也得把活干完。改投后台屏的命令不与主屏通道冲突。
+                                val uiCmd = rerouted == null && PhoneChannel.adbTouchesUi(adbArgs)
+                                // 模型会自己写 `shell input -d 屏号 tap …`——那条命令在虚拟屏上事件会被丢掉，
+                                // 它在真机上反复发十几次、界面一动不动。这里统一截下来交给 helper 注入。
+                                val inputCmd = if (vsLane != null) {
+                                    com.localllm.server.core.VirtualScreen.parseInputCommand(adbArgs)
+                                } else null
+                                // 要动界面但后台屏没建起来：宁可不做，也不落到用户主屏上。
+                                // （用户在设置里主动关掉后台屏时，等于同意直接操作主屏）
+                                val refuseToTouchMain = vsLane == null && needsScreen &&
+                                        com.localllm.server.core.AppSettings.useVirtualScreen &&
+                                        !com.localllm.server.core.AppSettings.allowMainScreenOps
+                                val skip = when {
+                                    refuseToTouchMain ->
+                                        "错误：后台屏没建起来（${com.localllm.server.core.VirtualScreen.lastError ?: "原因见日志"}）。" +
+                                                "为不打扰用户的主屏，这条界面命令已取消——不要改用主屏。" +
+                                                "可以先用不需要界面的命令（settings / dumpsys / pm）尽量完成目标；" +
+                                                "确实要操作界面就告诉用户先检查无线调试。"
+                                    vsReadWarn != null -> vsReadWarn
+                                    uiCmd -> PhoneChannel.reject(PhoneChannel.Lane.ADB)
+                                    else -> null
+                                }
+                                if (skip != null) {
+                                    ServerProcessManager.appLog("adb 跳过（${adbArgs.take(40)}）：$skip")
+                                    steps.add(
+                                        ChatStore.Step(
+                                            "tool", "adb 已跳过：${adbArgs.take(40)}",
+                                            skip.take(400), args = adbArgs.take(300), ok = false
+                                        )
+                                    )
+                                    syncSteps()
+                                    skip
+                                } else if (inputCmd != null) {
+                                    // input 类命令改走 helper 注入（`input -d` 在虚拟屏上无效）
+                                    val r = com.localllm.server.core.VirtualScreen.runInjected(
+                                        getApplication<Application>(), inputCmd
+                                    )
+                                    ServerProcessManager.appLog("adb input 转注入：$inputCmd → ${r.take(40)}")
+                                    val okIn = !r.contains("失败") && !r.startsWith("错误")
+                                    steps.add(
+                                        ChatStore.Step(
+                                            "tool", "后台屏输入：${inputCmd.take(40)}",
+                                            r.take(300), args = adbArgs.take(300), ok = okIn
+                                        )
+                                    )
+                                    syncSteps()
+                                    r
+                                } else {
+                                    ServerProcessManager.appLog("adb：${execArgs.take(80)}")
+                                    // 自动发现端口并连接（配对过一次就行），然后执行
+                                    val (ok, out) = AdbBridge.runAdb(
+                                        getApplication(), execArgs, timeout * 1000L
+                                    )
+                                    if (ok && uiCmd) PhoneChannel.mark(PhoneChannel.Lane.ADB)
+                                    val body = if (out.isBlank()) "（无输出）" else out.take(4000)
+                                    // adb 装/生成的文件也进产物卡：`adb install x.apk`、`screencap` 截出来的图
+                                    // 都是用户想要的东西，不该只留在命令输出里
+                                    if (ok) {
+                                        Regex("""[\w\u4e00-\u9fa5./\-]+\.(?:apk|png|jpe?g|webp|csv|txt|log|json|xml|zip)""",
+                                            RegexOption.IGNORE_CASE)
+                                            .findAll(execArgs)
+                                            .map { it.value }
+                                            .distinct()
+                                            .take(3)
+                                            .filter { fileExistsNow(it) }
+                                            .forEach { recordGeneratedFile(it) }
+                                    }
+                                    steps.add(
+                                        ChatStore.Step(
+                                            "tool",
+                                            (if (rerouted != null) "后台屏 adb " else "adb ") + execArgs.take(50),
+                                            body.take(400), args = execArgs.take(300), ok = ok
+                                        )
+                                    )
+                                    syncSteps()
+                                    if (ok) body else "adb 执行失败：\n$body"
+                                }
                             } else if (tc.name == A11yTool.NAME) {
                                 val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
                                 val action = args.optString("action").trim().lowercase()
@@ -1961,41 +2270,82 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 val y2 = args.optInt("y2", -1)
                                 val dur = args.optInt("duration", 300).coerceIn(20, 5000)
                                 ServerProcessManager.appLog("屏幕：$action ${text.take(40)}")
-                                // 先分清「系统里没开」和「开着但没连上」——覆盖安装后系统会把服务停掉，
-                                // 一律报"没打开"会让人去设置里看到明明开着、以为程序坏了
-                                val enabledInSystem = com.localllm.server.core.A11yService.isEnabled(getApplication())
-                                val precheck: String? = when {
-                                    !enabledInSystem ->
-                                        "错误：无障碍服务未启用。请到 设置 → 无障碍 → 混沌智核 打开（只需一次）。"
-                                    !A11yBridge.available() ->
-                                        "错误：无障碍服务在系统里是开着的，但当前没连上（App 重启过、或系统把它停掉了，" +
-                                                "覆盖安装本 App 后也常见）。请到 设置 → 无障碍 把「混沌智核」关一下再打开，然后重试。"
-                                    else -> null
-                                }
-                                if (precheck == null) com.localllm.server.core.AppSettings.a11yWasEnabled = true
-                                // 无障碍调用本身很快，但控件树遍历/截图会等系统回调，统一放 IO
-                                val r = precheck ?: kotlinx.coroutines.withContext(Dispatchers.IO) {
-                                    when (action) {
-                                        "tree" -> A11yBridge.tree()
-                                        "click" -> A11yBridge.clickText(text)
-                                        "tap" -> if (x >= 0 && y >= 0) A11yBridge.tap(x, y)
-                                        else "错误：tap 需要 x 和 y"
-                                        "swipe" -> if (x >= 0 && y >= 0 && x2 >= 0 && y2 >= 0)
-                                            A11yBridge.swipe(x, y, x2, y2, dur.toLong())
-                                        else "错误：swipe 需要 x,y,x2,y2"
-                                        "input" -> A11yBridge.inputText(text)
-                                        "key" -> A11yBridge.global(text)
-                                        "shot" -> A11yBridge.screenshot(getApplication())
-                                        else -> "错误：未知 action「$action」" +
-                                                "（可用 tree/click/tap/swipe/input/key/shot）"
+                                // 默认走后台虚拟屏：建好就在那块屏上做，用户主屏完全不碰。
+                                // 只有建不起来（无线调试没连、容器没就绪）时才退回主屏的无障碍路径。
+                                val vsReady = if (com.localllm.server.core.AppSettings.useVirtualScreen) {
+                                    com.localllm.server.core.VirtualScreen.ensure(
+                                        getApplication<Application>()
+                                    )
+                                } else null
+                                if (vsReady != null) {
+                                    // 后台屏一次只给一个任务用，别的任务同时要用就排队
+                                    val vr = com.localllm.server.core.VirtualScreen.exclusive {
+                                        kotlinx.coroutines.withContext(Dispatchers.IO) {
+                                            val app = getApplication<Application>()
+                                            // 多步：模型一轮给若干动作，代码按顺序做完再一起回报，
+                                            // 比「一步一问」快一个量级（一步一问三十轮都翻不完一个消息列表）
+                                            val stepsJson = args.optJSONArray("steps")
+                                            if (stepsJson != null && stepsJson.length() > 0) {
+                                                com.localllm.server.core.VirtualScreen.actMany(app, stepsJson)
+                                            } else {
+                                                com.localllm.server.core.VirtualScreen.act(
+                                                    app, action, text, x, y, x2, y2, dur,
+                                                    withScreen = true
+                                                )
+                                            }
+                                        }
+                                    } ?: "错误：后台屏正被另一个任务使用，等它做完再试（不要改去操作主屏）"
+                                    val vOk = !vr.startsWith("错误") && !vr.startsWith("没找到") &&
+                                            !vr.startsWith("输入失败") && !vr.startsWith("点击失败") &&
+                                            !vr.startsWith("滑动失败") && !vr.startsWith("截图失败")
+                                    ServerProcessManager.appLog("后台屏 $action：${vr.take(60)}")
+                                    steps.add(
+                                        ChatStore.Step(
+                                            "tool", "后台屏：$action ${text.take(24)}",
+                                            vr.take(400), args = "$action ${text.take(80)}", ok = vOk
+                                        )
+                                    )
+                                    syncSteps()
+                                    vr
+                                } else if (!com.localllm.server.core.AppSettings.allowMainScreenOps) {
+                                    // 后台屏没建起来时不退到主屏。用户要的是「主屏静默」：
+                                    // 宁可这一步做不成、说清楚原因，也不能把用户眼前的界面抢走。
+                                    val why = com.localllm.server.core.VirtualScreen.lastError
+                                        ?: "后台屏没建起来（无线调试没连、或容器没就绪）"
+                                    val msg = "错误：后台屏不可用——$why。\n" +
+                                            "为不打扰你的主屏，这次界面操作已经取消，没有动你的屏幕。\n" +
+                                            "能用不开界面的办法达成就那么做（shell / 设置项 / dumpsys 那类命令）；" +
+                                            "非要操作界面时，告诉用户需要先在「设置 → 后台屏」里检查无线调试。"
+                                    ServerProcessManager.appLog("屏幕：$action 已取消（后台屏不可用，且不允许操作主屏）")
+                                    steps.add(
+                                        ChatStore.Step(
+                                            "tool", "屏幕：$action 已取消",
+                                            msg.take(300), args = "$action ${text.take(80)}", ok = false
+                                        )
+                                    )
+                                    syncSteps()
+                                    msg
+                                } else {
+                                    // 主屏兜底：搬到成员函数了（doStream 已经撞上方法体上限）
+                                    screenOnMainScreen(action, text, x, y, x2, y2, dur) { st ->
+                                        steps.add(st)
+                                        syncSteps()
                                     }
                                 }
-                                val ok = !r.startsWith("错误") && !r.startsWith("没找到") &&
-                                        !r.startsWith("输入失败") && !r.startsWith("截图失败")
+                            } else if (tc.name == A11yTool.CMD_NAME) {
+                                // 本地小模型的极简入口：一个字符串命令，内部解析成动作
+                                val args = org.json.JSONObject(tc.arguments.ifBlank { "{}" })
+                                val cmd = args.optString("cmd").trim()
+                                ServerProcessManager.appLog("屏指令：${cmd.take(60)}")
+                                val r = com.localllm.server.core.VirtualScreen.runCommand(
+                                    getApplication<Application>(), cmd
+                                )
+                                val okCmd = !r.startsWith("错误") && !r.startsWith("没找到") &&
+                                        !r.contains("失败")
                                 steps.add(
                                     ChatStore.Step(
-                                        "tool", "屏幕：$action ${text.take(24)}",
-                                        r.take(400), args = "$action ${text.take(80)}", ok = ok
+                                        "tool", "后台屏：${cmd.take(40)}",
+                                        r.take(400), args = cmd.take(300), ok = okCmd
                                     )
                                 )
                                 syncSteps()
@@ -2498,6 +2848,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 setProgress(sid, null)
                 // 这一轮结束：状态条收起，并把系统的「显示点按」还原（它只该在操作期间亮着）
                 com.localllm.server.core.AgentHud.endTurn()
+                // 音视频附件只在当轮有效（体积太大，不落盘、不进历史）
+                _pendingMediaB64.value = null
+                _pendingMediaMime.value = null
+                _pendingMediaName.value = null
+                _pendingMediaNote.value = null
                 runCatching {
                     if (_generating.value.isEmpty()) {
                         com.localllm.server.core.AdbBridge.setTouchMarker(getApplication(), false)
@@ -2537,8 +2892,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // 被取消的协程不会走 confirmTool 的收尾：确认框留在这儿会挡住下一次操作
         _toolAsk.value = null
         toolAskDeferred = null
+        // **先断流、不强杀协程**：`doStream` 是个几千行的巨型挂起函数，
+        // 直接 cancel 会让 CancellationException 从挂起点穿过它——真机上两次因此把进程带走
+        // （tombstone：'No static field versionName … with unexpected pending exception:
+        //  JobCancellationException'，以及 'Unexpected instruction: unused-e3'，都停在
+        //  doStream$2.invokeSuspend）。abort 掉 HTTP 连接后，读循环会自然抛 Socket closed 走到收尾。
         ChatClient.abort(sid)
-        streamJobs.remove(sid)?.cancel()
+        val job = streamJobs[sid]
+        if (job != null) {
+            // 兜底：5 秒还没收尾（比如正卡在工具执行里）才强杀，避免它挂着占会话
+            viewModelScope.launch {
+                kotlinx.coroutines.delay(5_000)
+                if (job.isActive) {
+                    ServerProcessManager.appLog("停止后 5 秒仍未收尾，强制取消协程（会话 $sid）")
+                    runCatching { job.cancel() }
+                }
+            }
+        }
         // 标记为「被打断」：界面于是显示「继续这个任务」，且状态已落盘，重开 App 也能续
         appendToLastInline(sid) { m ->
             if (m.role == "assistant" && m.task != null) m.copy(task = m.task.copy(stopped = true))
@@ -2552,7 +2922,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun stop() {
         val sid = _activeId.value
         ServerProcessManager.appLog("用户手动停止生成（会话 $sid）")
-        stopSession(sid)
+        // 停止是用户随时会点的动作，任何一步出错都不能把 App 带走（真机反馈过点停止闪退）
+        runCatching { stopSession(sid) }.onFailure {
+            ServerProcessManager.appLog("停止生成时出错：${it.message ?: it.javaClass.simpleName}")
+            _error.value = "停止时出错：${it.message ?: it.javaClass.simpleName}"
+        }
     }
 
     /**
@@ -3567,6 +3941,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         e is java.net.ConnectException || e.message?.contains("Connection refused") == true ->
             "连接失败：请先在「状态」页启动服务"
         e.message?.contains("401") == true -> "鉴权失败：请在设置中检查访问令牌/云端 Key"
+        e.message?.contains("input is not supported") == true ->
+            "这个端点不支持这类输入（常见于本地引擎收到音频/视频）。" +
+                    "本地模型要么配好配套的 mmproj（模型 → 多模态投影），要么把会话切到支持音视频的云端渠道。"
         // 服务端把工具调用参数当 JSON 解析失败：10 次有 9 次是模型在长字符串里复读，
         // 把参数撑到不闭合。这种情况重试通常就好，说得直白点，别让用户以为是自己操作错了。
         e.message?.contains("Failed to parse tool call arguments as JSON") == true ->
@@ -3617,11 +3994,41 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      * 跑在当前会话里（和手动排队一致）：定时任务的结果因此出现在用户最后待的会话里，
      * 而不是悄悄另开一条谁也找不到的会话。
      */
-    suspend fun runBackgroundTurn(prompt: String): BackgroundTurn {
+    suspend fun runBackgroundTurn(
+        prompt: String,
+        newSessionTitle: String? = null,
+        endpoint: ChatStore.Endpoint? = null,
+    ): BackgroundTurn {
         val text = prompt.trim()
+        if (text.isEmpty()) return BackgroundTurn(_activeId.value, false, "指令为空", 0)
+        // 定时任务默认每次新开一条会话：任务的历史与手动聊天分开，回头能单独翻。
+        // 新会话会切成当前会话（后台跑时用户看不见；前台时会看到他跳到这条任务会话，
+        // 这正是"它在跑，我去看看"的效果）。
+        if (newSessionTitle != null) {
+            persist()
+            val id = System.nanoTime().toString()
+            val stamp = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.CHINA)
+                .format(java.util.Date())
+            val s = ChatStore.Session(id, "$newSessionTitle · $stamp", System.currentTimeMillis(), emptyList())
+            _sessions.value = _sessions.value + s
+            _activeId.value = id
+            _messages.value = emptyList()
+            _lastStats.value = null
+            clearPendingAttachments()
+            saveStore()
+            ServerProcessManager.appLog("定时任务新开会话：${s.title}")
+        }
+        // 任务指定的端点（云端渠道）：写在这条会话上，整轮都走它
+        if (endpoint != null) {
+            val id = _activeId.value
+            _sessions.value = _sessions.value.map { if (it.id == id) it.copy(endpoint = endpoint) else it }
+            saveStore()
+            ServerProcessManager.appLog(
+                "定时任务使用指定端点：${if (endpoint.local) "本地" else endpoint.baseUrl} / ${endpoint.model}"
+            )
+        }
         val sid = _activeId.value
         val startedAt = System.currentTimeMillis()
-        if (text.isEmpty()) return BackgroundTurn(sid, false, "指令为空", 0)
         // 本会话还在生成：先等它跑完（同一会话不并发，和手动发送的排队语义一致）
         _generating.first { sid !in it }
         clearStoppedTasks(sid)

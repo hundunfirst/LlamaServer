@@ -31,11 +31,17 @@ object AdbTool {
                             "`shell am start -n 包名/活动名`（启动别的 App）、`shell pm list packages`、" +
                             "`install -r 文件路径`（**免点击**安装，比 install_apk 省一次确认）、`uninstall 包名`、" +
                             "`shell dumpsys window | grep mCurrentFocus`（看前台是谁）。" +
-                            "**注意**：这条通道等价于 shell 权限，能操作别的 App、能装卸应用；" +
-                            "卸载/清除数据/删除文件/改系统设置会被要求用户确认（每次都问）。" +
-                            "**操作屏幕时**（input tap/swipe/text、am start）用户可能正在用手机，" +
-                            "一次只发一条命令、发完立刻用 uiautomator dump 或 screencap 确认结果再继续，" +
-                            "别连着发一串点击——两边同时操作会打架。用户点过「总是允许」后本会话不再逐条询问。" +
+                            "**通道规矩（重要）**：点屏要么用 screen 工具、要么用本工具的 `shell input`，**同一轮只走一条**。" +
+                            "screen 成功点过一次后，本工具的 input/uiautomator/screencap 会被直接拒绝，别反复试；" +
+                            "本工具先成功了，就别再用 screen 点。首选 screen（不依赖网络），" +
+                            "只有它报「未启用/没连上」时才整轮改用本工具。" +
+                            "本工具真正独有的活：装 APK、pm、dumpsys、am start、screencap 存档。" +
+                            "**锁屏/灭屏时**：照常执行，但黑屏上点不中——需要时先 `shell input keyevent 224` 唤醒" +
+                            "（这条不算点屏，不受通道互斥限制），无密码设备可 `shell wm dismiss-keyguard` 解屏；" +
+                            "有密码锁会停在锁屏界面，按实际情况继续。" +
+                            "**安全**：这条通道等价于 shell 权限，卸载/清除数据/删除文件/改系统设置会被要求用户确认（每次都问）；" +
+                            "用户点过「总是允许」后本会话内不再逐条询问。" +
+                            "操作屏幕时用户可能正在用手机，一次只发一条命令、发完确认结果再继续。" +
                             "如果报「没发现端口 / 连不上」，说明无线调试关了或需要重新配对，" +
                             "把这句话原样告诉用户，不要反复重试。"
                 )

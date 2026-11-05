@@ -83,14 +83,40 @@ object ScheduledRunner {
         // 引擎是这次任务临时拉起来的吗？是的话跑完关掉，别整夜占着电
         var startedEngineHere = false
         try {
-            val modelPath = AppSettings.selectedModelPath ?: AppSettings.serverModelPath
-            if (modelPath.isNullOrBlank()) {
+            // 云端任务：直接用预设端点跑，**不需要启本地引擎**
+            val cloudEndpoint = task.endpointPresetId?.let { id ->
+                val preset = AppSettings.loadCloudPresets().firstOrNull { it.id == id }
+                if (preset == null) {
+                    finish(app, task, false, "找不到这个云端渠道预设（可能已被删除），请重新选一个")
+                    return
+                }
+                ChatStore.Endpoint(
+                    local = false,
+                    baseUrl = preset.url,
+                    model = task.cloudModel?.takeIf { it.isNotBlank() } ?: preset.model,
+                    apiKey = preset.key,
+                )
+            }
+            // 模型：任务里指定的优先（这就是"提前指定好模型"），否则跟随当前选中的
+            val modelPath = task.modelPath?.takeIf { it.isNotBlank() }
+                ?: AppSettings.selectedModelPath ?: AppSettings.serverModelPath
+            if (cloudEndpoint == null && modelPath.isNullOrBlank()) {
                 finish(app, task, false, "还没有选择模型，后台无法启动本地引擎")
                 return
             }
-            if (ServerProcessManager.state.value.status != ServerUiState.Status.RUNNING) {
+            // 自动启动服务是可关的：关掉就只排队 + 通知（老行为），由用户点通知再跑
+            if (cloudEndpoint == null && !task.autoStartEngine) {
+                PendingQueue.append(app, task.prompt)
+                finish(app, task, false, "本任务关掉了「自动启动服务」，已排入队列等用户点开执行")
+                return
+            }
+            if (cloudEndpoint == null &&
+                ServerProcessManager.state.value.status != ServerUiState.Status.RUNNING
+            ) {
                 startedEngineHere = !AppSettings.serverShouldRun
-                ServerProcessManager.appLog("定时任务：后台拉起本地引擎（${task.name}）")
+                ServerProcessManager.appLog(
+                    "定时任务：后台拉起本地引擎（${task.name}，模型 ${modelPath!!.substringAfterLast('/')}）"
+                )
                 val started = runCatching { ServerService.start(app, modelPath) }.isSuccess
                 if (!started) {
                     finish(app, task, false, "无法启动本地引擎（系统拒绝了前台服务启动）")
@@ -108,7 +134,14 @@ object ScheduledRunner {
                 ServerProcessManager.appLog("定时任务：引擎已就绪，开始执行「${task.name}」")
             }
             val vm = ChatViewModel.shared(app)
-            val result = withTimeoutOrNull(TURN_TIMEOUT_MS) { vm.runBackgroundTurn(task.prompt) }
+            // 每次跑在**新会话**里（默认），历史与手动聊天分开；用户可关掉，落到当前会话
+            val result = withTimeoutOrNull(TURN_TIMEOUT_MS) {
+                vm.runBackgroundTurn(
+                    prompt = task.prompt,
+                    newSessionTitle = if (task.newSession) task.name else null,
+                    endpoint = cloudEndpoint,
+                )
+            }
             if (result == null) {
                 // 超时：把这一轮停掉，否则它会继续占着会话直到自然结束
                 runCatching { vm.stop() }

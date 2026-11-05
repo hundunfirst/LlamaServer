@@ -604,7 +604,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val app = getApplication<Application>()
-                val ver = app.packageManager.getPackageInfo(app.packageName, 0).versionName ?: ""
+                // 不读 PackageInfo.versionName：这个字段在新版 Android 上已被删除，读它抛 NoSuchFieldError
+                val ver = com.localllm.server.BuildConfig.VERSION_NAME
                 val info = com.localllm.server.core.UpdateChecker.check(ver)
                 if (info != null && info.version != AppSettings.lastPromptedUpdateVersion) {
                     _autoUpdate.value = info
