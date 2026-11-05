@@ -24,15 +24,54 @@ object OcrEngine {
         TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
     }
 
-    /** 识别 JPEG 字节中的文字（按行拼接）；识别为空返回空串 */
-    suspend fun recognize(jpegBytes: ByteArray): String {
+    /** 一行文字和它的中心点（已换算回**原图**像素坐标） */
+    data class Line(val text: String, val cx: Int, val cy: Int)
+
+    /**
+     * 识别每行文字与中心坐标。
+     *
+     * 后台虚拟屏上没有控件树，靠这个把「屏幕上写了什么」变成「能点哪里」：
+     * 模型说「点 WLAN」，就找到含 WLAN 的那一行，拿 cx,cy 去点。
+     */
+    suspend fun recognizeLines(jpegBytes: ByteArray): List<Line> {
+        val (bmp, scale) = prepare(jpegBytes)
+        return withContext(Dispatchers.Default) {
+            suspendCancellableCoroutine { cont ->
+                val image = InputImage.fromBitmap(bmp, 0)
+                recognizer.process(image)
+                    .addOnSuccessListener { result ->
+                        val out = mutableListOf<Line>()
+                        for (block in result.textBlocks) {
+                            for (line in block.lines) {
+                                val bb = line.boundingBox ?: continue
+                                if (line.text.isBlank()) continue
+                                out.add(
+                                    Line(
+                                        text = line.text.trim(),
+                                        cx = ((bb.left + bb.right) / 2 / scale).toInt(),
+                                        cy = ((bb.top + bb.bottom) / 2 / scale).toInt()
+                                    )
+                                )
+                            }
+                        }
+                        cont.resume(out)
+                    }
+                    .addOnFailureListener { e -> cont.resumeWithException(e) }
+            }
+        }
+    }
+
+    /** 解码 + 放大 + 转灰度；返回处理后的位图与缩放系数（坐标要除回去） */
+    private fun prepare(jpegBytes: ByteArray): Pair<android.graphics.Bitmap, Float> {
         val raw = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
             ?: throw IllegalStateException("无法解码图片")
+        var scale = 1f
         // 预处理：偏小的图放大 2 倍 + 转灰度，小字号与小数点识别率明显更好
         val bmp = runCatching {
             val maxDim = maxOf(raw.width, raw.height)
             val scaled = if (maxDim in 1..1600) {
                 val s = minOf(2.0f, 3200f / maxDim)
+                scale = s
                 android.graphics.Bitmap.createScaledBitmap(
                     raw,
                     (raw.width * s).toInt().coerceAtLeast(1),
@@ -53,6 +92,12 @@ object OcrEngine {
             if (scaled !== raw) scaled.recycle()
             gray
         }.getOrDefault(raw)
+        return bmp to scale
+    }
+
+    /** 识别 JPEG 字节中的文字（按行拼接）；识别为空返回空串 */
+    suspend fun recognize(jpegBytes: ByteArray): String {
+        val (bmp, _) = prepare(jpegBytes)
         return withContext(Dispatchers.Default) {
             suspendCancellableCoroutine { cont ->
                 val image = InputImage.fromBitmap(bmp, 0)
