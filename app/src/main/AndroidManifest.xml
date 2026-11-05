@@ -18,6 +18,8 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- 会话里生成的 APK 可以点一下直接进安装流程（首次会跳「允许安装未知应用」） -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- 定时任务是靠系统闹钟驱动的，重启后闹钟会全部丢失，必须争取开机广播重新登记 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:name=".App"
@@ -84,5 +86,18 @@
         <receiver
             android:name=".core.TaskAlarmReceiver"
             android:exported="false" />
+
+        <!-- 开机后重新登记定时任务：闹钟存在系统里，重启就没了。
+             用户在 MIUI 上还要允许本应用「自启动」，否则收不到这条广播。 -->
+        <receiver
+            android:name=".core.BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
