@@ -632,7 +632,33 @@ object VirtualScreen {
      * `tree` / `open 小红书` / `click 3` / `click 搜索` / `type 香氛机` /
      * `swipe 540 1800 540 600` / `scroll` / `scroll_to 文字` / `key back` / `long 3`
      */
+    /**
+     * 极简指令通道的入口：执行完**会等界面反应并把新屏幕附回去**。
+     *
+     * 这一步以前漏了：模型点完"搜索"立刻去 type，而搜索页还没出来，于是报"没有找到输入框"，
+     * 然后它开始 tree / swipe 乱试（真机上就是这么绕的）。结构化那版一直有等待，简版没有。
+     */
     suspend fun runCommand(context: Context, raw: String): String {
+        val cmd = raw.trim()
+        if (cmd.isEmpty()) return "错误：指令为空"
+        val lower = cmd.lowercase()
+        val r = ready
+        // 只读命令不需要等待和回传
+        val readOnly = lower == "tree" || lower == "读屏" || lower == "看屏幕" ||
+                lower.startsWith("scroll_to") || lower.startsWith("open ")
+        val before = if (!readOnly && r != null) frameSeq(context.applicationContext, r.displayId) else -1
+        val result = runCommandInner(context, raw)
+        if (readOnly || r == null || result.startsWith("错误")) return result
+        if (ready == null) return result // 建屏/重建过，屏幕内容由 Inner 自己带了
+        // 等界面反应（最多 2.5 秒），再把新屏幕一起给它
+        val changed = awaitFrameChange(context.applicationContext, r.displayId, before, 2_500)
+        val screen = readScreenText(context).orEmpty()
+        return result +
+                (if (!changed) "\n（界面在 2.5 秒内没有明显变化）" else "") +
+                "\n当前屏幕：\n" + screen
+    }
+
+    private suspend fun runCommandInner(context: Context, raw: String): String {
         val cmd = raw.trim()
         if (cmd.isEmpty()) return "错误：指令为空"
         val app = context.applicationContext
@@ -1034,12 +1060,31 @@ object VirtualScreen {
         val r = ready ?: return "错误：后台屏没准备好"
         if (text.isBlank()) return "错误：type_any 需要要输入的文字"
         readScreenText(context) // 刷新一次快照
-        val ref = A11yBridge.bestEditableRef(r.displayId) ?: return "这块屏上没有找到输入框"
-        val clicked = A11yBridge.clickRef(r.displayId, ref)
-        delay(350)
-        A11yBridge.setTextOnFocused(r.displayId, text)?.let { return "$clicked → $it" }
-        val typed = A11yBridge.setTextOnRef(r.displayId, ref, text)
-        return "$clicked → $typed"
+        val ref = A11yBridge.bestEditableRef(r.displayId)
+        if (ref != null) {
+            val clicked = A11yBridge.clickRef(r.displayId, ref)
+            delay(350)
+            A11yBridge.setTextOnFocused(r.displayId, text)?.let { return "$clicked → $it" }
+            val typed = A11yBridge.setTextOnRef(r.displayId, ref, text)
+            return "$clicked → $typed"
+        }
+        // 无障碍读不到输入框（很多 App 的首页就是这种）：用 OCR 找搜索入口点进去再写
+        val lines = readScreen(context).orEmpty()
+        val hit = lines.firstOrNull {
+            val t = it.text
+            t.contains("搜索") || t.contains("搜一搜") || t.contains("搜商品") || t.contains("查找")
+        } ?: return "这块屏上没有找到输入框（无障碍没读到输入框，截图里也没有「搜索」字样）"
+        tap(context, hit.cx, hit.cy)
+        delay(1_000)
+        readScreenText(context)
+        A11yBridge.bestEditableRef(r.displayId)?.let { ref2 ->
+            A11yBridge.clickRef(r.displayId, ref2)
+            delay(250)
+            A11yBridge.setTextOnFocused(r.displayId, text)
+                ?.let { return "（OCR 找到入口 → $ref2）$it" }
+            return "（OCR 找到入口 → $ref2）" + A11yBridge.setTextOnRef(r.displayId, ref2, text)
+        }
+        return "（OCR 找到「${hit.text}」并点开了）" + inputText(context, text)
     }
 
     /**
