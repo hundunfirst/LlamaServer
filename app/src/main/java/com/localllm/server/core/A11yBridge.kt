@@ -197,6 +197,16 @@ object A11yBridge {
         }
     }
 
+    /** 在指定屏里按文字找元素并点击（用最近一次读屏的编号，比坐标稳） */
+    fun clickTextOnDisplay(displayId: Int, want: String): String {
+        if (snapshotDisplay != displayId || snapshot.isEmpty()) return "没找到：请先读一次屏"
+        val target = want.trim()
+        if (target.isEmpty()) return "错误：要给出目标文字"
+        val idx = snapshot.indexOfFirst { nodeText(it).contains(target, ignoreCase = true) }
+        if (idx < 0) return "没找到「$target」"
+        return clickRef(displayId, "@e${idx + 1}")
+    }
+
     /** 按编号点（@e3）：直接对节点 performAction，界面轻微变化也不会点偏 */
     fun clickRef(displayId: Int, ref: String): String {
         val node = nodeOf(displayId, ref) ?: return lastRefError

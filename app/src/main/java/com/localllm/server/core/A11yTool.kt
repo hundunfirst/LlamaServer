@@ -34,6 +34,7 @@ object A11yTool {
                             "· `open 小红书` 打开 App（也可以写包名 com.xingin.xhs）\n" +
                             "· `click 3` 点编号 3 的元素；`click 搜索` 按文字点\n" +
                             "· `type 香氛机` 往输入框里输入（自动找输入框）\n" +
+                            "· `search 香氛机` **搜索一条龙**：自己找搜索框、点开、把词写进去（最省步骤，优先用它）\n" +
                             "· `swipe 540 1800 540 600` 滑动；`scroll` 往下翻一屏；`up` 往上翻\n" +
                             "· `scroll_to 某个词` 一直往下翻直到看到它\n" +
                             "· `key back` 返回；`long 3` 长按编号 3\n" +
@@ -77,6 +78,8 @@ object A11yTool {
                             "· `click` 点：text 填编号 `@e3`（推荐，直接点那个元素），或填屏幕上的文字（按文字找）\n" +
                             "· `type` 输入：text 写 `@e5 要输入的文字`（编号是输入框）；" +
                             "**挑不准编号时用 `type_any`**，text 直接写要输入的内容，代码会自己找输入框\n" +
+                            "· `search` **搜索一条龙**：text 填关键词，代码自己找搜索框、点开、写进去——" +
+                            "要搜索时**优先用它**，别自己一步步摸\n" +
                             "· `long_press` 长按：text 填 `@e3` 最准，或给 x,y（duration 毫秒，默认 800）\n" +
                             "· `double_tap` 双击：给出 x,y\n" +
                             "· `scroll` 滚动：text 留空往下滚一屏，写 `up` 往上滚；已知列表的编号时可写 `@e7` 只滚那个列表\n" +
@@ -113,7 +116,7 @@ object A11yTool {
                                             JSONArray().put("tree").put("click").put("tap").put("swipe")
                                                 .put("input").put("type").put("key").put("shot")
                                                 .put("open").put("long_press").put("double_tap").put("scroll")
-                                                .put("scroll_to").put("type_any")
+                                                .put("scroll_to").put("type_any").put("search")
                                         )
                                         put("description", "要做的动作")
                                     }

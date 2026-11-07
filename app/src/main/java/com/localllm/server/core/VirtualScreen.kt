@@ -619,6 +619,9 @@ object VirtualScreen {
 
             lower.startsWith("type ") -> typeIntoBest(app, rest(5))
 
+            // 搜索一条龙：找搜索框 → 点开 → 写进去
+            lower.startsWith("search ") -> searchApp(app, rest(7))
+
             lower.startsWith("swipe ") -> {
                 val n = rest(6).split(Regex("""[\s,]+""")).mapNotNull { it.toIntOrNull() }
                 if (n.size < 4) "错误：swipe 要写成 `swipe 540 1800 540 600`"
@@ -647,7 +650,8 @@ object VirtualScreen {
             }
 
             else -> "错误：不认识的指令「$cmd」。可用：tree / open 包名 / click 编号或文字 / " +
-                    "type 文字 / swipe x y x2 y2 / scroll / up / scroll_to 文字 / key back / long 编号"
+                    "type 文字 / search 关键词 / swipe x y x2 y2 / scroll / up / scroll_to 文字 / " +
+                    "key back / long 编号"
         }
     }
 
@@ -759,6 +763,8 @@ object VirtualScreen {
                 if (m == null) "错误：type 的 text 要写成「@e3 要输入的文字」"
                 else typeIntoRef(app, m.groupValues[1], m.groupValues[2])
             }
+            // 搜索一条龙：找搜索框 → 点开 → 写进去（比模型自己摸三四步快）
+            "search" -> searchApp(app, text)
             // 不用挑编号的输入：自动找最像输入框的元素
             "type_any" -> typeIntoBest(app, text)
             // 长列表里翻找：滚动到出现某段文字为止
@@ -977,6 +983,43 @@ object VirtualScreen {
         A11yBridge.setTextOnFocused(r.displayId, text)?.let { return "$clicked → $it" }
         val typed = A11yBridge.setTextOnRef(r.displayId, ref, text)
         return "$clicked → $typed"
+    }
+
+    /**
+     * 「搜索某个词」一条龙：自己找搜索框 → 点开 → 把词写进去。
+     *
+     * 为什么做成一个动作：模型找搜索框经常要绕三四步（先找入口、点进去、再找输入框、
+     * 再输入），而这几步完全由代码判断更快也更准——输入框优先挑 search 相关的 id，
+     * 没有就直接找带「搜索」字样的入口先点进去再来一次。
+     */
+    suspend fun searchApp(context: Context, keyword: String): String {
+        val r = ready ?: return "错误：后台屏没准备好（先 open 一个 App）"
+        val k = keyword.trim()
+        if (k.isEmpty()) return "错误：search 需要关键词"
+        repeat(3) { round ->
+            readScreenText(context) // 刷新快照
+            // 1) 屏上已经有输入框：点开它再写
+            val ref = A11yBridge.bestEditableRef(r.displayId)
+            if (ref != null) {
+                A11yBridge.clickRef(r.displayId, ref)
+                delay(350)
+                readScreenText(context) // 点开后控件可能重排，重新拿快照
+                val typed = A11yBridge.setTextOnFocused(r.displayId, k)
+                    ?: A11yBridge.setTextOnRef(r.displayId, ref, k)
+                    ?: inputText(context, k)
+                return "已把「$k」写进搜索框（$ref）→ $typed"
+            }
+            // 2) 没有输入框：先找一个「搜索」入口点进去，下一轮再找输入框
+            val entry = A11yBridge.clickTextOnDisplay(r.displayId, "搜索")
+            if (!entry.startsWith("已点击")) {
+                return "没找到搜索框，也没找到「搜索」入口。当前屏幕：\n" +
+                        (readScreenText(context) ?: "（读不到）")
+            }
+            ServerProcessManager.appLog("虚拟屏：第 ${round + 1} 次点进搜索入口 → $entry")
+            delay(900)
+        }
+        return "点了搜索入口，但没有出现输入框；可能需要再点一次或换个入口。当前屏幕：\n" +
+                (readScreenText(context) ?: "（读不到）")
     }
 
     /** 系统键；后端统一翻成 keyevent 名字 */
