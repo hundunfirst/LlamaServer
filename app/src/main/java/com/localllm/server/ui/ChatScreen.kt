@@ -2010,55 +2010,6 @@ private fun SheetRow(title: String, value: String, onClick: (() -> Unit)?) {
  * 没有用量（空会话）时调用方不会渲染它。
  */
 /** 行级增删统计：新建文件 = 全是新增；有旧内容时按「同样的行先抵消」算差集 */
-private fun diffStat(prev: String?, cur: String): Pair<Int, Int> {
-    val newLines = cur.lineSequence().toList()
-    if (prev == null) return newLines.size to 0
-    val pool = prev.lineSequence().groupingBy { it }.eachCount().toMutableMap()
-    var added = 0
-    for (line in newLines) {
-        val n = pool[line] ?: 0
-        if (n > 0) pool[line] = n - 1 else added++
-    }
-    return added to pool.values.sum()
-}
-
-/**
- * 改动对比：行级 LCS 生成统一 diff（+ / - / 空格前缀）。
- * 行数超过上限就退化——LCS 的 DP 是 O(n·m)，手机上几千行会卡住。
- */
-private fun diffLines(prev: String, cur: String, limit: Int = 700): List<Pair<Char, String>> {
-    val a = prev.lineSequence().take(limit).toList()
-    val b = cur.lineSequence().take(limit).toList()
-    val dp = Array(a.size + 1) { IntArray(b.size + 1) }
-    for (i in a.indices.reversed()) {
-        for (j in b.indices.reversed()) {
-            dp[i][j] = if (a[i] == b[j]) dp[i + 1][j + 1] + 1
-            else maxOf(dp[i + 1][j], dp[i][j + 1])
-        }
-    }
-    val out = ArrayList<Pair<Char, String>>()
-    var i = 0
-    var j = 0
-    while (i < a.size && j < b.size) {
-        when {
-            a[i] == b[j] -> {
-                out += ' ' to a[i]; i++; j++
-            }
-
-            dp[i + 1][j] >= dp[i][j + 1] -> {
-                out += '-' to a[i]; i++
-            }
-
-            else -> {
-                out += '+' to b[j]; j++
-            }
-        }
-    }
-    while (i < a.size) { out += '-' to a[i]; i++ }
-    while (j < b.size) { out += '+' to b[j]; j++ }
-    return out
-}
-
 @Composable
 private fun DiffDialog(gf: ChatStore.GenFile, onDismiss: () -> Unit, onOpen: () -> Unit) {
     val lines = remember(gf.path, gf.content, gf.prev) {
