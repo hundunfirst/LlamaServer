@@ -230,128 +230,26 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val error: StateFlow<String?> = _error.asStateFlow()
 
     /** 待用户确认的联网搜索（图片轮 + "先问我"策略）：值为将要发送给搜索引擎的内容 */
-    private val _searchApproval = MutableStateFlow<String?>(null)
-    val searchApproval: StateFlow<String?> = _searchApproval.asStateFlow()
-    private var approvalDeferred: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
-
-    /** 链接抓取缓存：url → (抓取时间, 内容)，10 分钟内复用（避免重发时重复抓取） */
+    /** 链接抓取的小缓存：url -> (抓取时刻, 正文) */
     private val linkCache = mutableMapOf<String, Pair<Long, String>>()
 
-    /** 用户对「图片轮联网搜索」的确认结果 */
-    fun approveSearch(allow: Boolean) {
-        approvalDeferred?.complete(allow)
-        approvalDeferred = null
-        _searchApproval.value = null
-    }
-
-    /** 图片轮搜索确认：弹窗等待用户决定，超时（120s）视为拒绝 */
-    private suspend fun askSearchApproval(query: String): Boolean {
-        val d = kotlinx.coroutines.CompletableDeferred<Boolean>()
-        approvalDeferred = d
-        _searchApproval.value = WebSearch.sanitizeQuery(query).first
-        ServerProcessManager.appLog("图片轮联网搜索待用户确认：「${query.take(30)}」")
-        val result = kotlinx.coroutines.withTimeoutOrNull(120_000L) { d.await() }
-        if (result == null) {
-            approvalDeferred = null
-            _searchApproval.value = null
-            ServerProcessManager.appLog("确认超时（120s），按拒绝处理")
-            return false
-        }
-        return result
-    }
-
-    /** 待用户确认的危险操作（模型已发起、还没执行）；界面据此弹确认框 */
-    data class ToolAsk(
-        val title: String,
-        val subjectLabel: String,
-        val subject: String,
-        val reason: String,
-        val dangerous: Boolean,
-        val canAlways: Boolean,
+    /** 审批闸门：抽到 ToolApproval 里了，这里只做委托 */
+    private val approval = ToolApproval(
+        sessionPermission = { id ->
+            val sess = _sessions.value.find { it.id == id }
+            (sess?.permission ?: AppSettings.defaultPermission) to (sess?.planMode == true)
+        },
+        activeSessionId = { _activeId.value },
+        onStatus = { _lastStats.value = it },
     )
+    val toolAsk: StateFlow<ToolApproval.Ask?> = approval.toolAsk
+    val searchApproval: StateFlow<String?> = approval.searchApproval
 
-    private val _toolAsk = MutableStateFlow<ToolAsk?>(null)
-    val toolAsk: StateFlow<ToolAsk?> = _toolAsk.asStateFlow()
-    private var toolAskDeferred: kotlinx.coroutines.CompletableDeferred<Int>? = null
-    /** 三条会话可能同时要确认：串行排队，否则弹窗互相覆盖 */
-    private val approvalLock = kotlinx.coroutines.sync.Mutex()
-    /** 会话 id → 本会话已放行的键（bash / file_write / mcp:xxx）；危险命令不在其中 */
-    private val sessionAutoAllow = mutableMapOf<String, MutableSet<String>>()
-
-    /** 用户对确认框的回答：0=拒绝 1=允许一次 2=本会话总是允许 */
-    fun answerToolAsk(decision: Int) {
-        toolAskDeferred?.complete(decision)
-        toolAskDeferred = null
-        _toolAsk.value = null
-    }
-
-    /**
-     * 危险操作确认：返回 true 才真的执行。
-     * 超时（10 分钟没人理）按拒绝处理——宁可让模型停住，也不替用户做决定。
-     */
-    private suspend fun confirmTool(verdict: ToolGuard.Verdict?, sid: String): Boolean {
-        if (verdict == null) return true
-        if (!AppSettings.toolApprovalEnabled) return true
-        // 完全权限：会话里把权限开到 full 就是不问（计划模式除外——那时候工具本来也没给）
-        val sess = _sessions.value.find { it.id == sid }
-        if ((sess?.permission ?: AppSettings.defaultPermission) == "full" && sess?.planMode != true) {
-            return true
-        }
-        val allowed = sessionAutoAllow.getOrPut(sid) { mutableSetOf() }
-        if (verdict.autoKey != null && allowed.contains(verdict.autoKey)) return true
-        // adb 免确认开关：自动化（尤其是操作屏幕）时不再逐条打断——
-        // App 在后台时弹窗根本看不见，表现就是「卡了几百秒」。DANGER 档 autoKey 为 null，仍然每次都问。
-        if (AppSettings.adbAutoAllow && verdict.autoKey?.startsWith("adb") == true) {
-            ServerProcessManager.appLog("adb 免确认已开启，直接放行：${verdict.subject.take(60)}")
-            return true
-        }
-        return approvalLock.withLock {
-            // 排队期间别的会话可能已经放行同类操作
-            if (verdict.autoKey != null && allowed.contains(verdict.autoKey)) return@withLock true
-            val d = kotlinx.coroutines.CompletableDeferred<Int>()
-            toolAskDeferred = d
-            _toolAsk.value = ToolAsk(
-                title = verdict.title,
-                subjectLabel = verdict.subjectLabel,
-                subject = verdict.subject,
-                reason = verdict.reason,
-                dangerous = verdict.risk == ToolGuard.Risk.DANGER,
-                canAlways = verdict.autoKey != null,
-            )
-            ServerProcessManager.appLog("等待确认：${verdict.title.removeSuffix("？")}")
-            // 用户可能正在别的 App 里（agent 自己切走的）：弹窗看不见就以为卡死。
-            // 把话说在状态行上，切回来一眼能看懂；也给「本会话总是允许 / 免确认」指路。
-            if (_activeId.value == sid) {
-                _lastStats.value = "等你确认：${verdict.title.removeSuffix("？")}" +
-                        "（如果没看到弹窗，说明本 App 在后台，切回来即可）"
-            }
-            val decision = kotlinx.coroutines.withTimeoutOrNull(600_000L) { d.await() }
-            toolAskDeferred = null
-            _toolAsk.value = null
-            when (decision) {
-                1 -> {
-                    ServerProcessManager.appLog("用户允许了一次")
-                    true
-                }
-
-                2 -> {
-                    ServerProcessManager.appLog("用户允许本会话同类操作：${verdict.autoKey}")
-                    verdict.autoKey?.let { allowed.add(it) }
-                    true
-                }
-
-                null -> {
-                    ServerProcessManager.appLog("确认超时（10 分钟），按拒绝处理")
-                    false
-                }
-
-                else -> {
-                    ServerProcessManager.appLog("用户拒绝了")
-                    false
-                }
-            }
-        }
-    }
+    fun answerToolAsk(decision: Int) = approval.answerToolAsk(decision)
+    fun approveSearch(allow: Boolean) = approval.approveSearch(allow)
+    private suspend fun askSearchApproval(query: String) = approval.askSearch(query)
+    private suspend fun confirmTool(verdict: ToolGuard.Verdict?, sid: String) =
+        approval.confirm(verdict, sid)
 
     private val _lastStats = MutableStateFlow<String?>(null)
     val lastStats: StateFlow<String?> = _lastStats.asStateFlow()
@@ -2581,8 +2479,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _generating.update { it - sid }
         setProgress(sid, null)
         // 被取消的协程不会走 confirmTool 的收尾：确认框留在这儿会挡住下一次操作
-        _toolAsk.value = null
-        toolAskDeferred = null
+        approval.cancelPending()
         // **先断流、不强杀协程**：`doStream` 是个几千行的巨型挂起函数，
         // 直接 cancel 会让 CancellationException 从挂起点穿过它——真机上两次因此把进程带走
         // （tombstone：'No static field versionName … with unexpected pending exception:
