@@ -1040,29 +1040,53 @@ object VirtualScreen {
         val k = keyword.trim()
         if (k.isEmpty()) return "错误：search 需要关键词"
         repeat(3) { round ->
-            readScreenText(context) // 刷新快照
-            // 1) 屏上已经有输入框：点开它再写
-            val ref = A11yBridge.bestEditableRef(r.displayId)
-            if (ref != null) {
+            readScreenText(context) // 刷新无障碍快照
+            // 1) 无障碍能读到输入框：点开直接写（最准）
+            A11yBridge.bestEditableRef(r.displayId)?.let { ref ->
                 A11yBridge.clickRef(r.displayId, ref)
                 delay(350)
-                readScreenText(context) // 点开后控件可能重排，重新拿快照
+                readScreenText(context)
                 val typed = A11yBridge.setTextOnFocused(r.displayId, k)
                     ?: A11yBridge.setTextOnRef(r.displayId, ref, k)
-                    ?: inputText(context, k)
                 return "已把「$k」写进搜索框（$ref）→ $typed"
             }
-            // 2) 没有输入框：先找一个「搜索」入口点进去，下一轮再找输入框
-            val entry = A11yBridge.clickTextOnDisplay(r.displayId, "搜索")
-            if (!entry.startsWith("已点击")) {
-                return "没找到搜索框，也没找到「搜索」入口。当前屏幕：\n" +
-                        (readScreenText(context) ?: "（读不到）")
+            // 2) 无障碍里找「搜索」入口（按编号点）
+            val byRef = A11yBridge.clickTextOnDisplay(r.displayId, "搜索")
+            if (byRef.startsWith("已点击")) {
+                ServerProcessManager.appLog("搜索：无障碍点入口（第 ${round + 1} 轮）→ $byRef")
+                delay(900)
+                return@repeat
             }
-            ServerProcessManager.appLog("虚拟屏：第 ${round + 1} 次点进搜索入口 → $entry")
-            delay(900)
+            // 3) 无障碍读不到这一屏 → 用 OCR 认出的文字坐标点。
+            //    真机上模型看到的"OCR 定位到搜索框"就是这条路，但 search 以前只查无障碍，所以必然失败。
+            val lines = readScreen(context).orEmpty()
+            val hit = lines.firstOrNull {
+                val t = it.text
+                t.contains("搜索") || t.contains("搜一搜") || t.contains("搜商品") || t.contains("查找")
+            }
+            if (hit == null) {
+                return "没找到搜索框，也没找到「搜索」入口。当前屏幕：\n" +
+                        (readScreenText(context) ?: "（读不到内容）") +
+                        "\n可以试：先 `scroll` 往下滚看看，或 `click <文字>` 按屏幕上的文字点。"
+            }
+            tap(context, hit.cx, hit.cy)
+            ServerProcessManager.appLog("搜索：OCR 坐标点入口「${hit.text}」→ ${hit.cx},${hit.cy}")
+            delay(1_000)
+            readScreenText(context)
+            A11yBridge.bestEditableRef(r.displayId)?.let { ref2 ->
+                A11yBridge.clickRef(r.displayId, ref2)
+                delay(250)
+                val typed = A11yBridge.setTextOnFocused(r.displayId, k)
+                    ?: A11yBridge.setTextOnRef(r.displayId, ref2, k)
+                return "已把「$k」写进搜索框（OCR 找到入口 → $ref2）→ $typed"
+            }
+            // 点开搜索页后输入框通常已有焦点，直接粘贴
+            val typed = inputText(context, k)
+            if (typed.contains("已")) return "$typed（OCR 找到入口后直接输入）"
         }
-        return "点了搜索入口，但没有出现输入框；可能需要再点一次或换个入口。当前屏幕：\n" +
-                (readScreenText(context) ?: "（读不到）")
+        return "点了搜索入口，但没看到输入框。当前屏幕：\n" +
+                (readScreenText(context) ?: "（读不到内容）") +
+                "\n可以再点一次入口，或 `click <文字>` 按文字点。"
     }
 
     /** 系统键；后端统一翻成 keyevent 名字 */
