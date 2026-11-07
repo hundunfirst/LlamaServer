@@ -790,7 +790,45 @@ object VirtualScreen {
     }
 
     /** 按编号点击（@e3）：直接对节点执行，不用坐标 */
-    /** 最近一次 OCR 读到的行：无障碍读不到的屏，点编号就回落到这里的坐标 */
+    /**
+     * 主屏上用 uiautomator dump 定位控件。
+     *
+     * 后台屏上无障碍只能靠截图 + OCR（这台系统上无障碍服务不包含虚拟屏的窗口，实测），
+     * 而 uiautomator 能拿到完整控件 XML：resource-id、class、精确 bounds——找搜索框、
+     * 输入框这类控件时它最准。代价是操作的是主屏（会切走用户的屏幕）。
+     *
+     * 返回匹配控件（text / resource-id / class 命中）的中心坐标。
+     */
+    suspend fun uiFindOnMain(app: Context, word: String): Pair<Int, Int>? {
+        adbFast(app, "shell uiautomator dump /sdcard/_ui.xml", 40_000)
+        val (_, xml) = adbFast(app, "shell cat /sdcard/_ui.xml", 25_000)
+        val nodes = Regex("""<node[^>]*?>""", RegexOption.DOT_MATCHES_ALL).findAll(xml)
+        var fallback: Pair<Int, Int>? = null
+        for (n in nodes) {
+            val attr = n.value
+            val text = Regex("""text="([^"]*)"""").find(attr)?.groupValues?.get(1).orEmpty()
+            val rid = Regex("""resource-id="([^"]*)"""").find(attr)?.groupValues?.get(1).orEmpty()
+            val cls = Regex("""class="([^"]*)"""").find(attr)?.groupValues?.get(1).orEmpty()
+            val bounds = Regex("""bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"""").find(attr) ?: continue
+            val l = bounds.groupValues[1].toInt()
+            val tp = bounds.groupValues[2].toInt()
+            val r2 = bounds.groupValues[3].toInt()
+            val b = bounds.groupValues[4].toInt()
+            val cx = (l + r2) / 2
+            val cy = (tp + b) / 2
+            val isInput = cls.contains("EditText") || rid.contains("search", true) ||
+                    cls.contains("search", true)
+            val textHit = word.isNotBlank() && text.contains(word, true)
+            if (isInput && text.isBlank()) {
+                // 搜索框/输入框：没有更具体的就先记着，继续找精确匹配
+                if (fallback == null) fallback = cx to cy
+            }
+            if (textHit || (isInput && (word.isBlank() || rid.contains("search", true)))) {
+                return cx to cy
+            }
+        }
+        return fallback
+    }
     @Volatile
     private var lastOcrLines: List<OcrEngine.Line> = emptyList()
 
