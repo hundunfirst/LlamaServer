@@ -507,6 +507,30 @@ object VirtualScreen {
         return out.trim().toIntOrNull()?.let { it > 0 } ?: true
     }
 
+    /**
+     * 读屏时发现这块屏上没有窗口时的补救：
+     * 屏已经不存在就重建；屏还在但 App 没跟过来，就把上次那个 App 重新开上来。
+     */
+    private suspend fun recoverScreen(app: Context) {
+        val r = ready ?: return
+        if (!displayExists(app, r.displayId)) {
+            ServerProcessManager.appLog("虚拟屏：屏 ${r.displayId} 已经不存在了，重新建一块")
+            ready = null
+            lastDisplayId = 0
+            val again = runCatching { ensure(app) }.getOrNull() ?: return
+            runCatching { lastPackage?.let { startAppDetail(app, it) } }
+            delay(1_200)
+            ServerProcessManager.appLog("虚拟屏：已重建为屏 ${again.displayId}")
+            return
+        }
+        val pkg = lastPackage ?: foregroundPackage(app)
+        if (pkg != null && pkg != app.packageName) {
+            ServerProcessManager.appLog("虚拟屏：屏上没有 App 的窗口，把 $pkg 重新开上来")
+            startAppDetail(app, pkg)
+            delay(1_200)
+        }
+    }
+
     /** 上一次开在这块屏上的 App。
      *
      * 用处：屏会被闲置收掉再重建（屏号随之变化），而 App 还挂在旧屏上没跟过来——
@@ -530,29 +554,17 @@ object VirtualScreen {
                 )
             }.getOrNull()
             if (a11y != null && !a11y.startsWith("（") && !a11y.startsWith("错误")) return a11y
-            // 第一次就发现"这块屏上没窗口"：先确认这块屏还活着（可能已被收掉或重建），
-            // 再自动把上次那个 App 重新开上来
-            if (!triedReopen && a11y != null && a11y.contains("没有该屏的窗口")) {
-                triedReopen = true
-                if (!displayExists(context.applicationContext, r.displayId)) {
-                    ServerProcessManager.appLog("虚拟屏：屏 ${r.displayId} 已经不存在了，重新建一块")
-                    ready = null
-                    lastDisplayId = 0
-                    val again = runCatching { ensure(context.applicationContext) }.getOrNull()
-                    if (again != null) {
-                        delay(800)
-                        val retry = runCatching {
-                            A11yBridge.treeOnDisplay(again.displayId, 80, compactReads)
-                        }.getOrNull()
-                        if (retry != null && !retry.startsWith("（")) return retry
-                    }
-                    return@repeat
+            // 无障碍看不到这块屏的窗口（有的系统不把它算进 interactive windows）。
+            // 这时别再重试四次耗时间：画面可能是好的，直接走截图 OCR。
+            // 注意判断要用**返回文案**里的字（以前用了日志文案里的「没有该屏的窗口」，
+            // 永远匹配不上，所以下面这段自动恢复从没执行过）。
+            if (a11y != null && a11y.contains("没有可读的窗口")) {
+                if (!triedReopen) {
+                    triedReopen = true
+                    recoverScreen(context.applicationContext)
                 }
-                val pkg = lastPackage ?: foregroundPackage(context.applicationContext)
-                if (pkg != null && pkg != context.packageName) {
-                    ServerProcessManager.appLog("虚拟屏：屏上没有 App 的窗口，自动把 $pkg 重新开上来")
-                    startAppDetail(context.applicationContext, pkg)
-                    delay(1_500)
+                return readScreen(context)?.let { describeLines(it, 40) }?.also {
+                    ServerProcessManager.appLog("读屏（屏 ${r.displayId}）：无障碍看不到窗口，改用截图 OCR")
                 }
             }
             if (attempt < 3) delay(500)
