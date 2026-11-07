@@ -197,12 +197,33 @@ object VirtualScreen {
         return r
     }
 
-    /** 主屏此刻最上面的包名；读不到返回 null */
+    /**
+     * 用户主屏（display 0）此刻最上面的包名；读不到返回 null。
+     *
+     * 必须**只看 display=0 那一段**：`dumpsys window displays` 里有多块屏的焦点记录
+     * （主屏、副屏、还有我们自己的后台屏），抓第一个匹配会拿到后台屏上的 App，
+     * 于是误判成"用户正在主屏用它"，白白拒绝/重开（真机上就是这么假的）。
+     */
     private suspend fun foregroundPackage(app: Context): String? {
-        // 有的屏焦点是 null，多取几行找第一条带包名的
-        val (_, out) = adbFast(app, "shell \"dumpsys window | grep -m4 mCurrentFocus\"", 20_000)
-        val m = Regex("""\su\d+\s+([A-Za-z0-9_.]+)/""").findAll(out).firstOrNull() ?: return null
-        return m.groupValues[1].takeIf { it.isNotBlank() }
+        val (_, out) = adbFast(
+            app, "shell \"dumpsys window displays | grep -E 'Display: mDisplayId=|mCurrentFocus='\"",
+            20_000
+        )
+        var inMain = false
+        for (line in out.lineSequence()) {
+            if (line.contains("Display: mDisplayId=0")) {
+                inMain = true
+                continue
+            }
+            if (line.contains("Display: mDisplayId=")) {
+                inMain = false
+                continue
+            }
+            if (!inMain) continue
+            Regex("""\su\d+\s+([A-Za-z0-9_.]+)/""").find(line)?.let { return it.groupValues[1] }
+            if (line.contains("mCurrentFocus=null")) return null
+        }
+        return null
     }
 
     private fun fail(why: String): Ready? {
