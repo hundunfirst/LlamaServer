@@ -1289,8 +1289,24 @@ object VirtualScreen {
             return "$typed；$pasted —— 但屏上都没看到「$k」，输入可能没生效（这个 App 的输入框可能不支持无障碍写入）"
         }
 
-        // 完全找不到输入框：点开搜索入口后直接粘贴（此时输入框通常已聚焦）
-        return inputText(context, k)
+        // 完全找不到输入框：降级到主屏用 uiautomator 精确定位（会切屏，但能把任务做完）。
+        // OCR 模式在轮播/动态广告界面上坐标不可靠（真机：点了三次「搜索」进了三次广告页），
+        // 这条降级是完成任务的最后手段。
+        return mainScreenSearch(context.applicationContext, k)
+    }
+
+    /** 主屏上完成搜索：uiautomator 定位搜索框 → 点击 → 粘贴 → 回车（会切走用户屏幕） */
+    private suspend fun mainScreenSearch(app: Context, keyword: String): String {
+        val box = uiFindOnMain(app, "search")
+            ?: uiFindOnMain(app, "")
+            ?: return "主屏上也没找到输入框（uiautomator dump 无匹配）"
+        if (!tap(app, box.first, box.second)) return "点击主屏搜索框失败"
+        delay(700)
+        inputText(app, keyword)
+        delay(600)
+        key(app, "KEYCODE_ENTER")
+        delay(2_000)
+        return "已切到主屏用 uiautomator 完成搜索（会切走你的屏幕）。建议用 tree 确认结果。"
     }
 
     /** 当前屏上最像输入框的元素编号（无障碍快照） */
