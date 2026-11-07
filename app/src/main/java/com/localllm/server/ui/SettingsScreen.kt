@@ -95,6 +95,9 @@ fun SettingsScreen(
                 open = settingGroup == "g5"
             ) { settingGroup = if (settingGroup == "g5") null else "g5" }
             if (settingGroup == "g5") {
+                SettingGroupNetwork()
+            }
+            if (settingGroup == "g5") {
             var imgPolicy by remember {
                 mutableStateOf(com.localllm.server.core.AppSettings.imageSearchPolicy)
             }
