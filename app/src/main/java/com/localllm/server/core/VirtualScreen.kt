@@ -241,10 +241,11 @@ object VirtualScreen {
         val r = ready ?: return false to "后台屏没准备好"
         val app = context.applicationContext
         val front = foregroundPackage(app)
-        if (front == packageName) {
-            return false to "用户正在主屏上用 $packageName，没有另一个它开在后台——" +
-                    "再开一份会变成两个实例（推送、登录态都会重复）。" +
-                    "要么等用户切走，要么就在主屏上操作（需用户同意）"
+        val duplicate = front == packageName
+        if (duplicate) {
+            // 以前这里直接拒绝，导致「用户主屏正开着这个 App」时整个任务第一步就失败，
+            // 后面全跑到主屏上用坐标乱试。效率优先：照样另开一份，只是提醒一句。
+            ServerProcessManager.appLog("虚拟屏：$packageName 正在主屏前台，仍另开一份到后台屏")
         }
         val pm = context.packageManager
         val intent = pm.getLaunchIntentForPackage(packageName) ?: return false to "找不到 $packageName 的启动入口"
@@ -262,7 +263,11 @@ object VirtualScreen {
         if (ok) {
             lastPackage = packageName
             ServerProcessManager.appLog("虚拟屏：已把 $packageName 开到屏 ${r.displayId}")
-            return true to "已打开 $packageName"
+            return true to if (duplicate) {
+                "已打开 $packageName（主屏那份也在，这是另开的一份实例；操作的是后台这份）"
+            } else {
+                "已打开 $packageName"
+            }
         }
         ServerProcessManager.appLog("虚拟屏：启动 $packageName 失败：${out.take(120)}")
         return false to "打开 $packageName 失败：${out.take(100)}"
@@ -656,8 +661,17 @@ object VirtualScreen {
 
             lower.startsWith("click ") -> {
                 val target = rest(6)
-                if (Regex("""^[@#]?[eE]?第?\d+个?$""").matches(target)) clickByRef(app, target)
-                else clickText(app, target)
+                // 模型会把 OCR 认到的坐标直接拿来点：`click 1057,339`
+                val coord = Regex("""^(\d{1,5})\s*[,， ]\s*(\d{1,5})$""").find(target)
+                when {
+                    coord != null -> {
+                        val cxx = coord.groupValues[1].toInt()
+                        val cyy = coord.groupValues[2].toInt()
+                        if (tap(app, cxx, cyy)) "已点击 ($cxx,$cyy)" else "点击失败 ($cxx,$cyy)"
+                    }
+                    Regex("""^[@#]?[eE]?第?\d+个?$""").matches(target) -> clickByRef(app, target)
+                    else -> clickText(app, target)
+                }
             }
 
             lower.startsWith("type ") -> typeIntoBest(app, rest(5))
@@ -1082,7 +1096,16 @@ object VirtualScreen {
             }
             // 点开搜索页后输入框通常已有焦点，直接粘贴
             val typed = inputText(context, k)
-            if (typed.contains("已")) return "$typed（OCR 找到入口后直接输入）"
+            if (typed.contains("已")) {
+                // 粘贴没有反馈，确认一下屏上真的出现了这个词，别报假成功
+                delay(600)
+                val after = readScreenText(context).orEmpty()
+                return if (after.contains(k)) {
+                    "已搜索「$k」（界面上已经出现这个词）\n当前屏幕：\n$after"
+                } else {
+                    "$typed，但界面上还没看到「$k」——可能没输进去或还在加载，用 tree 确认一下"
+                }
+            }
         }
         return "点了搜索入口，但没看到输入框。当前屏幕：\n" +
                 (readScreenText(context) ?: "（读不到内容）") +
