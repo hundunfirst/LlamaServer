@@ -2156,10 +2156,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 val needsScreen = com.localllm.server.core.PhoneChannel.adbTouchesUi(adbArgs) ||
                                         com.localllm.server.core.VirtualScreen.touchesScreen(adbArgs)
                                 var vsLane = com.localllm.server.core.VirtualScreen.current()
-                                if (vsLane == null && needsScreen) {
-                                    vsLane = com.localllm.server.core.VirtualScreen.ensure(
-                                        getApplication<Application>()
-                                    )
+                                if (vsLane == null && needsScreen &&
+                                    com.localllm.server.core.AppSettings.useVirtualScreen
+                                ) {
+                                    // 建屏给 15 秒上限：无线调试异常时它会卡很久，卡住就当场降级到主屏，
+                                    // 别让一条命令等掉半分钟
+                                    vsLane = kotlinx.coroutines.withTimeoutOrNull(15_000) {
+                                        com.localllm.server.core.VirtualScreen.ensure(
+                                            getApplication<Application>()
+                                        )
+                                    }
+                                    if (vsLane == null) {
+                                        ServerProcessManager.appLog(
+                                            "adb 界面命令：后台屏不可用，改在主屏执行（${adbArgs.take(40)}）"
+                                        )
+                                    }
                                 }
                                 val rerouted = if (vsLane != null) {
                                     com.localllm.server.core.VirtualScreen.reroute(adbArgs, vsLane.displayId)
@@ -2182,9 +2193,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                                     "读屏请用 screen 工具的 tree（返回屏幕上的文字和坐标），截图用 screen 的 shot。"
                                         } else null
                                 } else null
-                                // 通道闸门：本轮已经用无障碍点过屏 → 不再执行 adb 的界面命令。
-                                // 锁屏不挡：锁屏状态下也得把活干完。改投后台屏的命令不与主屏通道冲突。
-                                val uiCmd = rerouted == null && PhoneChannel.adbTouchesUi(adbArgs)
+                                // 通道闸门只对「后台屏上的操作」有意义（同一块屏两个指针会打架）；
+                                // 已经降级到主屏时不再互斥，否则会把能干的活硬拦下来
+                                val uiCmd = rerouted == null && vsLane != null &&
+                                        PhoneChannel.adbTouchesUi(adbArgs)
                                 // 模型会自己写 `shell input -d 屏号 tap …`——那条命令在虚拟屏上事件会被丢掉，
                                 // 它在真机上反复发十几次、界面一动不动。这里统一截下来交给 helper 注入。
                                 val inputCmd = if (vsLane != null) {
@@ -2272,11 +2284,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 ServerProcessManager.appLog("屏幕：$action ${text.take(40)}")
                                 // 默认走后台虚拟屏：建好就在那块屏上做，用户主屏完全不碰。
                                 // 只有建不起来（无线调试没连、容器没就绪）时才退回主屏的无障碍路径。
-                                val vsReady = if (com.localllm.server.core.AppSettings.useVirtualScreen) {
-                                    com.localllm.server.core.VirtualScreen.ensure(
-                                        getApplication<Application>()
-                                    )
+                                // 效率优先的三级降级：
+                                //   1. 纯命令能解决的（settings/svc/pm/dumpsys/install/文件）根本不需要屏；
+                                //   2. 必须碰界面时先用后台屏；
+                                //   3. 后台屏建不起来就快速切到前台（主屏），而不是拒绝、更不是死磕。
+                                // 建屏给 15 秒上限：无线调试异常时它会卡很久，卡住就降级，别让用户干等。
+                                val vsReady = if (com.localllm.server.core.AppSettings.useVirtualScreen &&
+                                    com.localllm.server.core.VirtualScreen.current() != null
+                                ) {
+                                    com.localllm.server.core.VirtualScreen.current()
+                                } else if (com.localllm.server.core.AppSettings.useVirtualScreen) {
+                                    kotlinx.coroutines.withTimeoutOrNull(15_000) {
+                                        com.localllm.server.core.VirtualScreen.ensure(
+                                            getApplication<Application>()
+                                        )
+                                    }
                                 } else null
+                                // 这条路径决定这次界面动作到底落在哪：后台屏 / 前台
+                                val onVirtual = vsReady != null
+                                if (!onVirtual) {
+                                    ServerProcessManager.appLog(
+                                        "屏幕：$action 后台屏不可用（${com.localllm.server.core.VirtualScreen.lastError ?: "建屏超时"}），改在主屏执行"
+                                    )
+                                }
                                 if (vsReady != null) {
                                     // 后台屏一次只给一个任务用，别的任务同时要用就排队
                                     val vr = com.localllm.server.core.VirtualScreen.exclusive {
@@ -2308,15 +2338,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                     syncSteps()
                                     vr
                                 } else if (!com.localllm.server.core.AppSettings.allowMainScreenOps) {
-                                    // 后台屏没建起来时不退到主屏。用户要的是「主屏静默」：
-                                    // 宁可这一步做不成、说清楚原因，也不能把用户眼前的界面抢走。
+                                    // 用户主动关掉了「后台屏不可用时改在主屏操作」：那就如实说做不成，
+                                    // 并给出不开界面也能达成的办法。默认是允许降级的（效率优先）。
                                     val why = com.localllm.server.core.VirtualScreen.lastError
                                         ?: "后台屏没建起来（无线调试没连、或容器没就绪）"
-                                    val msg = "错误：后台屏不可用——$why。\n" +
-                                            "为不打扰你的主屏，这次界面操作已经取消，没有动你的屏幕。\n" +
+                                    val msg = "错误：后台屏不可用——$why；而且你在设置里关掉了「后台屏不可用时改在主屏操作」，" +
+                                            "所以这次界面操作没有执行。\n" +
                                             "能用不开界面的办法达成就那么做（shell / 设置项 / dumpsys 那类命令）；" +
-                                            "非要操作界面时，告诉用户需要先在「设置 → 后台屏」里检查无线调试。"
-                                    ServerProcessManager.appLog("屏幕：$action 已取消（后台屏不可用，且不允许操作主屏）")
+                                            "确实要操作界面时，把这一点告诉用户。"
+                                    ServerProcessManager.appLog("屏幕：$action 已取消（后台屏不可用，且用户关闭了主屏降级）")
                                     steps.add(
                                         ChatStore.Step(
                                             "tool", "屏幕：$action 已取消",

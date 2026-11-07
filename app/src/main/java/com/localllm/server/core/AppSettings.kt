@@ -785,14 +785,14 @@ object AppSettings {
         set(value) = prefs.edit().putBoolean("a11y_was_enabled", value).apply()
 
     /**
-     * 是否允许在用户的主屏上操作界面。**默认关**。
+     * 后台屏不可用时，是否允许改在用户主屏上操作界面。**默认开**。
      *
-     * 关着的时候，agent 只在一块独立的后台虚拟屏上干活；后台屏建不起来（无线调试没连、
-     * 容器没就绪）就如实说这一步做不成，绝不会把用户眼前的 App 切走。这是用户的明确要求：
-     * 宁可失败，不要抢屏。真要临时放开，在设置里手动打开。
+     * 效率优先：后台屏起不来（无线调试断了、容器没就绪）时，与其让任务直接失败、让模型
+     * 在别处绕圈，不如快速降级到前台把活干完——代价是会切走用户眼前的屏幕。真要做到
+     * 「绝不打扰主屏」，把这个开关关掉，那时会如实报告做不成。
      */
     var allowMainScreenOps: Boolean
-        get() = prefs.getBoolean("allow_main_screen_ops", false)
+        get() = prefs.getBoolean("allow_main_screen_ops", true)
         set(value) = prefs.edit().putBoolean("allow_main_screen_ops", value).apply()
 
     /** 界面任务是否在后台虚拟屏上做（默认开）。关掉就等于允许直接操作主屏 */

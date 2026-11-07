@@ -25,6 +25,8 @@ object AdbTool {
                 put(
                     "description",
                     "通过无线调试执行 adb 命令（App 会自动发现端口并连接，用户只需在最开始配对一次）。" +
+                            "**能用命令解决的事优先用这条通道**：改设置、开关蓝牙/WiFi、装应用、查电量与状态、" +
+                            "读写文件、看前台是谁——一条命令就完事，比点界面快一个量级，也不会有点击落空的风险。" +
                             "**常用**：`devices`（看有没有连上）、`shell input tap X Y` / `shell input swipe x1 y1 x2 y2 300` / " +
                             "`shell input text 你好`、`shell screencap -p /sdcard/shot.png`（然后用 file_* 或 OCR 看）、" +
                             "`shell uiautomator dump /sdcard/ui.xml`（拿控件树定位按钮坐标）、" +
