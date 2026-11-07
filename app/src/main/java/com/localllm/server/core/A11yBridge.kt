@@ -207,6 +207,32 @@ object A11yBridge {
         return clickRef(displayId, "@e${idx + 1}")
     }
 
+    /** 清空输入框（粘贴前必须做：输入框常带默认热搜词，直接粘贴会拼在后面） */
+    fun clearRef(displayId: Int, ref: String): String {
+        val node = nodeOf(displayId, ref) ?: return lastRefError
+        if (!runCatching { node.isEditable }.getOrDefault(false)) return "不是输入框"
+        val args = android.os.Bundle().apply {
+            putCharSequence(
+                android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                ""
+            )
+        }
+        val ok = runCatching {
+            node.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        }.getOrDefault(false)
+        return if (ok) "已清空" else "清空失败"
+    }
+
+    /** 在最近一次快照里找「文字含某词且可点」的元素，返回编号（找不到 null） */
+    fun findClickableRef(displayId: Int, word: String): String? {
+        if (snapshotDisplay != displayId || snapshot.isEmpty()) return null
+        val i = snapshot.indexOfFirst {
+            nodeText(it).contains(word, ignoreCase = true) &&
+                    runCatching { it.isClickable }.getOrDefault(false)
+        }
+        return if (i >= 0) "@e${i + 1}" else null
+    }
+
     /** 按编号点（@e3）：直接对节点 performAction，界面轻微变化也不会点偏 */
     fun clickRef(displayId: Int, ref: String): String {
         val node = nodeOf(displayId, ref) ?: return lastRefError

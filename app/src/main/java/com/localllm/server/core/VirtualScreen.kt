@@ -1137,63 +1137,66 @@ object VirtualScreen {
         val r = ready ?: return "错误：后台屏没准备好（先 open 一个 App）"
         val k = keyword.trim()
         if (k.isEmpty()) return "错误：search 需要关键词"
-        repeat(3) { round ->
-            readScreenText(context) // 刷新无障碍快照
-            // 1) 无障碍能读到输入框：点开直接写（最准）
-            A11yBridge.bestEditableRef(r.displayId)?.let { ref ->
-                A11yBridge.clickRef(r.displayId, ref)
-                delay(350)
-                readScreenText(context)
-                val typed = A11yBridge.setTextOnFocused(r.displayId, k)
-                    ?: A11yBridge.setTextOnRef(r.displayId, ref, k)
-                return "已把「$k」写进搜索框（$ref）→ $typed"
-            }
-            // 2) 无障碍里找「搜索」入口（按编号点）
-            val byRef = A11yBridge.clickTextOnDisplay(r.displayId, "搜索")
-            if (byRef.startsWith("已点击")) {
-                ServerProcessManager.appLog("搜索：无障碍点入口（第 ${round + 1} 轮）→ $byRef")
-                delay(900)
-                return@repeat
-            }
-            // 3) 无障碍读不到这一屏 → 用 OCR 认出的文字坐标点。
-            //    真机上模型看到的"OCR 定位到搜索框"就是这条路，但 search 以前只查无障碍，所以必然失败。
+
+        // 用户的真实流程是：点输入框 →（跳到搜索页）→ 输入 → 再点搜索。
+        // 以前先找「搜索」字样去点，可很多 App 首页那个「搜索」就是输入框本身，
+        // 一点就直接拿默认热搜词搜出去了，后面再输入全是错的。
+        var ref = editableRef(context)
+        if (ref == null) {
+            // 无障碍读不到这一屏：用 OCR 找最像搜索框的那行（顶部、带「搜索」字样）点开
             val lines = readScreen(context).orEmpty()
-            val hit = lines.firstOrNull {
-                val t = it.text
-                t.contains("搜索") || t.contains("搜一搜") || t.contains("搜商品") || t.contains("查找")
-            }
+            val hit = lines
+                .filter {
+                    val t = it.text
+                    t.contains("搜索") || t.contains("搜一搜") || t.contains("搜商品")
+                }
+                .minByOrNull { it.cy }
             if (hit == null) {
-                return "没找到搜索框，也没找到「搜索」入口。当前屏幕：\n" +
-                        (readScreenText(context) ?: "（读不到内容）") +
-                        "\n可以试：先 `scroll` 往下滚看看，或 `click <文字>` 按屏幕上的文字点。"
+                return "没找到搜索框。当前屏幕：\n" +
+                        (readScreenText(context) ?: "（读不到内容）")
             }
             tap(context, hit.cx, hit.cy)
-            ServerProcessManager.appLog("搜索：OCR 坐标点入口「${hit.text}」→ ${hit.cx},${hit.cy}")
             delay(1_000)
             readScreenText(context)
-            A11yBridge.bestEditableRef(r.displayId)?.let { ref2 ->
-                A11yBridge.clickRef(r.displayId, ref2)
-                delay(250)
-                val typed = A11yBridge.setTextOnFocused(r.displayId, k)
-                    ?: A11yBridge.setTextOnRef(r.displayId, ref2, k)
-                return "已把「$k」写进搜索框（OCR 找到入口 → $ref2）→ $typed"
-            }
-            // 点开搜索页后输入框通常已有焦点，直接粘贴
-            val typed = inputText(context, k)
-            if (typed.contains("已")) {
-                // 粘贴没有反馈，确认一下屏上真的出现了这个词，别报假成功
-                delay(600)
-                val after = readScreenText(context).orEmpty()
-                return if (after.contains(k)) {
-                    "已搜索「$k」（界面上已经出现这个词）\n当前屏幕：\n$after"
-                } else {
-                    "$typed，但界面上还没看到「$k」——可能没输进去或还在加载，用 tree 确认一下"
-                }
-            }
+            ref = editableRef(context)
         }
-        return "点了搜索入口，但没看到输入框。当前屏幕：\n" +
-                (readScreenText(context) ?: "（读不到内容）") +
-                "\n可以再点一次入口，或 `click <文字>` 按文字点。"
+
+        if (ref != null) {
+            A11yBridge.clickRef(r.displayId, ref) // 点开（可能跳转到搜索页）
+            delay(450)
+            readScreenText(context)
+            ref = editableRef(context) ?: ref
+            // 直接设值会**覆盖**已有内容（首页输入框常带默认热搜词，不清掉就会拼在一起）
+            val typed = A11yBridge.setTextOnFocused(r.displayId, k)
+                ?: A11yBridge.setTextOnRef(r.displayId, ref, k)
+            if (typed.contains("已")) {
+                delay(400)
+                return typed + " → " + triggerSearch(context, r.displayId)
+            }
+            // 设值不行：清空后走剪贴板粘贴
+            A11yBridge.clearRef(r.displayId, ref)
+            delay(200)
+            val pasted = inputText(context, k)
+            delay(500)
+            return pasted + " → " + triggerSearch(context, r.displayId)
+        }
+
+        // 完全找不到输入框：点开搜索入口后直接粘贴（此时输入框通常已聚焦）
+        return inputText(context, k)
+    }
+
+    /** 当前屏上最像输入框的元素编号（无障碍快照） */
+    private fun editableRef(context: Context): String? =
+        A11yBridge.bestEditableRef(ready?.displayId ?: -1)
+
+    /** 触发搜索：优先点「搜索」按钮，其次发回车 */
+    private suspend fun triggerSearch(context: Context, displayId: Int): String {
+        readScreenText(context)
+        A11yBridge.findClickableRef(displayId, "搜索")?.let { ref ->
+            val clicked = A11yBridge.clickRef(displayId, ref)
+            if (clicked.startsWith("已点击")) return "已触发搜索（$clicked）"
+        }
+        return if (key(context, "KEYCODE_ENTER")) "已按回车触发搜索" else "没能触发搜索（没找到搜索按钮）"
     }
 
     /** 系统键；后端统一翻成 keyevent 名字 */
