@@ -751,8 +751,30 @@ object VirtualScreen {
     }
 
     /** 按编号点击（@e3）：直接对节点执行，不用坐标 */
-    suspend fun clickByRef(context: Context, ref: String): String =
-        A11yBridge.clickRef(ready?.displayId ?: -1, ref)
+    /** 最近一次 OCR 读到的行：无障碍读不到的屏，点编号就回落到这里的坐标 */
+    @Volatile
+    private var lastOcrLines: List<OcrEngine.Line> = emptyList()
+
+    /**
+     * 按编号点击：先试无障碍（对节点执行，最准），无障碍没有快照就回落到 OCR 坐标。
+     *
+     * 这一步是必须的：有的屏无障碍列不出窗口（真机日志里常见），此时 tree 给的是 OCR 行，
+     * 如果点击还只查无障碍编号表，`click 3` 必然失败——模型就会开始乱试。
+     */
+    suspend fun clickByRef(context: Context, ref: String): String {
+        val displayId = ready?.displayId ?: -1
+        val byA11y = A11yBridge.clickRef(displayId, ref)
+        val a11yFailed = byA11y.contains("没找到") || byA11y.contains("没有 @e") ||
+                byA11y.contains("错误")
+        if (!a11yFailed) return byA11y
+        val idx = Regex("""\d+""").find(ref)?.value?.toIntOrNull() ?: return byA11y
+        val line = lastOcrLines.getOrNull(idx - 1) ?: return byA11y
+        return if (tap(context.applicationContext, line.cx, line.cy)) {
+            "已点击「${line.text}」（OCR 坐标 ${line.cx},${line.cy}）"
+        } else {
+            "点击「${line.text}」失败（OCR 坐标 ${line.cx},${line.cy}）"
+        }
+    }
 
     /** 按编号往输入框写文字 */
     suspend fun typeIntoRef(context: Context, ref: String, text: String): String =
@@ -771,6 +793,7 @@ object VirtualScreen {
             return null
         }
         return runCatching { OcrEngine.recognizeLines(jpg) }
+            .onSuccess { lastOcrLines = it }
             .onFailure {
                 ServerProcessManager.appLog(
                     "虚拟屏：读屏失败——OCR 出错：${it.message ?: it.javaClass.simpleName}" +
@@ -1012,7 +1035,11 @@ object VirtualScreen {
     /** 把读屏结果排成给模型的清单（带坐标，按从上到下） */
     fun describeLines(lines: List<OcrEngine.Line>, limit: Int = 60): String {
         if (lines.isEmpty()) return "屏幕上没有识别到文字（可能是纯图片界面，可先 shot 看一眼）"
-        return lines.take(limit).joinToString("\n") { "· ${it.text}  @(${it.cx},${it.cy})" } +
+        // OCR 行也编号：和无障碍那套统一成 @e1 起，模型只学一套编号规则，
+        // 点的时候按编号回落到这里的坐标（无障碍读不到的屏就靠这个）
+        return lines.take(limit).mapIndexed { i, l ->
+            "@e${i + 1} ${l.text}  @(${l.cx},${l.cy})"
+        }.joinToString("\n") +
                 if (lines.size > limit) "\n…（共 ${lines.size} 行，只列前 $limit 行）" else ""
     }
 
