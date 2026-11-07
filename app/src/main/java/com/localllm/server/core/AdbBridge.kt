@@ -178,8 +178,6 @@ object AdbBridge {
 
     /** 在容器里执行 `adb <args>`（自动确保连接）。返回 (成功?, 输出) */
     suspend fun runAdb(context: Context, args: String, timeoutMs: Long = 180_000): Pair<Boolean, String> {
-        // 用户在状态条上点了停止：后面的 adb 动作一律不执行（之前只有无障碍侧检查了这个标志）
-        if (AgentHud.consumeStop()) return false to "用户点了停止：已中止后续 adb 操作"
         val app = context.applicationContext as? Application ?: return false to "上下文无效"
         val st = ensureConnected(app)
         if (!st.connected) return false to st.message
@@ -215,7 +213,7 @@ object AdbBridge {
         kotlinx.coroutines.delay(400)
         runCatching { runAdb(context, "shell wm dismiss-keyguard", 15_000) }
         kotlinx.coroutines.delay(400)
-        return !PhoneChannel.screenOffOrLocked(context)
+        return true
     }
 
     /** 免点击安装：`adb install -r`。成功返回 null，失败返回原因（调用方据此退回系统安装器） */

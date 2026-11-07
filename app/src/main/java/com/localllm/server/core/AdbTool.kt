@@ -33,10 +33,10 @@ object AdbTool {
                             "`shell am start -n 包名/活动名`（启动别的 App）、`shell pm list packages`、" +
                             "`install -r 文件路径`（**免点击**安装，比 install_apk 省一次确认）、`uninstall 包名`、" +
                             "`shell dumpsys window | grep mCurrentFocus`（看前台是谁）。" +
-                            "**通道规矩（重要）**：点屏要么用 screen 工具、要么用本工具的 `shell input`，**同一轮只走一条**。" +
-                            "screen 成功点过一次后，本工具的 input/uiautomator/screencap 会被直接拒绝，别反复试；" +
-                            "本工具先成功了，就别再用 screen 点。首选 screen（不依赖网络），" +
-                            "只有它报「未启用/没连上」时才整轮改用本工具。" +
+                            "**通道规矩（重要）**：点屏统一用本工具的 shell input（tap/swipe/text/keyevent）。" +
+                            "" +
+                            "" +
+                            "" +
                             "本工具真正独有的活：装 APK、pm、dumpsys、am start、screencap 存档。" +
                             "**锁屏/灭屏时**：照常执行，但黑屏上点不中——需要时先 `shell input keyevent 224` 唤醒" +
                             "（这条不算点屏，不受通道互斥限制），无密码设备可 `shell wm dismiss-keyguard` 解屏；" +
