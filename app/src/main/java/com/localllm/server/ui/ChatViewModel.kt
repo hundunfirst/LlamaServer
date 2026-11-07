@@ -1000,11 +1000,49 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val r = precheck ?: kotlinx.coroutines.withContext(Dispatchers.IO) {
             when (action) {
                 "tree" -> A11yBridge.tree()
-                "click" -> A11yBridge.clickText(text)
-                "tap" -> if (x >= 0 && y >= 0) A11yBridge.tap(x, y) else "错误：tap 需要 x 和 y"
-                "swipe" -> if (x >= 0 && y >= 0 && x2 >= 0 && y2 >= 0)
-                    A11yBridge.swipe(x, y, x2, y2, dur.toLong())
-                else "错误：swipe 需要 x,y,x2,y2"
+                "open" -> {
+                    // 主屏路径也要有 open：模型第一步就 open，没有它就会绕道去猜 Activity 名
+                    val pm = getApplication<Application>().packageManager
+                    val intent = pm.getLaunchIntentForPackage(text.trim())
+                    val comp = intent?.component?.flattenToShortString()
+                    if (comp == null) "错误：找不到「${text.take(20)}」的启动入口"
+                    else {
+                        val (ok, out) = AdbBridge.runAdb(
+                            getApplication(), "shell am start -n $comp", 30_000
+                        )
+                        if (ok) "已打开 ${text.trim()}（主屏）" else "打开失败：${out.take(100)}"
+                    }
+                }
+                "search" -> com.localllm.server.core.VirtualScreen.mainScreenSearch(
+                    getApplication(), text.trim()
+                )
+                "type", "type_any" -> A11yBridge.inputText(text)
+                "click" -> {
+                    val t = text.trim()
+                    val coord = Regex("""^(\d{1,5})\s*[,， ]\s*(\d{1,5})$""").find(t)
+                    if (coord != null) {
+                        val (ok, out) = AdbBridge.runAdb(
+                            getApplication(),
+                            "shell input tap ${coord.groupValues[1]} ${coord.groupValues[2]}", 20_000
+                        )
+                        if (ok) "已点击 (${coord.groupValues[1]},${coord.groupValues[2]})" else "点击失败"
+                    } else A11yBridge.clickText(t)
+                }
+                "tap" -> if (x >= 0 && y >= 0) {
+                    val (ok, out) = AdbBridge.runAdb(getApplication(), "shell input tap $x $y", 20_000)
+                    if (ok) "已点击 ($x,$y)" else "点击失败"
+                } else "错误：tap 需要 x 和 y"
+                "swipe" -> if (x >= 0 && y >= 0 && x2 >= 0 && y2 >= 0) {
+                    val (ok, _) = AdbBridge.runAdb(
+                        getApplication(),
+                        "shell input swipe $x $y $x2 $y2 ${dur.coerceIn(50, 3000)}", 25_000
+                    )
+                    if (ok) "已滑动" else "滑动失败"
+                } else "错误：swipe 需要 x,y,x2,y2"
+                "scroll" -> {
+                    val (ok, _) = AdbBridge.runAdb(getApplication(), "shell input swipe 540 1900 540 700 300", 25_000)
+                    if (ok) "已往下滚一屏" else "滑动失败"
+                }
                 "input" -> {
                     val r1 = A11yBridge.inputText(text)
                     if (r1.startsWith("输入失败") || r1.startsWith("没找到输入框")) {
@@ -1023,7 +1061,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 "key" -> A11yBridge.global(text)
                 "shot" -> A11yBridge.screenshot(getApplication())
-                else -> "错误：未知 action「$action」（可用 tree/click/tap/swipe/input/key/shot）"
+                else -> "错误：未知 action「$action」" +
+                        "（可用 tree/open/search/type/click/tap/swipe/scroll/input/key/shot）"
             }
         }
         val ok = !r.startsWith("错误") && !r.startsWith("没找到") &&
@@ -2192,14 +2231,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                                 // 后台屏就绪时，读屏类 adb 命令必须挡掉：uiautomator / screencap 只认主屏，
                                 // 放过去就成了「读用户眼前的界面、点后台屏的坐标」，越点越错，还顺带看了用户的主屏
                                 val vsReadWarn = if (vsLane != null) {
+                                    // 只在「后台屏上」拦 HOME 这类切屏按键；uiautomator/screencap 不再拦
+                                    //（那是在后台屏时代加的，用户要降级到主屏时它们正好是最准的定位手段）
                                     com.localllm.server.core.VirtualScreen.blockedOnVirtual(adbArgs)
-                                        ?: if (Regex("""\buiautomator\b""").containsMatchIn(adbArgs) ||
-                                            Regex("""\bscreencap\b""").containsMatchIn(adbArgs)
-                                        ) {
-                                            "错误：后台屏上不能用 uiautomator / screencap——它们只认主屏，" +
-                                                    "读回来的会是用户眼前的界面，和你要点的后台屏不是一回事。" +
-                                                    "读屏请用 screen 工具的 tree（返回屏幕上的文字和坐标），截图用 screen 的 shot。"
-                                        } else null
                                 } else null
                                 // 通道闸门只对「后台屏上的操作」有意义（同一块屏两个指针会打架）；
                                 // 已经降级到主屏时不再互斥，否则会把能干的活硬拦下来

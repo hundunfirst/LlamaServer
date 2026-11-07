@@ -715,6 +715,11 @@ object VirtualScreen {
     suspend fun runCommand(context: Context, raw: String): String {
         val cmd = raw.trim()
         if (cmd.isEmpty()) return "错误：指令为空"
+        // 后台屏默认关（这台设备上无障碍读不到虚拟屏窗口，OCR 在动态界面不可靠）：
+        // 不建屏，命令直接在主屏上执行（uiautomator/无障碍/input）
+        if (!AppSettings.useVirtualScreen) {
+            return runCommandOnMain(context, cmd)
+        }
         val lower = cmd.lowercase()
         val r = ready
         // 只读命令不需要等待和回传
@@ -730,6 +735,73 @@ object VirtualScreen {
         return result +
                 (if (!changed) "\n（界面在 2.5 秒内没有明显变化）" else "") +
                 "\n当前屏幕：\n" + screen
+    }
+
+    /**
+     * 主屏模式：命令直接落在用户当前屏幕上（ADB/无障碍/uiautomator）。
+     *
+     * 这是默认路径：不需要界面的活由 adb 命令完成（不打扰），需要界面的在主屏上做——
+     * uiautomator 有完整控件 XML，找搜索框/输入框是精确的；无障碍点击/输入对节点执行也稳。
+     */
+    private suspend fun runCommandOnMain(context: Context, cmd: String): String {
+        val app = context.applicationContext
+        val lower = cmd.lowercase()
+        val rest = { p: Int -> cmd.substring(p).trim() }
+        return when {
+            lower == "tree" || lower == "读屏" -> A11yBridge.tree()
+            lower.startsWith("open ") -> {
+                val pkg = packageByLabel(app, rest(5)) ?: return "没找到叫「${rest(5)}」的 App"
+                val pm = app.packageManager
+                val intent = pm.getLaunchIntentForPackage(pkg) ?: return "找不到入口"
+                val comp = intent.component?.flattenToShortString() ?: return "找不到入口"
+                val (ok, out) = AdbBridge.runAdb(app, "shell am start -n $comp", 30_000)
+                if (ok) "已打开 $pkg（主屏）" else "打开失败：${out.take(100)}"
+            }
+            lower.startsWith("click ") -> {
+                val t = rest(6)
+                val coord = Regex("""^(\d{1,5})\s*[,， ]\s*(\d{1,5})$""").find(t)
+                if (coord != null) {
+                    val (ok, out) = AdbBridge.runAdb(
+                        app, "shell input tap ${coord.groupValues[1]} ${coord.groupValues[2]}", 20_000
+                    )
+                    if (ok) "已点击 (${coord.groupValues[1]},${coord.groupValues[2]})" else "点击失败"
+                } else A11yBridge.clickText(t)
+            }
+            lower.startsWith("search ") -> mainScreenSearch(app, rest(7))
+            lower.startsWith("type ") -> A11yBridge.inputText(rest(5))
+            lower.startsWith("swipe ") -> {
+                val n = rest(6).split(Regex("""[\s,]+""")).mapNotNull { it.toIntOrNull() }
+                if (n.size < 4) "错误：swipe 需要 4 个数字"
+                else {
+                    AdbBridge.runAdb(
+                        app,
+                        "shell input swipe ${n[0]} ${n[1]} ${n[2]} ${n[3]} ${n.getOrNull(4) ?: 300}",
+                        25_000
+                    )
+                    "已滑动"
+                }
+            }
+            lower == "scroll" -> {
+                AdbBridge.runAdb(app, "shell input swipe 540 1900 540 700 300", 25_000)
+                "已往下滚一屏"
+            }
+            lower == "up" -> {
+                AdbBridge.runAdb(app, "shell input swipe 540 700 540 1900 300", 25_000)
+                "已往上滚一屏"
+            }
+            lower.startsWith("scroll_to ") -> {
+                val target = rest(10)
+                repeat(6) {
+                    val tree = A11yBridge.tree()
+                    if (tree.contains(target, ignoreCase = true)) return "已找到「$target」"
+                    AdbBridge.runAdb(app, "shell input swipe 540 1900 540 700 300", 25_000)
+                    delay(500)
+                }
+                "往下滚了 6 屏，没找到「$target」"
+            }
+            lower.startsWith("key ") -> A11yBridge.global(rest(4))
+            else -> "错误：不认识的指令「$cmd」"
+        }
     }
 
     private suspend fun runCommandInner(context: Context, raw: String): String {
@@ -1296,7 +1368,7 @@ object VirtualScreen {
     }
 
     /** 主屏上完成搜索：uiautomator 定位搜索框 → 点击 → 粘贴 → 回车（会切走用户屏幕） */
-    private suspend fun mainScreenSearch(app: Context, keyword: String): String {
+    suspend fun mainScreenSearch(app: Context, keyword: String): String {
         val box = uiFindOnMain(app, "search")
             ?: uiFindOnMain(app, "")
             ?: return "主屏上也没找到输入框（uiautomator dump 无匹配）"
