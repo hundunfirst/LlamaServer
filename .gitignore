@@ -46,3 +46,4 @@ vision_tokens.json
 
 # ---- Linux 运行环境资产（体积大，脚本可重建，不入库） ----
 app/src/main/assets/runtime/
+.kotlin/
