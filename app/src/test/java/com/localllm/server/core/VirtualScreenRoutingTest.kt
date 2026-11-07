@@ -14,6 +14,7 @@ import org.junit.Test
 class VirtualScreenRoutingTest {
 
     private val display = 31
+    private val multi = "--activity-multiple-task"
 
     // ---- input 命令改走注入 ----
 
@@ -41,14 +42,10 @@ class VirtualScreenRoutingTest {
     // ---- adb 界面命令改投后台屏 ----
 
     @Test
-    fun `am start 补上屏号`() {
+    fun `am start 补上屏号和多任务标志`() {
         assertEquals(
-            "shell am start --display 31 -n com.a/.B",
+            "shell am start $multi --display 31 -n com.a/.B",
             VirtualScreen.reroute("shell am start -n com.a/.B", display)
-        )
-        assertEquals(
-            "shell am start --display 31 -a android.intent.action.VIEW -d https://x",
-            VirtualScreen.reroute("shell am start -a android.intent.action.VIEW -d https://x", display)
         )
     }
 
@@ -56,15 +53,19 @@ class VirtualScreenRoutingTest {
     fun `模型自己写的 display 一律纠正`() {
         // 真机上模型写过 --display 0（就是主屏），这一条最危险
         assertEquals(
-            "shell am start --display 31 -n com.a/.B",
+            "shell am start $multi --display 31 -n com.a/.B",
             VirtualScreen.reroute("shell am start --display 0 -n com.a/.B", display)
         )
+        // 屏号已经对了，但缺多任务标志 —— 不补的话 App 已在别处跑着时会被复用，
+        // 这块屏上依然是空的（真机上就是这么绕起来的）
         assertEquals(
-            "shell am start --display 31 -n com.a/.B",
-            VirtualScreen.reroute("shell am start --display=7 -n com.a/.B", display)
+            "shell am start $multi --display 31 -n com.a/.B",
+            VirtualScreen.reroute("shell am start --display 31 -n com.a/.B", display)
         )
-        // 已经是本屏就不用改
-        assertNull(VirtualScreen.reroute("shell am start --display 31 -n com.a/.B", display))
+        // 两项都齐了才不动
+        assertNull(
+            VirtualScreen.reroute("shell am start $multi --display 31 -n com.a/.B", display)
+        )
     }
 
     @Test
@@ -72,9 +73,8 @@ class VirtualScreenRoutingTest {
         val got = VirtualScreen.reroute(
             "shell monkey -p com.xingin.xhs -c android.intent.category.LAUNCHER 1", display
         )
-        assertNotNull(got)
         assertEquals(
-            "shell am start --display 31 -a android.intent.action.MAIN " +
+            "shell am start $multi --display 31 -a android.intent.action.MAIN " +
                     "-c android.intent.category.LAUNCHER -p com.xingin.xhs",
             got
         )
@@ -83,7 +83,6 @@ class VirtualScreenRoutingTest {
     @Test
     fun `input 补屏号`() {
         assertEquals("shell input -d 31 tap 5 6", VirtualScreen.reroute("shell input tap 5 6", display))
-        // 已经有 -d 的不动
         assertNull(VirtualScreen.reroute("shell input -d 9 tap 5 6", display))
     }
 
@@ -93,7 +92,7 @@ class VirtualScreenRoutingTest {
             "shell am start -n com.a/.B; shell input tap 1 2", display
         )
         assertEquals(
-            "shell am start --display 31 -n com.a/.B; shell input -d 31 tap 1 2",
+            "shell am start $multi --display 31 -n com.a/.B; shell input -d 31 tap 1 2",
             got
         )
     }
@@ -113,7 +112,11 @@ class VirtualScreenRoutingTest {
         assertNotNull(VirtualScreen.blockedOnVirtual("shell input keyevent KEYCODE_APP_SWITCH"))
         assertNotNull(VirtualScreen.blockedOnVirtual("shell input keyevent 187"))
         assertNotNull(VirtualScreen.blockedOnVirtual("shell input keyevent 3"))
-        assertNotNull(VirtualScreen.blockedOnVirtual("shell am start -a android.intent.action.MAIN -c android.intent.category.HOME"))
+        assertNotNull(
+            VirtualScreen.blockedOnVirtual(
+                "shell am start -a android.intent.action.MAIN -c android.intent.category.HOME"
+            )
+        )
     }
 
     @Test

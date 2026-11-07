@@ -384,15 +384,27 @@ object VirtualScreen {
         // monkey 启动 App：换成语义等价的 am start，才能指定屏号
         val monkey = Regex("""^shell\s+monkey\b.*?-p\s+([A-Za-z0-9_.]+)""").find(a)
         if (monkey != null) {
-            return "shell am start --display $displayId -a android.intent.action.MAIN " +
+            return "shell am start --activity-multiple-task --display $displayId " +
+                    "-a android.intent.action.MAIN " +
                     "-c android.intent.category.LAUNCHER -p ${monkey.groupValues[1]}"
         }
-        // 模型会自己写 `--display 0`（那就是主屏）。用户要的是一路后台，
-        // 所以只要带了 --display，一律纠正成本屏——这条真机上被绕过过一次。
-        val disp = Regex("""--display[=\s]+(\d+)""").find(a)
-        if (disp != null) {
-            return if (disp.groupValues[1] == displayId.toString()) null
-            else a.replaceRange(disp.range, "--display $displayId")
+        // am start：既要保证屏号是本屏，也要带 --activity-multiple-task。
+        // 少了后者，App 已在别处跑着时系统会把 intent 交给旧实例，
+        // 这块屏上依然什么都没有（真机上日志：改投到屏 51、读屏报「没有该屏的窗口」）
+        val amStart = Regex("""^(shell\s+am\s+start(?:-activity)?)\s+(.*)$""").find(a)
+        if (amStart != null) {
+            var rest = amStart.groupValues[2]
+            val disp = Regex("""--display[=\s]+(\d+)""").find(rest)
+            if (disp == null) {
+                rest = "--display $displayId $rest"
+            } else if (disp.groupValues[1] != displayId.toString()) {
+                rest = rest.replaceRange(disp.range, "--display $displayId")
+            }
+            if (!rest.contains("--activity-multiple-task")) {
+                rest = "--activity-multiple-task $rest"
+            }
+            val rebuilt = amStart.groupValues[1] + " " + rest
+            return if (rebuilt == a) null else rebuilt
         }
         if (Regex("""^shell\s+input\s""").containsMatchIn(a) &&
             !Regex("""\s-d\s""").containsMatchIn(a)
@@ -483,8 +495,13 @@ object VirtualScreen {
     @Volatile
     var compactReads: Boolean = false
 
-    /**
-     * 上一次开在这块屏上的 App。
+    /** 这块屏还在系统里吗（缓存里的编号可能已经被收掉了） */
+    private suspend fun displayExists(app: Context, id: Int): Boolean {
+        val (_, out) = adbFast(app, "shell \"cmd display get-displays | grep -c 'displayId $id'\"", 15_000)
+        return out.trim().toIntOrNull()?.let { it > 0 } ?: true
+    }
+
+    /** 上一次开在这块屏上的 App。
      *
      * 用处：屏会被闲置收掉再重建（屏号随之变化），而 App 还挂在旧屏上没跟过来——
      * 这时读屏只会得到「没有该屏的窗口」，模型对着一块空屏反复读、反复点。
@@ -507,9 +524,24 @@ object VirtualScreen {
                 )
             }.getOrNull()
             if (a11y != null && !a11y.startsWith("（") && !a11y.startsWith("错误")) return a11y
-            // 第一次就发现"这块屏上没窗口"：多半是屏重建了、App 没跟过来，自动补开一次
+            // 第一次就发现"这块屏上没窗口"：先确认这块屏还活着（可能已被收掉或重建），
+            // 再自动把上次那个 App 重新开上来
             if (!triedReopen && a11y != null && a11y.contains("没有该屏的窗口")) {
                 triedReopen = true
+                if (!displayExists(context.applicationContext, r.displayId)) {
+                    ServerProcessManager.appLog("虚拟屏：屏 ${r.displayId} 已经不存在了，重新建一块")
+                    ready = null
+                    lastDisplayId = 0
+                    val again = runCatching { ensure(context.applicationContext) }.getOrNull()
+                    if (again != null) {
+                        delay(800)
+                        val retry = runCatching {
+                            A11yBridge.treeOnDisplay(again.displayId, 80, compactReads)
+                        }.getOrNull()
+                        if (retry != null && !retry.startsWith("（")) return retry
+                    }
+                    return@repeat
+                }
                 val pkg = lastPackage ?: foregroundPackage(context.applicationContext)
                 if (pkg != null && pkg != context.packageName) {
                     ServerProcessManager.appLog("虚拟屏：屏上没有 App 的窗口，自动把 $pkg 重新开上来")

@@ -936,6 +936,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (index !in list.indices || list[index].role != "user") return
         list[index] = list[index].copy(content = text, reasoning = null)
         _messages.value = list.subList(0, index + 1).toMutableList()
+        // 改的是第一条：会话标题也跟着重来。否则标题还是旧请求（比如「打开小红书…」），
+        // 用户看着就像上下文串了——虽然模型其实拿不到标题
+        if (index == 0) {
+            val id = _activeId.value
+            _sessions.value = _sessions.value.map {
+                if (it.id == id) it.copy(title = "") else it
+            }
+        }
         append(ChatStore.Msg("assistant", ""))
         doStream()
     }
