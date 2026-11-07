@@ -1321,9 +1321,11 @@ object VirtualScreen {
             ServerProcessManager.appLog("虚拟屏：assets 里没有 agent-shell.dex")
             return false
         }
-        val want = bytes.size
-        if (remoteFileSize(app, DEX_REMOTE) == want) return true
-
+        // 每次都无条件重推 + 杀掉旧 helper。
+        // 以前按「远端大小一致就跳过」——但 push 了新 dex 不等于**正在跑的** helper 更新了：
+        // 它进程里已加载的类不会变。修复版装上后跑的仍是旧代码，
+        // 真机上表现为「云端原来可以、现在连云端都不行了」（多轮修复全部没生效）。
+        // dex 只有十几 KB，每次重推一两秒，换状态确定。
         val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
         val writeOut = ps(app, "printf %s '$b64' | base64 -d > /root/agent-shell.dex", 90_000)
         if (writeOut.isNotBlank()) {
@@ -1335,16 +1337,12 @@ object VirtualScreen {
         ServerProcessManager.appLog(
             "虚拟屏：push ${if (pushOk) "成功" else "失败"} ${pushOut.trim().take(160)}"
         )
-
-        val got = remoteFileSize(app, DEX_REMOTE)
-        if (got != want) {
-            return false.also {
-                fail("helper 写不进去（远端 $got 字节 / 本地 $want 字节）")
-            }
+        if (!pushOk) {
+            fail("helper 推送失败")
+            return false
         }
-        // dex 更新过：正在跑的那个 helper 用的还是**旧代码**（进程里已经加载的类不会变），
-        // 光把新 dex 推上去没用。杀掉它，让接下来这次 ensure 用新逻辑重建一块干净的屏。
-        if (pushOk) killStaleHelper(app)
+        // 正在跑的旧 helper 用的是旧类，必须杀掉——这是「云端原来可以、后来不行」的根因
+        killStaleHelper(app)
         return true
     }
 
