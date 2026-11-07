@@ -1178,7 +1178,22 @@ object VirtualScreen {
                 fail("helper 写不进去（远端 $got 字节 / 本地 $want 字节）")
             }
         }
+        // dex 更新过：正在跑的那个 helper 用的还是**旧代码**（进程里已经加载的类不会变），
+        // 光把新 dex 推上去没用。杀掉它，让接下来这次 ensure 用新逻辑重建一块干净的屏。
+        if (pushOk) killStaleHelper(app)
         return true
+    }
+
+    /** 杀掉遗留的 helper 进程（它是 shell 身份，重装 App 不会带走它） */
+    private suspend fun killStaleHelper(app: Context) {
+        val (_, out) = adbFast(app, "shell cat /data/local/tmp/localllm_agent.pid", 10_000)
+        val pid = out.lineSequence().map { it.trim() }
+            .lastOrNull { it.isNotEmpty() && it.all(Char::isDigit) }?.toIntOrNull() ?: return
+        adbFast(app, "shell kill $pid", 10_000)
+        adbFast(app, "shell rm -f /data/local/tmp/localllm_agent.pid", 10_000)
+        ready = null
+        lastDisplayId = 0
+        ServerProcessManager.appLog("虚拟屏：dex 更新过，清掉遗留的 helper（pid $pid）")
     }
 
     /** 设备上文件的大小；不存在或读不到返回 -1 */
