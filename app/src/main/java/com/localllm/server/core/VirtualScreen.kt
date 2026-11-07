@@ -248,6 +248,23 @@ object VirtualScreen {
     @Volatile
     private var lastDisplayId = 0
 
+    /** 指定屏当前的焦点包名（只解析这一块屏自己的段） */
+    private suspend fun focusOnDisplay(app: Context, id: Int): String? {
+        val (_, out) = adbFast(
+            app, "shell \"dumpsys window displays | grep -E 'Display: mDisplayId=|mCurrentFocus='\"",
+            20_000
+        )
+        var inTarget = false
+        for (line in out.lineSequence()) {
+            if (line.contains("Display: mDisplayId=$id")) { inTarget = true; continue }
+            if (line.contains("Display: mDisplayId=")) inTarget = false
+            if (!inTarget) continue
+            Regex("""\su\d+\s+([A-Za-z0-9_.]+)/""").find(line)?.let { return it.groupValues[1] }
+            if (line.contains("mCurrentFocus=null")) return null
+        }
+        return null
+    }
+
     /** 把目标 App 开在这块屏上。返回 false 时调用方应退回主屏流程 */
     suspend fun startApp(context: Context, packageName: String): Boolean = startAppDetail(context, packageName).first
 
@@ -261,6 +278,12 @@ object VirtualScreen {
     suspend fun startAppDetail(context: Context, packageName: String): Pair<Boolean, String> {
         val r = ready ?: return false to "后台屏没准备好"
         val app = context.applicationContext
+        // 后台屏上已经有它了：直接用，不再 MULTIPLE_TASK 新开一份——
+        // 否则模型连续 open 十次就会开十几个实例，界面对不上号
+        if (focusOnDisplay(app, r.displayId) == packageName) {
+            ServerProcessManager.appLog("虚拟屏：$packageName 已在后台屏上，直接使用")
+            return true to "已打开 $packageName（它就在后台屏上）"
+        }
         val front = foregroundPackage(app)
         val duplicate = front == packageName
         if (duplicate) {
@@ -1243,19 +1266,27 @@ object VirtualScreen {
             delay(450)
             readScreenText(context)
             ref = editableRef(context) ?: ref
-            // 直接设值会**覆盖**已有内容（首页输入框常带默认热搜词，不清掉就会拼在一起）
+            // 直接设值对 RN/自绘输入框经常无效（写进去也不触发状态），所以**必须回读屏验证**；
+            // 没生效就换剪贴板粘贴再验，两条路都不行就如实说，别报假成功
             val typed = A11yBridge.setTextOnFocused(r.displayId, k)
                 ?: A11yBridge.setTextOnRef(r.displayId, ref, k)
             if (typed.contains("已")) {
-                delay(400)
-                return typed + " → " + triggerSearch(context, r.displayId)
+                delay(450)
+                val after = readScreenText(context).orEmpty()
+                if (after.contains(k, ignoreCase = true)) {
+                    return typed + " → " + triggerSearch(context, r.displayId)
+                }
+                ServerProcessManager.appLog("虚拟屏：SET_TEXT 写了但屏上没出现「$k」，改走剪贴板")
             }
-            // 设值不行：清空后走剪贴板粘贴
             A11yBridge.clearRef(r.displayId, ref)
             delay(200)
             val pasted = inputText(context, k)
-            delay(500)
-            return pasted + " → " + triggerSearch(context, r.displayId)
+            delay(650)
+            val afterPaste = readScreenText(context).orEmpty()
+            if (afterPaste.contains(k, ignoreCase = true)) {
+                return pasted + " → " + triggerSearch(context, r.displayId)
+            }
+            return "$typed；$pasted —— 但屏上都没看到「$k」，输入可能没生效（这个 App 的输入框可能不支持无障碍写入）"
         }
 
         // 完全找不到输入框：点开搜索入口后直接粘贴（此时输入框通常已聚焦）
