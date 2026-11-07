@@ -498,7 +498,16 @@ object VirtualScreen {
             if (attempt < 3) delay(500)
         }
         val ocr = readScreen(context)?.let { describeLines(it, 40) }
-        return ocr
+        if (ocr == null) {
+            // 无障碍和 OCR 都没拿到东西：把当时的画面留下来，否则只能靠猜
+            val saved = runCatching { saveShot(context) }.getOrNull()
+            ServerProcessManager.appLog(
+                "读屏（屏 ${r.displayId}）：无障碍没读到、OCR 也没有内容" +
+                        (if (saved != null) "；当时的画面已存到 $saved" else "；截图也没取到")
+            )
+        }
+        return ocr ?: "（这块屏目前读不到内容：无障碍没有可读元素、截图里也没有文字。" +
+                "如果目标是某个 App，先 open 重新打开它一次；还不行就 back 退回上一页再看）"
     }
 
     /**

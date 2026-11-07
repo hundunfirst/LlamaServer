@@ -96,7 +96,21 @@ object A11yBridge {
                 runCatching { it.getDisplayId() }.getOrDefault(0) == displayId
             }.sortedByDescending { it.layer }
         }.getOrDefault(emptyList())
-        if (wins.isEmpty()) return "（这块屏上没有可读的窗口：App 可能还没打开，或界面在加载）"
+        if (wins.isEmpty()) {
+            // 留证据：到底是"一块窗口都没有"，还是"有窗口但读不到内容"
+            val all: List<android.view.accessibility.AccessibilityWindowInfo> =
+                runCatching { svc.windows }.getOrNull() ?: emptyList()
+            ServerProcessManager.appLog(
+                "读屏（屏 $displayId）：没有该屏的窗口；当前共有 ${all.size} 个窗口，" +
+                        all.joinToString(";") {
+                            runCatching {
+                                "display=${it.getDisplayId()} type=${it.type} " +
+                                        "root=${if (it.root == null) "null" else "ok"}"
+                            }.getOrDefault("?")
+                        }
+            )
+            return "（这块屏上没有可读的窗口：App 可能还没打开，或界面在加载）"
+        }
 
         val items = mutableListOf<Item>()
         for (w in wins) {
@@ -113,7 +127,15 @@ object A11yBridge {
             items.sortedBy { it.rect.top }
         }
         val sorted = ordered.take(limit)
-        if (sorted.isEmpty()) return "（窗口在，但没有读到文字或可点元素）"
+        if (sorted.isEmpty()) {
+            ServerProcessManager.appLog(
+                "读屏（屏 $displayId）：窗口有 ${wins.size} 个，但没读到文字或可点元素；" +
+                        "root 状态=" + wins.joinToString(";") {
+                            runCatching { if (it.root == null) "null" else "ok" }.getOrDefault("?")
+                        }
+            )
+            return "（窗口在，但没有读到文字或可点元素：可能整屏是图片、或界面还在加载）"
+        }
 
         snapshot = sorted.map { it.node }
         snapshotDisplay = displayId
