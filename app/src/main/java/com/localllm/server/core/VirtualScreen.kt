@@ -262,6 +262,7 @@ object VirtualScreen {
         )
         if (ok) {
             lastPackage = packageName
+            appStuckOnMain = false
             ServerProcessManager.appLog("虚拟屏：已把 $packageName 开到屏 ${r.displayId}")
             return true to if (duplicate) {
                 "已打开 $packageName（主屏那份也在，这是另开的一份实例；操作的是后台这份）"
@@ -511,6 +512,13 @@ object VirtualScreen {
      * 读屏时发现这块屏上没有窗口时的补救：
      * 屏已经不存在就重建；屏还在但 App 没跟过来，就把上次那个 App 重新开上来。
      */
+    /**
+     * 目标 App 正开在用户主屏上：这种时候后台屏**打不开它**（系统会把 intent 交给前台实例），
+     * 反复重开只会变成死循环（真机日志里刷了一整屏）。此时如实告诉模型改走别的路。
+     */
+    @Volatile
+    private var appStuckOnMain = false
+
     private suspend fun recoverScreen(app: Context) {
         val r = ready ?: return
         if (!displayExists(app, r.displayId)) {
@@ -524,6 +532,11 @@ object VirtualScreen {
             return
         }
         val pkg = lastPackage ?: foregroundPackage(app)
+        if (pkg != null && foregroundPackage(app) == pkg) {
+            appStuckOnMain = true
+            ServerProcessManager.appLog("虚拟屏：$pkg 已在主屏前台，后台屏打不开它；改走主屏/adb")
+            return
+        }
         if (pkg != null && pkg != app.packageName) {
             ServerProcessManager.appLog("虚拟屏：屏上没有 App 的窗口，把 $pkg 重新开上来")
             startAppDetail(app, pkg)
@@ -542,6 +555,11 @@ object VirtualScreen {
 
     suspend fun readScreenText(context: Context): String? {
         val r = ready ?: return null
+        if (appStuckOnMain) {
+            return "（这个 App 正开在用户的主屏上，后台屏打不开第二份。" +
+                    "别再用 open 重试——直接告诉用户：要么先把这个 App 从后台清掉，" +
+                    "要么这一屏就用 adb 命令处理（不需要界面的活都能干））"
+        }
         var triedReopen = false
         // 给窗口一点时间挂上来：刚打开 App 时节点树还是空的，
         // 立刻退 OCR 就会让后面所有点击都退化回"猜坐标"（真机上就是这么绕的）
