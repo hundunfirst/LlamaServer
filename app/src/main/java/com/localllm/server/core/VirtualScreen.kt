@@ -259,6 +259,7 @@ object VirtualScreen {
                     "-n ${component.flattenToShortString()}", 30_000
         )
         if (ok) {
+            lastPackage = packageName
             ServerProcessManager.appLog("虚拟屏：已把 $packageName 开到屏 ${r.displayId}")
             return true to "已打开 $packageName"
         }
@@ -482,8 +483,19 @@ object VirtualScreen {
     @Volatile
     var compactReads: Boolean = false
 
+    /**
+     * 上一次开在这块屏上的 App。
+     *
+     * 用处：屏会被闲置收掉再重建（屏号随之变化），而 App 还挂在旧屏上没跟过来——
+     * 这时读屏只会得到「没有该屏的窗口」，模型对着一块空屏反复读、反复点。
+     * 记下它是为了在发现空屏时自动重新开上来。
+     */
+    @Volatile
+    private var lastPackage: String? = null
+
     suspend fun readScreenText(context: Context): String? {
         val r = ready ?: return null
+        var triedReopen = false
         // 给窗口一点时间挂上来：刚打开 App 时节点树还是空的，
         // 立刻退 OCR 就会让后面所有点击都退化回"猜坐标"（真机上就是这么绕的）
         repeat(4) { attempt ->
@@ -495,6 +507,16 @@ object VirtualScreen {
                 )
             }.getOrNull()
             if (a11y != null && !a11y.startsWith("（") && !a11y.startsWith("错误")) return a11y
+            // 第一次就发现"这块屏上没窗口"：多半是屏重建了、App 没跟过来，自动补开一次
+            if (!triedReopen && a11y != null && a11y.contains("没有该屏的窗口")) {
+                triedReopen = true
+                val pkg = lastPackage ?: foregroundPackage(context.applicationContext)
+                if (pkg != null && pkg != context.packageName) {
+                    ServerProcessManager.appLog("虚拟屏：屏上没有 App 的窗口，自动把 $pkg 重新开上来")
+                    startAppDetail(context.applicationContext, pkg)
+                    delay(1_500)
+                }
+            }
             if (attempt < 3) delay(500)
         }
         val ocr = readScreen(context)?.let { describeLines(it, 40) }
