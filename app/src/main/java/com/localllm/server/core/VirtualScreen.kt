@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 /**
@@ -630,6 +631,16 @@ object VirtualScreen {
         val cmd = raw.trim()
         if (cmd.isEmpty()) return "错误：指令为空"
         val app = context.applicationContext
+        // 简版入口以前假设屏已经建好，于是第一句 `open ...` 就撞上「后台屏没准备好」直接结束。
+        // 现在这里先自己把屏建起来（最多 15 秒），建不起来再说。
+        if (ready == null) {
+            val built = withTimeoutOrNull(15_000) { ensure(context) }
+            if (built == null) {
+                val why = lastError ?: "建屏超时"
+                return "错误：后台屏没建起来（$why）。\n" +
+                        "改用 adb 命令试试（不需要界面的活都能干），或者把这个情况告诉用户：需要检查无线调试是否连着。"
+            }
+        }
         val lower = cmd.lowercase()
         val rest = { prefix: Int -> cmd.substring(prefix).trim() }
         return when {
