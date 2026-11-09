@@ -1,4 +1,4 @@
-# build-engine.ps1 — 一键构建双引擎（CPU + OpenCL）并按运行时布局入包
+﻿# build-engine.ps1 — 一键构建双引擎（CPU + OpenCL）并按运行时布局入包
 # 用法: .\scripts\build-engine.ps1
 # 说明: 见 docs/ENVIRONMENT.md §五；16KB 页对齐已在链接参数中（发布硬性要求）
 param()
