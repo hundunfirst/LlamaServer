@@ -155,11 +155,42 @@ docker tag  ghcr.nju.edu.cn/snapdragon-toolchain/arm64-android:v0.8 `
 
 ### 产物集合的变化（§1.2 核对清单要跟上）
 
-- **cpu**：多出 `llama-cli` + `libllama-cli-impl.so`（~210 KB，App 不用，已剔除）。
-  build.py 的拷贝是「bin 目录全搬」，所以每轮升级后都要确认这两个没有回流。
+- **cpu**：多出 `llama-cli` + `libllama-cli-impl.so`（~205 KB，App 不用）。构建的 bin 是「整目录全搬」，
+  所以每轮升级后都要确认这两个没有回流——`scripts/build-engine.ps1` 已加剔除（2026-11-09），
+  手工按 §1.2 拷贝时仍要自己删。
 - **htp**：多出 `libggml-htp-v85.so`（871 KB）。`assemble-htp-engine.ps1` 已支持
   `-InstallDir` 指定构建目录，并把 v85 skel 设为可选（老构建没有就不报错）。
 - 两者结构不变：`llama-server` 仍是 ~7KB 壳，NEEDED 闭包与 16KB 对齐（LOAD align `0x4000`）复核过。
 
 **版本号**：`BinaryInstaller.VERSION` 8 → 10（9 是中间只升 prism 那次）。
+
+## 八、2026-11-09 评估：v0.9.0 已出，决定暂不升级
+
+**结论：暂不升，继续锁 `4e910a86e`（`BinaryInstaller.VERSION` 保持 11）。**
+理由是收益不足以覆盖「四套引擎重编 + 真机回归 + 补丁语义复核」的总成本，不是版本本身有问题。
+
+上游状态（核对日 2026-11-09）：
+
+| 组件 | 当前锁定 | 上游最新 | 是否要动 |
+|---|---|---|---|
+| llama.cpp | `4e910a86e`（v0.8.0 后 75 提交，2026-11-02） | tag `v0.9.0` = `cd959bae9`（2026-11-04）；nightly `b12223` | 暂不升；要升就升 tag，不追 nightly |
+| htp 工具链镜像 | `snapdragon-toolchain/arm64-android:v0.8` | GHCR 最高仍 `v0.8`，v0.9.0 的 `scripts/snapdragon/build.py` 默认也是 `v0.8` | **不用换** |
+| prism 引擎 | `prism-b10826-c9c34bc` | `prism-b12128-d7b2896`（2026-10-31，asset 名规则未变） | 低优先，单独升 |
+| OpenCL-Headers / ICD-Loader | `30bc20a` / `5192c84` | `82f6031` / `007c8e8` | 不用动（纯构建期桩） |
+
+当时核对过的三件事（真要升时不必重做，但建议复验）：
+
+1. **CLI 契约无变化**：v0.9.0 的 `common/arg.cpp` 与本地锁定的版本，438 个 `--xxx` 参数逐个比对，增删为 0
+   → `ServerProcessManager.buildCommand()` 不用改。
+2. **两个自研补丁文本上可直接应用**：把 v0.9.0 源码树展开后 `git apply --check`，0001 / 0002 都是 exit 0。
+   **坑**：本地 `scripts/patches/*.patch` 是 CRLF，直接 `git apply` 会假报「patch does not apply」，
+   转成 LF 才验得准（CI 是 Linux/LF，不受影响）。注意 #31321 改过 `llama-model-loader.cpp`，
+   应用后仍要验证 `LLAMA_LAZY_TENSORS` 真的生效（日志里找 `parse_forced_patterns: … 生效`）。
+3. **网络**：本机 `github.com:443` 不通（`git fetch origin` 直接 reset/超时），但 `api.github.com`
+   与 `codeload.github.com` 可用 → 取源码走 `codeload` 的 tarball 或代理，别指望 `git fetch`。
+
+v0.9.0 里与我们相关的点（供下次决策复盘）：Hexagon 新增 `conv2d` / `UPSCALE` / `TOP_K_MASK` /
+`LIGHTNING_INDEXER` / `DSV4_HC_*` 等算子与 tiled HVX permute、IM2COL 并行、DMA stride>24bit 修复；
+OpenCL 侧 Adreno `q2_0` GEMV 与 iq1/iq2/iq3/iq4_xs 初支持；通用侧 bf16 修复、loader 复用 staging buffer、
+共享 KV 旋转修复、`flash_attn_ext_rows`、MTP 投机 checkpoint。
 

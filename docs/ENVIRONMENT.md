@@ -41,7 +41,7 @@
 | **llama.cpp** | **4e910a86e**（master，2026-11-02；基线为 tag v0.8.0 + 75 个提交） | 浅克隆于 `llama.cpp/`，checkout 到该 commit（上游尚未发新 tag）；再加 `scripts/patches/` 两个自有补丁（见下） |
 | OpenCL-Headers | 30bc20a | 浅克隆于 `opencl-deps/OpenCL-Headers` |
 | OpenCL-ICD-Loader | 5192c84 | 浅克隆于 `opencl-deps/OpenCL-ICD-Loader`，NDK 交叉编译产出 `libOpenCL.so`（仅链接用，不进 APK） |
-| 引擎产物 | strip 后：cpu 14.7MB（8 个文件）/ opencl 18.2MB（9 个文件） | 见下方构建命令，`scripts/build-engine.ps1` 同步产出到 `app/src/main/assets/engines/{cpu,opencl}` |
+| 引擎产物 | strip 后（2026-11-09 实测）：cpu 15.6MB（8 个文件）/ opencl 19.9MB（9 个文件）/ htp 22.7MB（15 个）/ prism 20.5MB（9 个） | 见下方构建命令，`scripts/build-engine.ps1` 同步产出到 `app/src/main/assets/engines/{cpu,opencl}`；**cpu 不应含 `llama-cli*` / `libllama-cli-impl.so`**，脚本会自动剔除（2026-11-02 那次漏过，白进包 205KB） |
 
 > llama.cpp 无独立版本号，**以 commit 为准**；升级后回填此表。
 >
