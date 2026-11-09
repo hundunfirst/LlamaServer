@@ -1,4 +1,4 @@
-﻿# build-engine.ps1 — 一键构建双引擎（CPU + OpenCL）并按运行时布局入包
+# build-engine.ps1 — 一键构建双引擎（CPU + OpenCL）并按运行时布局入包
 # 用法: .\scripts\build-engine.ps1
 # 说明: 见 docs/ENVIRONMENT.md §五；16KB 页对齐已在链接参数中（发布硬性要求）
 param()
@@ -65,6 +65,9 @@ function Build-Engine {
     if (Test-Path $dest) { Remove-Item "$dest\*" -Force -ErrorAction SilentlyContinue }
     else { New-Item -ItemType Directory -Force $dest | Out-Null }
     Copy-Item "$src\*" $dest -Force
+    # v0.8.0 起 cpu 构建额外产出 llama-cli + libllama-cli-impl.so（App 不用，约 205KB）。
+    # bin 是「全搬」，不在这里剔除就会进包——2026-11-02 那次就漏了。见 docs/UPGRADING_LLAMA.md §七。
+    Remove-Item "$dest\llama-cli","$dest\libllama-cli-impl.so" -Force -ErrorAction SilentlyContinue
     # 与现网一致：不打包多指令集变体（armv8.6/armv9 在目标机无增益，见会话记录）
     Remove-Item "$dest\libggml-cpu-android_armv8.6*" -Force -ErrorAction SilentlyContinue
     Remove-Item "$dest\libggml-cpu-android_armv9*" -Force -ErrorAction SilentlyContinue
