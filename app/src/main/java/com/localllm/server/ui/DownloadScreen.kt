@@ -21,6 +21,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -53,6 +54,7 @@ fun DownloadScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val repoFiles by vm.repoFiles.collectAsStateWithLifecycle()
     val searching by vm.searching.collectAsStateWithLifecycle()
     val downloads by vm.downloads.collectAsStateWithLifecycle()
+    val source by vm.modelSource.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     var query by remember { mutableStateOf("") }
@@ -118,7 +120,20 @@ fun DownloadScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     }
 
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
-        Text("在线下载（hf-mirror.com）", style = MaterialTheme.typography.headlineSmall)
+        Text("在线下载", style = MaterialTheme.typography.headlineSmall)
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("来源", style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.width(8.dp))
+                com.localllm.server.core.ModelCatalog.Source.entries.forEach { src ->
+                    FilterChip(
+                        selected = source == src,
+                        onClick = { vm.setModelSource(src) },
+                        label = { Text(src.label, style = MaterialTheme.typography.labelSmall) }
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
+            }
 
         Card(
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -203,10 +218,27 @@ fun DownloadScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 onValueChange = { query = it },
                 modifier = Modifier.weight(1f),
                 singleLine = true,
-                label = { Text("搜索模型（如 Qwen2.5-VL）") }
+                label = {
+                    Text(
+                        if (source == com.localllm.server.core.ModelCatalog.Source.MODEL_SCOPE)
+                            "仓库名或模型页链接（如 Qwen/Qwen2.5-7B-Instruct-GGUF）"
+                        else "搜索模型（如 Qwen2.5-VL）"
+                    )
+                }
             )
             Spacer(Modifier.width(8.dp))
-            Button(onClick = { vm.searchRepos(query) }, enabled = !searching) {
+            Button(onClick = {
+                if (source == com.localllm.server.core.ModelCatalog.Source.MODEL_SCOPE) {
+                    val repo = com.localllm.server.core.ModelCatalog.normalizeRepo(source, query)
+                    if (repo == null) {
+                        android.widget.Toast.makeText(
+                            context,
+                            "魔搭不支持关键词搜索：填仓库名或粘贴模型页链接，如 Qwen/Qwen2.5-7B-Instruct-GGUF",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    } else vm.openRepo(repo)
+                } else vm.searchRepos(query)
+            }, enabled = !searching) {
                 if (searching) {
                     CircularProgressIndicator(modifier = Modifier.width(16.dp), strokeWidth = 2.dp)
                 } else {

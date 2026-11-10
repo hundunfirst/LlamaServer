@@ -133,6 +133,11 @@ object AppSettings {
         chatCloudModel = p.model.trim()
     }
 
+    /** 模型下载来源：MODEL_SCOPE（魔搭，默认）/ HF_MIRROR */
+    var modelSource: String
+        get() = prefs.getString("model_source", "MODEL_SCOPE") ?: "MODEL_SCOPE"
+        set(value) = prefs.edit().putString("model_source", value).apply()
+
     var port: Int
         get() = prefs.getInt("port", 8080)
         set(value) = prefs.edit().putInt("port", value).apply()

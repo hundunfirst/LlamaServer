@@ -119,6 +119,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         "Qwen/Qwen2.5-0.5B-Instruct-GGUF"
     )
 
+    /**
+     * 模型下载来源：默认魔搭（国内直连快），可切到 hf-mirror.com。
+     * 两者能力不对等——魔搭的公开搜索接口已 404，只能按仓库名/模型页链接直连，
+     * 所以魔搭模式下 [searchRepos] 不生效，界面改走 [openRepo]。
+     */
+    private val _source = MutableStateFlow(
+        com.localllm.server.core.ModelCatalog.Source.fromName(
+            com.localllm.server.core.AppSettings.modelSource
+        )
+    )
+    val modelSource: StateFlow<com.localllm.server.core.ModelCatalog.Source> = _source.asStateFlow()
+
+    fun setModelSource(src: com.localllm.server.core.ModelCatalog.Source) {
+        _source.value = src
+        com.localllm.server.core.AppSettings.modelSource = src.name
+    }
+
     private val _searchResults = MutableStateFlow<List<HfMirrorClient.RepoInfo>>(emptyList())
     val searchResults: StateFlow<List<HfMirrorClient.RepoInfo>> = _searchResults.asStateFlow()
 
@@ -158,7 +175,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (query.isBlank() || _searching.value) return
         _searching.value = true
         viewModelScope.launch {
-            runCatching { HfMirrorClient.searchRepos(query) }
+            val src = _source.value
+            val found = com.localllm.server.core.ModelCatalog.search(src, query)
+            if (found == null) {
+                _actionError.value = "魔搭不支持关键词搜索，直接填仓库名或粘贴模型页链接（如 Qwen/Qwen2.5-7B-Instruct-GGUF）"
+                _searching.value = false
+                return@launch
+            }
+            runCatching { found.map { HfMirrorClient.RepoInfo(it.id, it.downloads, it.likes, it.pipelineTag, it.tags) } }
                 .onSuccess { list ->
                     if (list.isEmpty()) {
                         _actionError.value = "未找到相关仓库，已恢复推荐列表"
@@ -182,7 +206,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _browsingRepo.value = repoId
         _repoFiles.value = emptyList()
         viewModelScope.launch {
-            runCatching { HfMirrorClient.listGgufFiles(repoId) }
+            val src = _source.value
+            runCatching {
+                com.localllm.server.core.ModelCatalog.listFiles(src, repoId)
+                    ?.map { HfMirrorClient.FileInfo(it.path, it.sizeBytes) }
+                    ?: throw IllegalStateException("读不到这个仓库的文件（仓库名不对，或该来源没有这个模型）")
+            }
                 .onSuccess { _repoFiles.value = it }
                 .onFailure {
                     _actionError.value = "读取仓库文件失败：${it.message}"
@@ -214,7 +243,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val fileName = filePath.substringAfterLast('/')
         val dir = App.modelRepository.dirFor(kind)
         val target = resolveTarget(dir, fileName)
-        val url = HfMirrorClient.resolveUrl(repoId, filePath)
+        val url = com.localllm.server.core.ModelCatalog.resolveUrl(_source.value, repoId, filePath)
         writeMeta(target, repoId, filePath, kind)
         val startBytes = maxOf(
             File(dir, target.name + ".part").length(),
@@ -240,7 +269,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (it.id == id) it.copy(paused = false, speedBps = 0, readBytes = startBytes) else it
         }
         persistDownloads()
-        downloadJobs[id] = beginDownload(id, target, HfMirrorClient.resolveUrl(d.repoId, d.filePath), d.kind)
+        downloadJobs[id] = beginDownload(id, target, com.localllm.server.core.ModelCatalog.resolveUrl(_source.value, d.repoId, d.filePath), d.kind)
     }
 
     private fun _streamingActive(id: Long) = downloadJobs[id]?.isActive == true
